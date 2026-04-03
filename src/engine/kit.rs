@@ -1,3 +1,4 @@
+use crate::analysis::library::SampleLibrary;
 use crate::util::history::PadSnapshot;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -140,6 +141,56 @@ impl DrumKit {
             pad.pitch = snap.pitch;
         }
     }
+
+    /// Re-roll all unlocked pads from their current category.
+    /// Preserves volume, pan, pitch.
+    pub fn dice_all(&mut self, library: &SampleLibrary) {
+        for pad in &mut self.pads {
+            if pad.locked {
+                continue;
+            }
+            if let Some(sample) = library.random_from(pad.category) {
+                pad.sample = Some(Arc::clone(&sample.data));
+                pad.sample_path = Some(sample.entry.path.to_string_lossy().to_string());
+                pad.name = sample.entry.filename.clone();
+                pad.category = sample.entry.category;
+            }
+        }
+    }
+
+    /// Re-roll one specific pad. No-op if locked or out of range.
+    /// Preserves volume, pan, pitch.
+    pub fn dice_pad(&mut self, index: usize, library: &SampleLibrary) {
+        if index >= self.pads.len() {
+            return;
+        }
+        let pad = &mut self.pads[index];
+        if pad.locked {
+            return;
+        }
+        if let Some(sample) = library.random_from(pad.category) {
+            pad.sample = Some(Arc::clone(&sample.data));
+            pad.sample_path = Some(sample.entry.path.to_string_lossy().to_string());
+            pad.name = sample.entry.filename.clone();
+            pad.category = sample.entry.category;
+        }
+    }
+
+    /// Re-roll all unlocked pads of a given category.
+    /// Preserves volume, pan, pitch.
+    pub fn dice_category(&mut self, category: SampleCategory, library: &SampleLibrary) {
+        for pad in &mut self.pads {
+            if pad.locked || pad.category != category {
+                continue;
+            }
+            if let Some(sample) = library.random_from(category) {
+                pad.sample = Some(Arc::clone(&sample.data));
+                pad.sample_path = Some(sample.entry.path.to_string_lossy().to_string());
+                pad.name = sample.entry.filename.clone();
+                pad.category = sample.entry.category;
+            }
+        }
+    }
 }
 
 impl Default for DrumKit {
@@ -151,7 +202,48 @@ impl Default for DrumKit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analysis::features::AudioFeatures;
+    use crate::analysis::library::{AnalyzedSample, SampleLibrary};
+    use crate::analysis::scanner::SampleEntry;
     use crate::util::history::PadSnapshot;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    /// Build a minimal SampleLibrary with known samples for testing.
+    fn test_library() -> SampleLibrary {
+        let mut by_category: HashMap<SampleCategory, Vec<AnalyzedSample>> = HashMap::new();
+
+        for cat in SampleCategory::all() {
+            let entry = SampleEntry {
+                path: PathBuf::from(format!("/test/{}.wav", cat.label())),
+                filename: format!("test-{}", cat.label()),
+                category: *cat,
+                folder_hint: None,
+                duration_ms: 100,
+                is_percussive: true,
+            };
+            let sample = AnalyzedSample {
+                entry,
+                features: AudioFeatures {
+                    attack_time: 0.001,
+                    decay_time: 0.05,
+                    spectral_centroid: 1000.0,
+                    spectral_flatness: 0.5,
+                    peak: 1.0,
+                    duration: 0.1,
+                    is_percussive: true,
+                },
+                data: Arc::new(vec![0.5; 4410]),
+            };
+            by_category.entry(*cat).or_default().push(sample);
+        }
+
+        SampleLibrary {
+            total: 10,
+            by_category,
+            sample_rate: 44100.0,
+        }
+    }
 
     #[test]
     fn snapshot_captures_pad_state() {
@@ -212,5 +304,102 @@ mod tests {
 
         kit.toggle_lock(0);
         assert!(!kit.pads[0].locked);
+    }
+
+    #[test]
+    fn dice_all_changes_unlocked_pads() {
+        let mut kit = DrumKit::new();
+        let lib = test_library();
+
+        kit.pads[0].category = SampleCategory::Kick;
+        kit.pads[0].name = "original".to_string();
+
+        kit.dice_all(&lib);
+
+        assert_ne!(kit.pads[0].name, "original");
+    }
+
+    #[test]
+    fn dice_all_skips_locked_pads() {
+        let mut kit = DrumKit::new();
+        let lib = test_library();
+
+        kit.pads[0].category = SampleCategory::Kick;
+        kit.pads[0].name = "locked-kick".to_string();
+        kit.pads[0].locked = true;
+
+        kit.dice_all(&lib);
+
+        assert_eq!(kit.pads[0].name, "locked-kick");
+    }
+
+    #[test]
+    fn dice_all_preserves_volume_pan_pitch() {
+        let mut kit = DrumKit::new();
+        let lib = test_library();
+
+        kit.pads[0].category = SampleCategory::Kick;
+        kit.pads[0].volume = 0.42;
+        kit.pads[0].pan = -0.7;
+        kit.pads[0].pitch = 3.5;
+
+        kit.dice_all(&lib);
+
+        assert!((kit.pads[0].volume - 0.42).abs() < 0.001);
+        assert!((kit.pads[0].pan - -0.7).abs() < 0.001);
+        assert!((kit.pads[0].pitch - 3.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn dice_pad_changes_specific_pad_only() {
+        let mut kit = DrumKit::new();
+        let lib = test_library();
+
+        kit.pads[0].category = SampleCategory::Kick;
+        kit.pads[0].name = "original-0".to_string();
+        kit.pads[1].category = SampleCategory::Snare;
+        kit.pads[1].name = "original-1".to_string();
+
+        kit.dice_pad(0, &lib);
+
+        assert_ne!(kit.pads[0].name, "original-0");
+        assert_eq!(kit.pads[1].name, "original-1");
+    }
+
+    #[test]
+    fn dice_pad_locked_is_noop() {
+        let mut kit = DrumKit::new();
+        let lib = test_library();
+
+        kit.pads[0].category = SampleCategory::Kick;
+        kit.pads[0].name = "locked".to_string();
+        kit.pads[0].locked = true;
+
+        kit.dice_pad(0, &lib);
+
+        assert_eq!(kit.pads[0].name, "locked");
+    }
+
+    #[test]
+    fn dice_category_only_affects_matching_unlocked_pads() {
+        let mut kit = DrumKit::new();
+        let lib = test_library();
+
+        kit.pads[0].category = SampleCategory::Kick;
+        kit.pads[0].name = "kick-0".to_string();
+        kit.pads[1].category = SampleCategory::Kick;
+        kit.pads[1].name = "kick-1".to_string();
+        kit.pads[1].locked = true;
+        kit.pads[2].category = SampleCategory::Snare;
+        kit.pads[2].name = "snare-2".to_string();
+
+        kit.dice_category(SampleCategory::Kick, &lib);
+
+        // Pad 0 (kick, unlocked) should change
+        assert_ne!(kit.pads[0].name, "kick-0");
+        // Pad 1 (kick, locked) should NOT change
+        assert_eq!(kit.pads[1].name, "kick-1");
+        // Pad 2 (snare) should NOT change
+        assert_eq!(kit.pads[2].name, "snare-2");
     }
 }
