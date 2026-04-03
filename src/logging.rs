@@ -64,9 +64,9 @@ pub fn init() {
         let filter = EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| {
                 if cfg!(debug_assertions) {
-                    EnvFilter::new("autokit=debug")
+                    EnvFilter::new("autokit=debug,autokit_standalone=debug")
                 } else {
-                    EnvFilter::new("autokit=info")
+                    EnvFilter::new("autokit=info,autokit_standalone=info")
                 }
             });
 

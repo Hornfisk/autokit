@@ -11,9 +11,13 @@ description = "AI-powered drum machine plugin for Linux"
 [lib]
 crate-type = ["cdylib"]
 
+[[bin]]
+name = "autokit-standalone"
+path = "src/main.rs"
+
 [dependencies]
 # Plugin framework
-nih_plug = { git = "https://github.com/robbert-vdh/nih-plug", features = ["assert_process_allocs"] }
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug", features = ["assert_process_allocs", "standalone"] }
 nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug" }
 
 # Audio
@@ -23,7 +27,7 @@ rubato = "0.16"
 # Real-time safety
 basedrop = "0.1"
 rtrb = "0.3"
-assert_no_alloc = "1.1"
+# assert_no_alloc provided by nih-plug's forked version — use nih_plug::util::permit_alloc
 
 # IPC & concurrency
 crossbeam-channel = "0.5"
@@ -37,8 +41,12 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
+# DSP analysis
+realfft = "3"
+
 # Utilities
 rand = "0.9"
+walkdir = "2"
 
 [profile.release]
 lto = "thin"

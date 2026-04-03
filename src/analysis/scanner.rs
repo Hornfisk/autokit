@@ -1,1 +1,132 @@
-// Placeholder — Phase 3 implementation
+use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
+
+use crate::engine::kit::SampleCategory;
+
+const AUDIO_EXTENSIONS: &[&str] = &["wav", "flac", "ogg"];
+const MAX_DURATION_SECS: f32 = 4.0;
+
+/// Folder name keywords that hint at a sample category.
+const FOLDER_HINTS: &[(&[&str], SampleCategory)] = &[
+    (&["kick", "kik", "kck", "bd"], SampleCategory::Kick),
+    (&["snare", "snr", "sd"], SampleCategory::Snare),
+    (&["hat", "hh", "hihat", "hi-hat", "hi_hat"], SampleCategory::Hihat),
+    (&["clap", "clp", "cp"], SampleCategory::Clap),
+    (&["tom"], SampleCategory::Tom),
+    (&["perc", "percussion"], SampleCategory::Perc),
+    (&["cymbal", "crash", "ride"], SampleCategory::Cymbal),
+    (&["bass"], SampleCategory::Bass),
+    (&["synth", "stab", "lead", "pad"], SampleCategory::Synth),
+    (&["fx", "sfx", "effect", "noise"], SampleCategory::Other),
+];
+
+/// Keywords in filename/path that suggest a loop (not a oneshot).
+const LOOP_KEYWORDS: &[&str] = &["loop", "bpm", "_lp_", "_lp.", "groove", "break"];
+
+/// A discovered sample file with metadata.
+#[derive(Debug, Clone)]
+pub struct SampleEntry {
+    pub path: PathBuf,
+    pub filename: String,
+    /// Hint from folder name, if any.
+    pub folder_hint: Option<SampleCategory>,
+    /// Set after DSP analysis.
+    pub category: SampleCategory,
+    /// Duration in milliseconds (set after loading).
+    pub duration_ms: u32,
+    /// Whether DSP analysis considers it percussive.
+    pub is_percussive: bool,
+}
+
+/// Recursively scan a folder for audio files, filtering out likely loops.
+pub fn scan_folder(root: &Path) -> Vec<SampleEntry> {
+    let mut entries = Vec::new();
+
+    for entry in WalkDir::new(root)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+
+        // Filter by audio extension
+        let ext = match path.extension().and_then(|e| e.to_str()) {
+            Some(e) => e.to_lowercase(),
+            None => continue,
+        };
+        if !AUDIO_EXTENSIONS.contains(&ext.as_str()) {
+            continue;
+        }
+
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        // Skip hidden files and macOS resource forks
+        if filename.starts_with('.') || filename.starts_with("._") {
+            continue;
+        }
+
+        // Skip files that look like loops based on filename
+        let lower_name = filename.to_lowercase();
+        if LOOP_KEYWORDS.iter().any(|kw| lower_name.contains(kw)) {
+            continue;
+        }
+
+        // Extract folder hint from parent directory names
+        let folder_hint = extract_folder_hint(path);
+
+        entries.push(SampleEntry {
+            path: path.to_path_buf(),
+            filename,
+            folder_hint,
+            category: folder_hint.unwrap_or(SampleCategory::Other),
+            duration_ms: 0,
+            is_percussive: false,
+        });
+    }
+
+    tracing::info!(
+        root = %root.display(),
+        total = entries.len(),
+        "folder scan complete"
+    );
+
+    entries
+}
+
+/// Check parent directory names for category hints.
+fn extract_folder_hint(path: &Path) -> Option<SampleCategory> {
+    // Check the last 3 path components (excluding filename) for hints
+    let components: Vec<&str> = path
+        .parent()?
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+
+    // Check from deepest to shallowest (most specific first)
+    for component in components.iter().rev().take(3) {
+        let lower = component.to_lowercase();
+        for (keywords, category) in FOLDER_HINTS {
+            for kw in *keywords {
+                if lower.contains(kw) {
+                    return Some(*category);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Filter entries by maximum duration (in samples at given sample rate).
+pub fn filter_by_duration(entries: &mut Vec<SampleEntry>, sample_rate: f32) {
+    let max_samples = (MAX_DURATION_SECS * sample_rate) as u32;
+    entries.retain(|e| e.duration_ms == 0 || e.duration_ms <= (max_samples * 1000 / sample_rate as u32));
+}
