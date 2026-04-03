@@ -1,0 +1,818 @@
+# Step Sequencer Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Add a 16-step sequencer that syncs to host transport, triggers the existing voice pool with sample-accurate timing, and supports per-step probability and swing.
+
+**Architecture:** A `Sequencer` struct in `src/engine/sequencer.rs` scans each audio buffer for step boundaries using PPQ-derived tick math, firing voices at exact sample offsets. The existing `VoicePool` gains a `start_offset` parameter so triggered voices begin playback at the correct position within the buffer.
+
+**Tech Stack:** Rust, nih-plug (Transport API), rand (probability rolls)
+
+**Spec:** `docs/superpowers/specs/2026-04-03-step-sequencer-design.md`
+
+---
+
+### Task 1: Add `start_offset` to Voice and VoicePool::trigger
+
+**Files:**
+- Modify: `src/engine/sampler.rs:14-29` (Voice struct)
+- Modify: `src/engine/sampler.rs:128` (VoicePool::trigger signature)
+- Modify: `src/engine/sampler.rs:182` (VoicePool::process)
+- Test: `src/engine/sampler.rs` (inline #[cfg(test)] module)
+
+- [ ] **Step 1: Write failing test for start_offset triggering**
+
+Add at the bottom of `src/engine/sampler.rs`:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::kit::{DrumKit, SampleCategory};
+
+    /// Build a minimal kit with one pad loaded with a known sample.
+    fn test_kit() -> DrumKit {
+        let mut kit = DrumKit::new();
+        // 8 samples of 1.0 — easy to verify in output
+        kit.pads[0].sample = Some(Arc::new(vec![1.0; 8]));
+        kit.pads[0].volume = 1.0;
+        kit.pads[0].pan = 0.0;
+        kit.pads[0].category = SampleCategory::Kick;
+        kit
+    }
+
+    #[test]
+    fn trigger_with_zero_offset_plays_from_start() {
+        let kit = test_kit();
+        let mut pool = VoicePool::new(44100.0);
+        pool.trigger(0, 1.0, &kit, 0);
+
+        let mut left = vec![0.0f32; 8];
+        let mut right = vec![0.0f32; 8];
+        pool.process(&mut left, &mut right, &kit);
+
+        // Pan center: constant-power pan gives cos(PI/4) ≈ 0.7071
+        let expected = (0.25 * std::f32::consts::PI).cos();
+        assert!((left[0] - expected).abs() < 0.001, "first sample should be non-zero");
+        assert!((left[7] - expected).abs() < 0.001, "last sample should be non-zero");
+    }
+
+    #[test]
+    fn trigger_with_offset_delays_playback() {
+        let kit = test_kit();
+        let mut pool = VoicePool::new(44100.0);
+        pool.trigger(0, 1.0, &kit, 4); // start at sample 4
+
+        let mut left = vec![0.0f32; 12];
+        let mut right = vec![0.0f32; 12];
+        pool.process(&mut left, &mut right, &kit);
+
+        // Samples 0..4 should be silent
+        for i in 0..4 {
+            assert_eq!(left[i], 0.0, "sample {i} should be silent (before offset)");
+        }
+
+        // Samples 4..12 should have audio (8 samples of the pad)
+        let expected = (0.25 * std::f32::consts::PI).cos();
+        assert!((left[4] - expected).abs() < 0.001, "sample 4 should have audio");
+    }
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cargo test --lib -- sampler::tests -v 2>&1 | tail -20`
+Expected: Compilation error — `trigger` takes 3 args but 4 were supplied.
+
+- [ ] **Step 3: Add `start_offset` field to Voice struct**
+
+In `src/engine/sampler.rs`, add a field to the `Voice` struct (after `fade_length`):
+
+```rust
+    /// Samples to skip at buffer start (for sample-accurate sequencer triggers).
+    start_offset: usize,
+```
+
+And in `Voice::new()`, initialize it:
+
+```rust
+    start_offset: 0,
+```
+
+- [ ] **Step 4: Update VoicePool::trigger to accept start_offset**
+
+Change the signature at line 128 from:
+
+```rust
+    pub fn trigger(&mut self, pad_index: usize, velocity: f32, kit: &DrumKit) {
+```
+
+to:
+
+```rust
+    pub fn trigger(&mut self, pad_index: usize, velocity: f32, kit: &DrumKit, start_offset: usize) {
+```
+
+And set `voice.start_offset = start_offset;` after `voice.fade_length = 0;` (line 158):
+
+```rust
+        voice.fade_remaining = 0;
+        voice.fade_length = 0;
+        voice.start_offset = start_offset;
+```
+
+- [ ] **Step 5: Update VoicePool::process to respect start_offset**
+
+In `VoicePool::process`, change the inner loop from:
+
+```rust
+            for (l, r) in output_left.iter_mut().zip(output_right.iter_mut()) {
+                match voice.next_sample(pan) {
+                    Some((vl, vr)) => {
+                        *l += vl;
+                        *r += vr;
+                    }
+                    None => break,
+                }
+            }
+```
+
+to:
+
+```rust
+            for (i, (l, r)) in output_left.iter_mut().zip(output_right.iter_mut()).enumerate() {
+                if i < voice.start_offset {
+                    continue;
+                }
+                match voice.next_sample(pan) {
+                    Some((vl, vr)) => {
+                        *l += vl;
+                        *r += vr;
+                    }
+                    None => break,
+                }
+            }
+```
+
+- [ ] **Step 6: Fix existing trigger call sites**
+
+In `src/plugin.rs`, the MIDI trigger call at line 219:
+
+```rust
+                    voices.trigger(pad_idx, velocity, &self.kit);
+```
+
+Change to:
+
+```rust
+                    voices.trigger(pad_idx, velocity, &self.kit, 0);
+```
+
+- [ ] **Step 7: Run tests to verify they pass**
+
+Run: `cargo test --lib -- sampler::tests -v 2>&1 | tail -20`
+Expected: Both tests PASS.
+
+- [ ] **Step 8: Run full build check**
+
+Run: `cargo check 2>&1 | tail -10`
+Expected: Compiles with existing warnings only (theme.rs unused constants).
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/engine/sampler.rs src/plugin.rs
+git commit -m "feat(sampler): add start_offset to VoicePool::trigger for sample-accurate timing"
+```
+
+---
+
+### Task 2: Create Sequencer data model
+
+**Files:**
+- Create: `src/engine/sequencer.rs`
+- Modify: `src/lib.rs:7-9` (add `pub mod sequencer` to engine module)
+
+- [ ] **Step 1: Write failing test for sequencer data model**
+
+Create `src/engine/sequencer.rs` with only tests:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_sequencer_has_16_lanes_with_16_steps_each() {
+        let seq = Sequencer::new();
+        assert_eq!(seq.lanes.len(), 16);
+        for (i, lane) in seq.lanes.iter().enumerate() {
+            assert_eq!(lane.pad_index, i);
+            assert_eq!(lane.steps.len(), 16);
+            assert!(!lane.muted);
+            for step in &lane.steps {
+                assert!(!step.enabled);
+                assert!((step.velocity - 0.8).abs() < 0.001);
+                assert!((step.probability - 1.0).abs() < 0.001);
+            }
+        }
+    }
+
+    #[test]
+    fn default_swing_is_zero() {
+        let seq = Sequencer::new();
+        assert!((seq.swing - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn step_duration_at_120bpm_44100hz() {
+        let seq = Sequencer::new();
+        // At 120 BPM: one quarter note = 0.5s = 22050 samples
+        // One sixteenth = 22050 / 4 = 5512.5
+        let dur = seq.step_duration_samples(0, 120.0, 44100.0);
+        assert!((dur - 5512.5).abs() < 0.1);
+    }
+
+    #[test]
+    fn swing_lengthens_even_steps_shortens_odd() {
+        let mut seq = Sequencer::new();
+        seq.swing = 0.5;
+        let base = 5512.5; // 120 BPM, 44100 Hz
+        let swing_offset = 0.5 * base * 0.5; // 1378.125
+
+        let even_dur = seq.step_duration_samples(0, 120.0, 44100.0);
+        let odd_dur = seq.step_duration_samples(1, 120.0, 44100.0);
+
+        assert!((even_dur - (base + swing_offset)).abs() < 0.1);
+        assert!((odd_dur - (base - swing_offset)).abs() < 0.1);
+    }
+}
+```
+
+- [ ] **Step 2: Add module declaration to lib.rs**
+
+In `src/lib.rs`, change:
+
+```rust
+mod engine {
+    pub mod kit;
+    pub mod sampler;
+}
+```
+
+to:
+
+```rust
+mod engine {
+    pub mod kit;
+    pub mod sampler;
+    pub mod sequencer;
+}
+```
+
+- [ ] **Step 3: Run test to verify it fails**
+
+Run: `cargo test --lib -- sequencer::tests 2>&1 | tail -20`
+Expected: Compilation error — `Sequencer` not found.
+
+- [ ] **Step 4: Implement data model structs**
+
+Add above the `#[cfg(test)]` module in `src/engine/sequencer.rs`:
+
+```rust
+/// A single step in the sequencer.
+#[derive(Clone, Copy)]
+pub struct Step {
+    pub enabled: bool,
+    pub velocity: f32,
+    pub probability: f32,
+}
+
+impl Default for Step {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            velocity: 0.8,
+            probability: 1.0,
+        }
+    }
+}
+
+/// One lane = one pad's 16-step sequence.
+pub struct Lane {
+    pub pad_index: usize,
+    pub steps: [Step; 16],
+    pub muted: bool,
+}
+
+impl Lane {
+    pub fn new(pad_index: usize) -> Self {
+        Self {
+            pad_index,
+            steps: [Step::default(); 16],
+            muted: false,
+        }
+    }
+}
+
+/// The 16-lane, 16-step sequencer.
+pub struct Sequencer {
+    pub lanes: Vec<Lane>,
+    pub swing: f32,
+    playing: bool,
+    current_step: usize,
+    tick_accumulator: f64,
+    last_pos_beats: f64,
+}
+
+impl Sequencer {
+    pub fn new() -> Self {
+        Self {
+            lanes: (0..16).map(Lane::new).collect(),
+            swing: 0.0,
+            playing: false,
+            current_step: 0,
+            tick_accumulator: 0.0,
+            last_pos_beats: 0.0,
+        }
+    }
+
+    /// Compute duration of a step in samples, accounting for swing.
+    /// Even steps (0,2,4,...) are lengthened, odd steps (1,3,5,...) are shortened.
+    pub fn step_duration_samples(&self, step: usize, tempo: f64, sample_rate: f32) -> f64 {
+        let base = sample_rate as f64 * 60.0 / tempo / 4.0;
+        let swing_offset = self.swing as f64 * base * 0.5;
+        if step % 2 == 0 {
+            base + swing_offset
+        } else {
+            base - swing_offset
+        }
+    }
+}
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `cargo test --lib -- sequencer::tests -v 2>&1 | tail -20`
+Expected: All 4 tests PASS.
+
+- [ ] **Step 6: Run full build check**
+
+Run: `cargo check 2>&1 | tail -10`
+Expected: Compiles (warnings about unused fields are expected at this stage).
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/engine/sequencer.rs src/lib.rs
+git commit -m "feat(sequencer): add Step, Lane, Sequencer data model with swing math"
+```
+
+---
+
+### Task 3: Implement sequencer step scanning and voice triggering
+
+**Files:**
+- Modify: `src/engine/sequencer.rs` (add `process` method)
+
+- [ ] **Step 1: Write failing test for step scanning**
+
+Add to the `tests` module in `src/engine/sequencer.rs`:
+
+```rust
+    use crate::engine::kit::DrumKit;
+    use crate::engine::sampler::VoicePool;
+    use std::sync::Arc;
+
+    /// Helper: create a kit with all 16 pads loaded (1.0 samples).
+    fn test_kit() -> DrumKit {
+        let mut kit = DrumKit::new();
+        for pad in &mut kit.pads {
+            pad.sample = Some(Arc::new(vec![1.0; 1024]));
+            pad.volume = 1.0;
+        }
+        kit
+    }
+
+    #[test]
+    fn process_triggers_enabled_steps_at_correct_positions() {
+        let mut seq = Sequencer::new();
+        // Enable step 0 on lane 0 (kick)
+        seq.lanes[0].steps[0].enabled = true;
+
+        let kit = test_kit();
+        let mut voices = VoicePool::new(44100.0);
+
+        // Simulate: host at beat 0.0, playing, 120 BPM
+        // Step 0 should fire immediately (at sample offset 0)
+        let triggers = seq.process_buffer(
+            512,       // buffer_len
+            true,      // host playing
+            Some(120.0), // tempo
+            Some(0.0),   // pos_beats (beat 0 = step 0)
+            44100.0,
+            &mut voices,
+            &kit,
+        );
+
+        assert!(triggers > 0, "should have triggered at least one voice");
+        assert!(voices.active_count() > 0, "voice pool should have active voices");
+    }
+
+    #[test]
+    fn muted_lane_does_not_trigger() {
+        let mut seq = Sequencer::new();
+        seq.lanes[0].steps[0].enabled = true;
+        seq.lanes[0].muted = true;
+
+        let kit = test_kit();
+        let mut voices = VoicePool::new(44100.0);
+
+        let triggers = seq.process_buffer(
+            512, true, Some(120.0), Some(0.0), 44100.0,
+            &mut voices, &kit,
+        );
+
+        assert_eq!(triggers, 0, "muted lane should not trigger");
+        assert_eq!(voices.active_count(), 0);
+    }
+
+    #[test]
+    fn probability_zero_never_triggers() {
+        let mut seq = Sequencer::new();
+        seq.lanes[0].steps[0].enabled = true;
+        seq.lanes[0].steps[0].probability = 0.0;
+
+        let kit = test_kit();
+        let mut voices = VoicePool::new(44100.0);
+
+        // Run it several times — should never trigger
+        for beat in 0..10 {
+            let triggers = seq.process_buffer(
+                512, true, Some(120.0), Some(beat as f64 * 4.0), 44100.0,
+                &mut voices, &kit,
+            );
+            // Reset voices for next iteration
+            if triggers > 0 {
+                panic!("probability 0.0 should never trigger (beat {beat})");
+            }
+        }
+    }
+
+    #[test]
+    fn no_trigger_when_host_stopped() {
+        let mut seq = Sequencer::new();
+        seq.lanes[0].steps[0].enabled = true;
+
+        let kit = test_kit();
+        let mut voices = VoicePool::new(44100.0);
+
+        let triggers = seq.process_buffer(
+            512, false, Some(120.0), Some(0.0), 44100.0,
+            &mut voices, &kit,
+        );
+
+        assert_eq!(triggers, 0, "should not trigger when host is stopped");
+    }
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cargo test --lib -- sequencer::tests 2>&1 | tail -20`
+Expected: Compilation error — `process_buffer` method not found.
+
+- [ ] **Step 3: Implement process_buffer method**
+
+Add to the `impl Sequencer` block in `src/engine/sequencer.rs`:
+
+```rust
+    /// Process one audio buffer. Scans for step boundaries, triggers voices.
+    /// Returns the number of voices triggered (useful for testing/debug).
+    pub fn process_buffer(
+        &mut self,
+        buffer_len: usize,
+        host_playing: bool,
+        tempo: Option<f64>,
+        pos_beats: Option<f64>,
+        sample_rate: f32,
+        voices: &mut VoicePool,
+        kit: &DrumKit,
+    ) -> usize {
+        let tempo = match (host_playing, tempo) {
+            (true, Some(t)) if t > 0.0 => t,
+            _ => {
+                self.playing = false;
+                return 0;
+            }
+        };
+
+        // Sync to host position
+        let mut fire_immediately = false;
+        if let Some(beats) = pos_beats {
+            let sixteenths = beats * 4.0;
+            let host_step = ((sixteenths.floor() as usize) % 16) as usize;
+            let frac = sixteenths.fract();
+
+            // Detect jump: if host position doesn't match our expectation, resync
+            let expected_beats = self.last_pos_beats
+                + (self.tick_accumulator / sample_rate as f64) * (tempo / 60.0);
+            let drift = (beats - expected_beats).abs();
+
+            if !self.playing || drift > 0.01 {
+                // Resync: snap to host position
+                self.current_step = host_step;
+                let step_dur = self.step_duration_samples(host_step, tempo, sample_rate);
+                self.tick_accumulator = frac * step_dur;
+                // If we landed exactly on a step boundary, fire it now
+                if frac < 0.001 {
+                    fire_immediately = true;
+                }
+            }
+
+            self.last_pos_beats = beats;
+        }
+
+        self.playing = true;
+        let mut triggered = 0usize;
+
+        // Fire current step immediately if we just synced to a step boundary
+        if fire_immediately {
+            triggered += self.fire_step(0, voices, kit);
+        }
+
+        for sample_offset in 0..buffer_len {
+            self.tick_accumulator += 1.0;
+            let step_dur = self.step_duration_samples(self.current_step, tempo, sample_rate);
+
+            if self.tick_accumulator >= step_dur {
+                self.tick_accumulator -= step_dur;
+                self.current_step = (self.current_step + 1) % 16;
+                triggered += self.fire_step(sample_offset, voices, kit);
+            }
+        }
+
+        // Update last_pos_beats for next buffer's drift detection
+        self.last_pos_beats += (buffer_len as f64 / sample_rate as f64) * (tempo / 60.0);
+
+        triggered
+    }
+
+    /// Fire all enabled, non-muted lanes for the current step.
+    fn fire_step(
+        &self,
+        sample_offset: usize,
+        voices: &mut VoicePool,
+        kit: &DrumKit,
+    ) -> usize {
+        let step_idx = self.current_step;
+        let mut count = 0;
+
+        for lane in &self.lanes {
+            if lane.muted {
+                continue;
+            }
+
+            let step = &lane.steps[step_idx];
+            if !step.enabled {
+                continue;
+            }
+
+            // Probability gate
+            if step.probability < 1.0 {
+                let roll: f32 = rand::random();
+                if roll >= step.probability {
+                    continue;
+                }
+            }
+
+            voices.trigger(lane.pad_index, step.velocity, kit, sample_offset);
+            count += 1;
+        }
+
+        count
+    }
+```
+
+- [ ] **Step 4: Add required imports at top of sequencer.rs**
+
+Add at the top of `src/engine/sequencer.rs`:
+
+```rust
+use crate::engine::kit::DrumKit;
+use crate::engine::sampler::VoicePool;
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `cargo test --lib -- sequencer::tests -v 2>&1 | tail -30`
+Expected: All 8 tests PASS (4 from Task 2 + 4 new).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/engine/sequencer.rs
+git commit -m "feat(sequencer): implement step scanning and voice triggering with host sync"
+```
+
+---
+
+### Task 4: Integrate sequencer into plugin process loop
+
+**Files:**
+- Modify: `src/plugin.rs:48-75` (add sequencer field, initialize, call in process)
+
+- [ ] **Step 1: Add sequencer field to Autokit struct**
+
+In `src/plugin.rs`, add import at top:
+
+```rust
+use crate::engine::sequencer::Sequencer;
+```
+
+Add field to `Autokit` struct (after `library: Option<SampleLibrary>,`):
+
+```rust
+    sequencer: Sequencer,
+```
+
+Add to `Default` impl (after `library: None,`):
+
+```rust
+    sequencer: Sequencer::new(),
+```
+
+- [ ] **Step 2: Call sequencer in process(), after MIDI drain, before voice rendering**
+
+In `src/plugin.rs`, after the MIDI drain loop (after the `NoteEvent::NoteOff { .. } => {}` match block closing braces, around line 222), add:
+
+```rust
+        // Run sequencer — triggers voices at step boundaries
+        let transport = context.transport();
+        self.sequencer.process_buffer(
+            buffer.samples(),
+            transport.playing,
+            transport.tempo,
+            transport.pos_beats(),
+            self.sample_rate,
+            voices,
+            &self.kit,
+        );
+```
+
+- [ ] **Step 3: Run full build check**
+
+Run: `cargo check 2>&1 | tail -10`
+Expected: Compiles. Existing warnings only.
+
+- [ ] **Step 4: Run all tests**
+
+Run: `cargo test --lib 2>&1 | tail -20`
+Expected: All tests PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/plugin.rs
+git commit -m "feat(plugin): integrate sequencer into process loop with host transport sync"
+```
+
+---
+
+### Task 5: Add sequencer to debug heartbeat
+
+**Files:**
+- Modify: `src/plugin.rs:190-206` (heartbeat block)
+
+- [ ] **Step 1: Add sequencer state to heartbeat log**
+
+In `src/plugin.rs`, change the debug heartbeat block from:
+
+```rust
+                permit_alloc(|| {
+                    tracing::debug!(
+                        call = self.process_count,
+                        active_voices = active,
+                        library_loaded = has_lib,
+                        "process() heartbeat"
+                    );
+                });
+```
+
+to:
+
+```rust
+                let seq_step = self.sequencer.current_step();
+                let seq_playing = self.sequencer.is_playing();
+                permit_alloc(|| {
+                    tracing::debug!(
+                        call = self.process_count,
+                        active_voices = active,
+                        library_loaded = has_lib,
+                        seq_step,
+                        seq_playing,
+                        "process() heartbeat"
+                    );
+                });
+```
+
+- [ ] **Step 2: Add accessor methods to Sequencer**
+
+In `src/engine/sequencer.rs`, add to `impl Sequencer`:
+
+```rust
+    pub fn current_step(&self) -> usize {
+        self.current_step
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.playing
+    }
+```
+
+- [ ] **Step 3: Run full build check and tests**
+
+Run: `cargo check 2>&1 | tail -10 && cargo test --lib 2>&1 | tail -10`
+Expected: Compiles and all tests pass.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/plugin.rs src/engine/sequencer.rs
+git commit -m "feat(plugin): add sequencer state to debug heartbeat"
+```
+
+---
+
+### Task 6: Standalone smoke test
+
+**Files:**
+- Modify: `src/engine/sequencer.rs` (add integration-style test)
+
+- [ ] **Step 1: Write a multi-step integration test**
+
+Add to the `tests` module in `src/engine/sequencer.rs`:
+
+```rust
+    #[test]
+    fn full_pattern_cycles_through_16_steps() {
+        let mut seq = Sequencer::new();
+        // Enable step 0 on lane 0, step 4 on lane 1, step 8 on lane 2
+        seq.lanes[0].steps[0].enabled = true;
+        seq.lanes[1].steps[4].enabled = true;
+        seq.lanes[2].steps[8].enabled = true;
+
+        let kit = test_kit();
+        let mut voices = VoicePool::new(44100.0);
+
+        // At 120 BPM, one full pattern (16 sixteenths = 4 beats) = 2 seconds = 88200 samples
+        // Process in 512-sample blocks
+        let mut total_triggers = 0;
+        let samples_per_pattern: usize = 88200;
+        let block_size: usize = 512;
+        let blocks = samples_per_pattern / block_size;
+
+        for block in 0..blocks {
+            let beat_pos = (block * block_size) as f64 / 44100.0 * (120.0 / 60.0);
+            let triggers = seq.process_buffer(
+                block_size, true, Some(120.0), Some(beat_pos), 44100.0,
+                &mut voices, &kit,
+            );
+            total_triggers += triggers;
+        }
+
+        // Should have triggered exactly 3 times (one per enabled step)
+        assert_eq!(total_triggers, 3, "expected 3 triggers across one full pattern");
+    }
+
+    #[test]
+    fn swing_does_not_change_total_pattern_length() {
+        // With swing, even steps get longer and odd steps get shorter,
+        // but the total cycle should remain the same.
+        let mut seq = Sequencer::new();
+        seq.swing = 0.7;
+
+        let total: f64 = (0..16)
+            .map(|s| seq.step_duration_samples(s, 120.0, 44100.0))
+            .sum();
+
+        // Without swing, total = 16 * 5512.5 = 88200.0
+        assert!((total - 88200.0).abs() < 0.1, "swing should preserve total pattern length");
+    }
+```
+
+- [ ] **Step 2: Run all tests**
+
+Run: `cargo test --lib -v 2>&1 | tail -30`
+Expected: All tests PASS (12 total: 2 sampler + 10 sequencer).
+
+- [ ] **Step 3: Run release build**
+
+Run: `cargo build --release 2>&1 | tail -5`
+Expected: Compiles successfully.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/engine/sequencer.rs
+git commit -m "test(sequencer): add integration tests for full pattern cycle and swing invariant"
+```
