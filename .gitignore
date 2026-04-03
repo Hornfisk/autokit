@@ -2,3 +2,4 @@
 .superpowers/
 *.swp
 *.swo
+.worktrees/
