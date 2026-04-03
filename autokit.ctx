@@ -1,0 +1,125 @@
+Project: Autokit
+Goal: AI-powered lightweight drum sampler plugin for Linux (Arch + Hyprland)
+Features:
+  - Auto-generate drum kits from user samples
+  - Randomization with lockable pads/lanes
+  - 16-step sequencer with pattern variation
+  - Dark neon-themed GTK3 UI (Wayland-ready)
+  - Runs as LV2 (primary) and optionally VST3
+  - Secure, sandboxed, open-source
+
+Phases:
+  1: ProjectSetup
+    - Create GitHub repo (MIT or GPLv3)
+    - Define modular architecture (core engine, UI, plugin wrappers)
+    - Setup CMake build system and CI pipeline
+  2: CoreAudioEngine
+    - Sample playback and pad/kit structure
+    - Step sequencer (16-32 steps, swing, velocity, polyrhythms)
+    - MIDI in/out support
+    - Expose plugin parameters (volume, pitch, etc.)
+  3: AI_ML_SampleAnalysis
+    - Scan sample folders, extract audio features (Essentia/librosa)
+    - Cluster samples into 2D map (t-SNE/UMAP)
+    - Classify samples (kick/snare/hat/etc.)
+    - Pattern generator (random + Markov/heuristic)
+  4: GTK3_UI
+    - Dark neon-themed UI with:
+      * Sample map (zoom/pan, hover preview)
+      * 16-pad grid (lockable, color-coded)
+      * Step sequencer (click/drag, velocity, rolls)
+      * Randomize, lock, undo/redo buttons
+      * Theme customization (CSS-based)
+  5: PluginIntegration
+    - LV2 wrapper (control ports, Atom messaging, GTK UI)
+    - Optional VST3 wrapper (JUCE/iPlug2 or direct SDK)
+    - Ensure Renoise compatibility (LV2 focus)
+  6: Testing_Optimization
+    - Unit and integration tests (core + UI)
+    - Performance profiling (CPU, memory, latency)
+    - Host testing (Renoise, Carla, Bitwig, etc.)
+    - Beta testing with Linux audio users
+  7: Docs_Deployment
+    - Write user manual and developer guide
+    - Include demo kits/patterns (free samples)
+    - Package LV2 plugin (AUR, GitHub Releases)
+    - Launch GitHub repo and announce to community
+
+SystemArchitecture:
+  CoreAudioEngine:
+    - Language: C++17/20
+    - Features: low-latency, real-time safe, standalone library
+    - DSP: sample playback, sequencing, effects
+  PluginAPI:
+    - LV2 primary target (using lilv/DPF)
+    - Optional VST3 (JUCE/iPlug2 or direct SDK)
+    - Shared core logic for both formats
+  SampleAnalysis_AI:
+    - Feature extraction (spectral centroid, MFCC, etc.)
+    - Dimensionality reduction (t-SNE/UMAP)
+    - Sample classification (kick, snare, hat, percussion)
+    - Pattern generation (random, Markov chains, AI models)
+  UI:
+    - GTK3 with C++ wrapper (gtkmm or Glib/GTK)
+    - Dark neon theme, customizable colors
+    - Sample map visualization (OpenGL/Vulkan optional)
+    - 16-pad grid with locks and color coding
+    - Step sequencer with pattern editing and randomization
+    - Undo/redo history for kit and pattern changes
+    - File browser and sample database (SQLite or JSON)
+    - Performance optimized for CPU/GPU, scaling support
+  Security:
+    - No network access, offline operation
+    - Restricted file I/O to user sample dirs
+    - Safe file parsing (libsndfile)
+    - Optional sandbox mode, minimal logging
+
+DevelopmentPlan:
+  Step1: Requirements_Design
+    - Finalize features and UI wireframes
+    - Study Atlas 2 and XO workflows
+    - Identify gaps and improvements (undo, Linux support, theming)
+    - User feedback from target audience
+  Step2: ProjectSetup_Architecture
+    - GitHub repo with license
+    - Repo structure: src/, plugins/, docs/, tests/, data/
+    - CMake build and CI setup
+    - Development guidelines and contribution docs
+  Step3: CoreAudioEngine_Dev
+    - Implement sampler voice and drum kit structure
+    - Step sequencer synced to host tempo
+    - MIDI input/output handling
+    - Automatable parameters
+    - Optional effects (bitcrusher, filter, compressor)
+    - Unit tests for non-realtime parts
+  Step4: SampleAnalysis_AI
+    - Library scanning and feature extraction
+    - Dimensionality reduction for sample map
+    - Sample classification and filtering
+    - Pattern generation with random and AI methods
+    - Undo/redo history implementation
+  Step5: GUI_Development
+    - Main window layout with sample map and pads
+    - Sample map rendering with zoom/pan and previews
+    - Pad grid and step sequencer UI
+    - Controls: volume, swing, tempo, randomize buttons
+    - Theme customization and scaling
+    - Wayland/Hyprland compatibility testing
+  Step6: PluginWrappers
+    - LV2 plugin bundle with GTK UI
+    - MIDI and parameter port implementation
+    - Optional VST3 wrapper (JUCE or direct SDK)
+    - Testing in multiple hosts (Renoise, Carla, Bitwig)
+  Step7: Testing_Optimization
+    - Functional and performance testing
+    - Memory usage optimization
+    - Cross-environment and user beta testing
+  Step8: Documentation_Demo
+    - User manual and developer docs
+    - Demo samples and preset patterns
+    - Licensing and credits
+  Step9: Deployment_Community
+    - Release binaries and packaging (AUR, Flatpak)
+    - Announcements on Linux audio forums
+    - Open issue tracker and contribution encouragement
+    - Ongoing maintenance and future milestones
