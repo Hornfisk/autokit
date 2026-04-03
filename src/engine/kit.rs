@@ -120,6 +120,14 @@ impl DrumKit {
             .collect()
     }
 
+    /// Toggle lock on a pad. Locked pads survive randomization.
+    /// This is NOT an undoable action.
+    pub fn toggle_lock(&mut self, index: usize) {
+        if index < self.pads.len() {
+            self.pads[index].locked = !self.pads[index].locked;
+        }
+    }
+
     /// Restore pad state from a snapshot. Preserves `locked` and `midi_note`.
     pub fn restore(&mut self, snapshot: &[PadSnapshot]) {
         for (pad, snap) in self.pads.iter_mut().zip(snapshot.iter()) {
@@ -192,5 +200,17 @@ mod tests {
         // locked and midi_note should be untouched
         assert!(kit.pads[0].locked);
         assert_eq!(kit.pads[0].midi_note, 42);
+    }
+
+    #[test]
+    fn toggle_lock_flips_flag() {
+        let mut kit = DrumKit::new();
+        assert!(!kit.pads[0].locked);
+
+        kit.toggle_lock(0);
+        assert!(kit.pads[0].locked);
+
+        kit.toggle_lock(0);
+        assert!(!kit.pads[0].locked);
     }
 }
