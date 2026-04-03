@@ -6,9 +6,12 @@ mod logging;
 mod engine {
     pub mod kit;
     pub mod sampler;
+    pub mod sequencer;
 }
 
 mod analysis {
+    pub mod features;
+    pub mod library;
     pub mod scanner;
 }
 
