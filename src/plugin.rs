@@ -197,11 +197,15 @@ impl Plugin for Autokit {
             if self.process_count % 1000 == 1 {
                 let active = self.voices.as_ref().map(|v| v.active_count()).unwrap_or(0);
                 let has_lib = self.library.is_some();
+                let seq_step = self.sequencer.current_step();
+                let seq_playing = self.sequencer.is_playing();
                 permit_alloc(|| {
                     tracing::debug!(
                         call = self.process_count,
                         active_voices = active,
                         library_loaded = has_lib,
+                        seq_step,
+                        seq_playing,
                         "process() heartbeat"
                     );
                 });

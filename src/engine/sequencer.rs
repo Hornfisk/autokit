@@ -141,6 +141,14 @@ impl Sequencer {
         triggered
     }
 
+    pub fn current_step(&self) -> usize {
+        self.current_step
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.playing
+    }
+
     /// Fire all enabled, non-muted lanes for the current step.
     fn fire_step(
         &self,
