@@ -3,6 +3,7 @@ use rand::{Rng, SeedableRng};
 
 use crate::engine::kit::DrumKit;
 use crate::engine::sampler::VoicePool;
+use crate::util::history::{StepSnapshot, LaneSnapshot, SequencerSnapshot};
 
 /// A single step in the sequencer.
 #[derive(Clone, Copy)]
@@ -150,6 +151,39 @@ impl Sequencer {
         self.last_pos_beats += (buffer_len as f64 / sample_rate as f64) * (tempo / 60.0);
 
         triggered
+    }
+
+    /// Capture the undoable sequencer state (steps, lanes, swing).
+    /// Excludes playback state (playing, current_step, tick_accumulator, rng).
+    pub fn snapshot(&self) -> SequencerSnapshot {
+        let lanes: [LaneSnapshot; 16] = core::array::from_fn(|i| {
+            let steps: [StepSnapshot; 16] = core::array::from_fn(|j| StepSnapshot {
+                enabled: self.lanes[i].steps[j].enabled,
+                velocity: self.lanes[i].steps[j].velocity,
+                probability: self.lanes[i].steps[j].probability,
+            });
+            LaneSnapshot {
+                steps,
+                muted: self.lanes[i].muted,
+            }
+        });
+        SequencerSnapshot {
+            lanes,
+            swing: self.swing,
+        }
+    }
+
+    /// Restore sequencer state from a snapshot. Preserves playback state.
+    pub fn restore(&mut self, snapshot: &SequencerSnapshot) {
+        for (lane, snap_lane) in self.lanes.iter_mut().zip(snapshot.lanes.iter()) {
+            for (step, snap_step) in lane.steps.iter_mut().zip(snap_lane.steps.iter()) {
+                step.enabled = snap_step.enabled;
+                step.velocity = snap_step.velocity;
+                step.probability = snap_step.probability;
+            }
+            lane.muted = snap_lane.muted;
+        }
+        self.swing = snapshot.swing;
     }
 
     pub fn current_step(&self) -> usize {
@@ -408,6 +442,38 @@ mod tests {
             &mut voices, &kit,
         );
         assert!(triggers2 > 0, "should fire step 0 after rewind to beat 0.0");
+    }
+
+    #[test]
+    fn snapshot_captures_sequencer_state() {
+        let mut seq = Sequencer::new();
+        seq.lanes[0].steps[0].enabled = true;
+        seq.lanes[0].steps[0].velocity = 0.6;
+        seq.lanes[3].muted = true;
+        seq.swing = 0.3;
+
+        let snap = seq.snapshot();
+        assert!(snap.lanes[0].steps[0].enabled);
+        assert!((snap.lanes[0].steps[0].velocity - 0.6).abs() < 0.001);
+        assert!(snap.lanes[3].muted);
+        assert!((snap.swing - 0.3).abs() < 0.001);
+    }
+
+    #[test]
+    fn restore_applies_sequencer_snapshot() {
+        let mut seq = Sequencer::new();
+        seq.lanes[0].steps[0].enabled = true;
+        seq.swing = 0.5;
+
+        // Capture, then modify
+        let snap = seq.snapshot();
+        seq.lanes[0].steps[0].enabled = false;
+        seq.swing = 0.0;
+
+        // Restore
+        seq.restore(&snap);
+        assert!(seq.lanes[0].steps[0].enabled);
+        assert!((seq.swing - 0.5).abs() < 0.001);
     }
 
     #[test]
