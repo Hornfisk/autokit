@@ -10,6 +10,7 @@ use crate::engine::kit::DrumKit;
 use crate::engine::sampler::VoicePool;
 use crate::engine::sequencer::Sequencer;
 use crate::logging;
+use crate::util::history::{History, HistorySnapshot};
 
 /// Hard-coded sample library root — folder picker comes in GUI phase.
 const SAMPLE_LIBRARY_ROOT: &str = "/home/natalia/Music/Samples";
@@ -56,6 +57,8 @@ pub struct Autokit {
     /// Library reference kept for kit regeneration.
     library: Option<SampleLibrary>,
     sequencer: Sequencer,
+    /// Undo/redo history for kit + sequencer changes.
+    history: History,
     /// Debug: counts process() calls to log periodic status.
     #[cfg(debug_assertions)]
     process_count: u64,
@@ -71,6 +74,7 @@ impl Default for Autokit {
             bg_rx: None,
             library: None,
             sequencer: Sequencer::new(),
+            history: History::new(),
             #[cfg(debug_assertions)]
             process_count: 0,
         }
@@ -182,6 +186,12 @@ impl Plugin for Autokit {
                                 total = library.total,
                                 "library received — populating kit"
                             );
+                            // Push snapshot before first population for undo support
+                            let snapshot = HistorySnapshot {
+                                pads: self.kit.snapshot(),
+                                sequencer: self.sequencer.snapshot(),
+                            };
+                            self.history.push(snapshot);
                             populate_kit_from_library(&mut self.kit, &library);
                             self.library = Some(library);
                         }
