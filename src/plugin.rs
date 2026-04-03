@@ -1,19 +1,23 @@
 use nih_plug::prelude::*;
 use nih_plug::util::permit_alloc;
+use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crossbeam_channel::Receiver;
 
 use crate::analysis::library::SampleLibrary;
-use crate::engine::kit::DrumKit;
 use crate::engine::sampler::VoicePool;
 use crate::engine::sequencer::Sequencer;
 use crate::logging;
-use crate::util::history::{History, HistorySnapshot};
+use crate::ui::state::{ScanStatus, SharedState};
+use crate::util::history::HistorySnapshot;
 
 /// Hard-coded sample library root — folder picker comes in GUI phase.
 const SAMPLE_LIBRARY_ROOT: &str = "/home/natalia/Music/Samples";
+
+/// Number of waveform display points per pad.
+const WAVEFORM_POINTS: usize = 200;
 
 #[derive(Params)]
 pub struct AutokitParams {
@@ -50,15 +54,12 @@ enum BgMessage {
 pub struct Autokit {
     params: Arc<AutokitParams>,
     sample_rate: f32,
-    kit: DrumKit,
+    /// State shared with the GUI thread.
+    pub shared: Arc<Mutex<SharedState>>,
     voices: Option<VoicePool>,
     /// Receive messages from background thread (checked in process()).
     bg_rx: Option<Receiver<BgMessage>>,
-    /// Library reference kept for kit regeneration.
-    library: Option<SampleLibrary>,
     sequencer: Sequencer,
-    /// Undo/redo history for kit + sequencer changes.
-    history: History,
     /// Debug: counts process() calls to log periodic status.
     #[cfg(debug_assertions)]
     process_count: u64,
@@ -69,43 +70,43 @@ impl Default for Autokit {
         Self {
             params: Arc::new(AutokitParams::default()),
             sample_rate: 44100.0,
-            kit: DrumKit::new(),
+            shared: Arc::new(Mutex::new(SharedState::new())),
             voices: None,
             bg_rx: None,
-            library: None,
             sequencer: Sequencer::new(),
-            history: History::new(),
             #[cfg(debug_assertions)]
             process_count: 0,
         }
     }
 }
 
-/// Populate the kit from the library using the default layout.
-fn populate_kit_from_library(kit: &mut DrumKit, library: &SampleLibrary) {
-    let layout = library.generate_kit();
+/// Populate the kit from the library using the default layout, then update waveforms.
+fn populate_kit_from_library(shared: &mut SharedState) {
+    let layout = shared.library.as_ref().expect("library must be set before populate").generate_kit();
     let mut assigned = 0u32;
 
     for (pad_idx, category) in layout {
-        if pad_idx >= kit.pads.len() {
+        if pad_idx >= shared.kit.pads.len() {
             break;
         }
 
         // Skip locked pads
-        if kit.pads[pad_idx].locked {
+        if shared.kit.pads[pad_idx].locked {
             continue;
         }
 
-        if let Some(sample) = library.random_from(category) {
-            kit.pads[pad_idx].sample = Some(Arc::clone(&sample.data));
-            kit.pads[pad_idx].sample_path = Some(sample.entry.path.to_string_lossy().to_string());
-            kit.pads[pad_idx].name = sample.entry.filename.clone();
-            kit.pads[pad_idx].category = sample.entry.category;
+        if let Some(sample) = shared.library.as_ref().unwrap().random_from(category) {
+            shared.kit.pads[pad_idx].sample = Some(Arc::clone(&sample.data));
+            shared.kit.pads[pad_idx].sample_path = Some(sample.entry.path.to_string_lossy().to_string());
+            shared.kit.pads[pad_idx].name = sample.entry.filename.clone();
+            shared.kit.pads[pad_idx].category = sample.entry.category;
             assigned += 1;
         }
     }
 
-    tracing::info!(assigned, total_pads = kit.pads.len(), "kit populated from library");
+    tracing::info!(assigned, total_pads = shared.kit.pads.len(), "kit populated from library");
+
+    shared.update_all_waveforms(WAVEFORM_POINTS);
 }
 
 impl Plugin for Autokit {
@@ -186,14 +187,18 @@ impl Plugin for Autokit {
                                 total = library.total,
                                 "library received — populating kit"
                             );
+                            let mut shared = self.shared.lock();
                             // Push snapshot before first population for undo support
                             let snapshot = HistorySnapshot {
-                                pads: self.kit.snapshot(),
+                                pads: shared.kit.snapshot(),
                                 sequencer: self.sequencer.snapshot(),
                             };
-                            self.history.push(snapshot);
-                            populate_kit_from_library(&mut self.kit, &library);
-                            self.library = Some(library);
+                            shared.history.push(snapshot);
+                            shared.library = Some(library);
+                            populate_kit_from_library(&mut shared);
+                            shared.scan_status = ScanStatus::Ready {
+                                total: shared.library.as_ref().map(|l| l.total).unwrap_or(0),
+                            };
                         }
                     }
                 });
@@ -206,7 +211,10 @@ impl Plugin for Autokit {
             self.process_count += 1;
             if self.process_count % 1000 == 1 {
                 let active = self.voices.as_ref().map(|v| v.active_count()).unwrap_or(0);
-                let has_lib = self.library.is_some();
+                let has_lib = {
+                    let shared = self.shared.lock();
+                    shared.library.is_some()
+                };
                 let seq_step = self.sequencer.current_step();
                 let seq_playing = self.sequencer.is_playing();
                 permit_alloc(|| {
@@ -227,12 +235,15 @@ impl Plugin for Autokit {
             None => return ProcessStatus::KeepAlive,
         };
 
+        // Lock shared state for the render section — holds for MIDI + sequencer + voice render
+        let mut shared = self.shared.lock();
+
         // Drain MIDI events and trigger voices
         while let Some(event) = context.next_event() {
             match event {
                 NoteEvent::NoteOn { note, velocity, .. } => {
-                    if let Some(pad_idx) = self.kit.pad_for_note(note) {
-                        voices.trigger(pad_idx, velocity, &self.kit, 0);
+                    if let Some(pad_idx) = shared.kit.pad_for_note(note) {
+                        voices.trigger(pad_idx, velocity, &shared.kit, 0);
                     }
                 }
                 NoteEvent::NoteOff { .. } => {}
@@ -249,7 +260,7 @@ impl Plugin for Autokit {
             transport.pos_beats(),
             self.sample_rate,
             voices,
-            &self.kit,
+            &shared.kit,
         );
 
         let num_samples = buffer.samples();
@@ -266,7 +277,10 @@ impl Plugin for Autokit {
         output_left.fill(0.0);
         output_right.fill(0.0);
 
-        voices.process(output_left, output_right, &self.kit);
+        voices.process(output_left, output_right, &shared.kit);
+
+        // Drop the lock before param smoothing
+        drop(shared);
 
         let master_gain = self.params.master_volume.smoothed.next();
         for s in output_left.iter_mut() {
