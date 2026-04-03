@@ -1,0 +1,45 @@
+[workspace]
+members = ["xtask"]
+
+[package]
+name = "autokit"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "AI-powered drum machine plugin for Linux"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Plugin framework
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug", features = ["assert_process_allocs"] }
+nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug" }
+
+# Audio
+symphonia = { version = "0.5", features = ["wav", "flac", "ogg", "vorbis", "pcm", "adpcm"] }
+rubato = "0.16"
+
+# Real-time safety
+basedrop = "0.1"
+rtrb = "0.3"
+assert_no_alloc = "1.1"
+
+# IPC & concurrency
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+# Utilities
+rand = "0.9"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
