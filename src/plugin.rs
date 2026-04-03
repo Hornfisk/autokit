@@ -1,7 +1,17 @@
 use nih_plug::prelude::*;
+use nih_plug::util::permit_alloc;
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use crossbeam_channel::Receiver;
+
+use crate::analysis::library::SampleLibrary;
+use crate::engine::kit::DrumKit;
+use crate::engine::sampler::VoicePool;
 use crate::logging;
+
+/// Hard-coded sample library root — folder picker comes in GUI phase.
+const SAMPLE_LIBRARY_ROOT: &str = "/home/natalia/Music/Samples";
 
 #[derive(Params)]
 pub struct AutokitParams {
@@ -29,9 +39,24 @@ impl Default for AutokitParams {
     }
 }
 
+/// Messages from background thread to audio thread.
+enum BgMessage {
+    /// Library scan complete — assign samples to kit.
+    LibraryReady(SampleLibrary),
+}
+
 pub struct Autokit {
     params: Arc<AutokitParams>,
     sample_rate: f32,
+    kit: DrumKit,
+    voices: Option<VoicePool>,
+    /// Receive messages from background thread (checked in process()).
+    bg_rx: Option<Receiver<BgMessage>>,
+    /// Library reference kept for kit regeneration.
+    library: Option<SampleLibrary>,
+    /// Debug: counts process() calls to log periodic status.
+    #[cfg(debug_assertions)]
+    process_count: u64,
 }
 
 impl Default for Autokit {
@@ -39,14 +64,47 @@ impl Default for Autokit {
         Self {
             params: Arc::new(AutokitParams::default()),
             sample_rate: 44100.0,
+            kit: DrumKit::new(),
+            voices: None,
+            bg_rx: None,
+            library: None,
+            #[cfg(debug_assertions)]
+            process_count: 0,
         }
     }
 }
 
+/// Populate the kit from the library using the default layout.
+fn populate_kit_from_library(kit: &mut DrumKit, library: &SampleLibrary) {
+    let layout = library.generate_kit();
+    let mut assigned = 0u32;
+
+    for (pad_idx, category) in layout {
+        if pad_idx >= kit.pads.len() {
+            break;
+        }
+
+        // Skip locked pads
+        if kit.pads[pad_idx].locked {
+            continue;
+        }
+
+        if let Some(sample) = library.random_from(category) {
+            kit.pads[pad_idx].sample = Some(Arc::clone(&sample.data));
+            kit.pads[pad_idx].sample_path = Some(sample.entry.path.to_string_lossy().to_string());
+            kit.pads[pad_idx].name = sample.entry.filename.clone();
+            kit.pads[pad_idx].category = sample.entry.category;
+            assigned += 1;
+        }
+    }
+
+    tracing::info!(assigned, total_pads = kit.pads.len(), "kit populated from library");
+}
+
 impl Plugin for Autokit {
     const NAME: &'static str = "Autokit";
-    const VENDOR: &'static str = "ARKITECH";
-    const URL: &'static str = "https://github.com/arkitech/autokit";
+    const VENDOR: &'static str = "REXIST";
+    const URL: &'static str = "";
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
@@ -82,6 +140,26 @@ impl Plugin for Autokit {
             self.sample_rate
         );
 
+        self.voices = Some(VoicePool::new(self.sample_rate));
+
+        // Spawn background thread to scan sample library
+        let (tx, rx) = crossbeam_channel::bounded::<BgMessage>(1);
+        self.bg_rx = Some(rx);
+
+        let sample_rate = self.sample_rate;
+        let root = PathBuf::from(SAMPLE_LIBRARY_ROOT);
+
+        std::thread::Builder::new()
+            .name("autokit-scanner".to_string())
+            .spawn(move || {
+                tracing::info!("background scan starting");
+                let library = SampleLibrary::build(&root, sample_rate);
+                if tx.send(BgMessage::LibraryReady(library)).is_err() {
+                    tracing::warn!("plugin dropped before scan completed");
+                }
+            })
+            .expect("failed to spawn scanner thread");
+
         true
     }
 
@@ -91,27 +169,82 @@ impl Plugin for Autokit {
         _aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        // Drain incoming MIDI events
+        // Check for background thread messages (non-blocking)
+        if let Some(rx) = &self.bg_rx {
+            if let Ok(msg) = rx.try_recv() {
+                permit_alloc(|| {
+                    match msg {
+                        BgMessage::LibraryReady(library) => {
+                            tracing::info!(
+                                total = library.total,
+                                "library received — populating kit"
+                            );
+                            populate_kit_from_library(&mut self.kit, &library);
+                            self.library = Some(library);
+                        }
+                    }
+                });
+            }
+        }
+
+        // Periodic debug heartbeat (~every 5s)
+        #[cfg(debug_assertions)]
+        {
+            self.process_count += 1;
+            if self.process_count % 1000 == 1 {
+                let active = self.voices.as_ref().map(|v| v.active_count()).unwrap_or(0);
+                let has_lib = self.library.is_some();
+                permit_alloc(|| {
+                    tracing::debug!(
+                        call = self.process_count,
+                        active_voices = active,
+                        library_loaded = has_lib,
+                        "process() heartbeat"
+                    );
+                });
+            }
+        }
+
+        let voices = match &mut self.voices {
+            Some(v) => v,
+            None => return ProcessStatus::KeepAlive,
+        };
+
+        // Drain MIDI events and trigger voices
         while let Some(event) = context.next_event() {
             match event {
                 NoteEvent::NoteOn { note, velocity, .. } => {
-                    tracing::debug!(note, velocity, "MIDI NoteOn");
-                    // TODO: trigger sampler voice
+                    if let Some(pad_idx) = self.kit.pad_for_note(note) {
+                        voices.trigger(pad_idx, velocity, &self.kit, 0);
+                    }
                 }
-                NoteEvent::NoteOff { note, .. } => {
-                    tracing::trace!(note, "MIDI NoteOff");
-                }
+                NoteEvent::NoteOff { .. } => {}
                 _ => {}
             }
         }
 
-        let master_gain = self.params.master_volume.smoothed.next();
+        let num_samples = buffer.samples();
+        let channels = buffer.as_slice();
 
-        // For now, output silence (no samples loaded yet)
-        for channel_samples in buffer.iter_samples() {
-            for sample in channel_samples {
-                *sample *= master_gain;
-            }
+        if channels.len() < 2 {
+            return ProcessStatus::KeepAlive;
+        }
+
+        let (left_channels, right_channels) = channels.split_at_mut(1);
+        let output_left = &mut left_channels[0][..num_samples];
+        let output_right = &mut right_channels[0][..num_samples];
+
+        output_left.fill(0.0);
+        output_right.fill(0.0);
+
+        voices.process(output_left, output_right, &self.kit);
+
+        let master_gain = self.params.master_volume.smoothed.next();
+        for s in output_left.iter_mut() {
+            *s *= master_gain;
+        }
+        for s in output_right.iter_mut() {
+            *s *= master_gain;
         }
 
         ProcessStatus::KeepAlive
@@ -119,7 +252,7 @@ impl Plugin for Autokit {
 }
 
 impl ClapPlugin for Autokit {
-    const CLAP_ID: &'static str = "com.arkitech.autokit";
+    const CLAP_ID: &'static str = "com.rexist.autokit";
     const CLAP_DESCRIPTION: Option<&'static str> =
         Some("AI-powered drum machine with sample map visualization");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
