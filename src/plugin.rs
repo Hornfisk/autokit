@@ -8,6 +8,7 @@ use crossbeam_channel::Receiver;
 use crate::analysis::library::SampleLibrary;
 use crate::engine::kit::DrumKit;
 use crate::engine::sampler::VoicePool;
+use crate::engine::sequencer::Sequencer;
 use crate::logging;
 
 /// Hard-coded sample library root — folder picker comes in GUI phase.
@@ -54,6 +55,7 @@ pub struct Autokit {
     bg_rx: Option<Receiver<BgMessage>>,
     /// Library reference kept for kit regeneration.
     library: Option<SampleLibrary>,
+    sequencer: Sequencer,
     /// Debug: counts process() calls to log periodic status.
     #[cfg(debug_assertions)]
     process_count: u64,
@@ -68,6 +70,7 @@ impl Default for Autokit {
             voices: None,
             bg_rx: None,
             library: None,
+            sequencer: Sequencer::new(),
             #[cfg(debug_assertions)]
             process_count: 0,
         }
@@ -222,6 +225,18 @@ impl Plugin for Autokit {
                 _ => {}
             }
         }
+
+        // Run sequencer — triggers voices at step boundaries
+        let transport = context.transport();
+        self.sequencer.process_buffer(
+            buffer.samples(),
+            transport.playing,
+            transport.tempo,
+            transport.pos_beats(),
+            self.sample_rate,
+            voices,
+            &self.kit,
+        );
 
         let num_samples = buffer.samples();
         let channels = buffer.as_slice();
