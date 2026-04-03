@@ -1,3 +1,4 @@
+use crate::util::history::PadSnapshot;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -102,10 +103,94 @@ impl DrumKit {
     pub fn pad_for_note(&self, note: u8) -> Option<usize> {
         self.pads.iter().position(|p| p.midi_note == note)
     }
+
+    /// Capture the undoable state of all pads.
+    pub fn snapshot(&self) -> Vec<PadSnapshot> {
+        self.pads
+            .iter()
+            .map(|p| PadSnapshot {
+                sample: p.sample.clone(),
+                sample_path: p.sample_path.clone(),
+                name: p.name.clone(),
+                category: p.category,
+                volume: p.volume,
+                pan: p.pan,
+                pitch: p.pitch,
+            })
+            .collect()
+    }
+
+    /// Restore pad state from a snapshot. Preserves `locked` and `midi_note`.
+    pub fn restore(&mut self, snapshot: &[PadSnapshot]) {
+        for (pad, snap) in self.pads.iter_mut().zip(snapshot.iter()) {
+            pad.sample = snap.sample.clone();
+            pad.sample_path = snap.sample_path.clone();
+            pad.name = snap.name.clone();
+            pad.category = snap.category;
+            pad.volume = snap.volume;
+            pad.pan = snap.pan;
+            pad.pitch = snap.pitch;
+        }
+    }
 }
 
 impl Default for DrumKit {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::util::history::PadSnapshot;
+
+    #[test]
+    fn snapshot_captures_pad_state() {
+        let mut kit = DrumKit::new();
+        kit.pads[0].name = "MyKick".to_string();
+        kit.pads[0].volume = 0.75;
+        kit.pads[0].pan = -0.5;
+        kit.pads[0].pitch = 2.0;
+        kit.pads[0].category = SampleCategory::Kick;
+        kit.pads[0].sample = Some(Arc::new(vec![1.0; 100]));
+        kit.pads[0].locked = true;
+
+        let snap = kit.snapshot();
+        assert_eq!(snap.len(), 16);
+        assert_eq!(snap[0].name, "MyKick");
+        assert!((snap[0].volume - 0.75).abs() < 0.001);
+        assert!((snap[0].pan - -0.5).abs() < 0.001);
+        assert!((snap[0].pitch - 2.0).abs() < 0.001);
+        assert_eq!(snap[0].category, SampleCategory::Kick);
+        assert!(snap[0].sample.is_some());
+    }
+
+    #[test]
+    fn restore_applies_snapshot_but_preserves_lock_and_midi() {
+        let mut kit = DrumKit::new();
+        kit.pads[0].locked = true;
+        kit.pads[0].midi_note = 42;
+
+        let snap: Vec<PadSnapshot> = (0..16)
+            .map(|i| PadSnapshot {
+                sample: None,
+                sample_path: Some(format!("/path/{i}.wav")),
+                name: format!("Restored-{i}"),
+                category: SampleCategory::Snare,
+                volume: 0.5,
+                pan: 0.3,
+                pitch: -1.0,
+            })
+            .collect();
+
+        kit.restore(&snap);
+
+        assert_eq!(kit.pads[0].name, "Restored-0");
+        assert!((kit.pads[0].volume - 0.5).abs() < 0.001);
+        assert_eq!(kit.pads[0].category, SampleCategory::Snare);
+        // locked and midi_note should be untouched
+        assert!(kit.pads[0].locked);
+        assert_eq!(kit.pads[0].midi_note, 42);
     }
 }
