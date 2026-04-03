@@ -1,3 +1,6 @@
+use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
+
 use crate::engine::kit::DrumKit;
 use crate::engine::sampler::VoicePool;
 
@@ -38,23 +41,26 @@ impl Lane {
 
 /// The 16-lane, 16-step sequencer.
 pub struct Sequencer {
-    pub lanes: Vec<Lane>,
+    pub lanes: [Lane; 16],
     pub swing: f32,
     playing: bool,
     current_step: usize,
     tick_accumulator: f64,
     last_pos_beats: f64,
+    rng: SmallRng,
 }
 
 impl Sequencer {
     pub fn new() -> Self {
+        let lanes: [Lane; 16] = core::array::from_fn(|i| Lane::new(i));
         Self {
-            lanes: (0..16).map(Lane::new).collect(),
+            lanes,
             swing: 0.0,
             playing: false,
             current_step: 0,
             tick_accumulator: 0.0,
             last_pos_beats: 0.0,
+            rng: SmallRng::from_os_rng(),
         }
     }
 
@@ -93,6 +99,11 @@ impl Sequencer {
         // Sync to host position
         let mut fire_immediately = false;
         if let Some(beats) = pos_beats {
+            // Guard against negative beat positions (pre-roll / count-in)
+            if beats < 0.0 {
+                self.playing = false;
+                return 0;
+            }
             let sixteenths = beats * 4.0;
             let host_step = ((sixteenths.floor() as usize) % 16) as usize;
             let frac = sixteenths.fract();
@@ -151,7 +162,7 @@ impl Sequencer {
 
     /// Fire all enabled, non-muted lanes for the current step.
     fn fire_step(
-        &self,
+        &mut self,
         sample_offset: usize,
         voices: &mut VoicePool,
         kit: &DrumKit,
@@ -159,25 +170,27 @@ impl Sequencer {
         let step_idx = self.current_step;
         let mut count = 0;
 
-        for lane in &self.lanes {
-            if lane.muted {
+        for i in 0..self.lanes.len() {
+            if self.lanes[i].muted {
                 continue;
             }
 
-            let step = &lane.steps[step_idx];
+            let step = &self.lanes[i].steps[step_idx];
             if !step.enabled {
                 continue;
             }
 
-            // Probability gate
+            // Probability gate (uses stored RNG — no thread-local or allocation)
             if step.probability < 1.0 {
-                let roll: f32 = rand::random();
+                let roll: f32 = self.rng.random();
                 if roll >= step.probability {
                     continue;
                 }
             }
 
-            voices.trigger(lane.pad_index, step.velocity, kit, sample_offset);
+            let velocity = step.velocity;
+            let pad_index = self.lanes[i].pad_index;
+            voices.trigger(pad_index, velocity, kit, sample_offset);
             count += 1;
         }
 
@@ -371,5 +384,44 @@ mod tests {
 
         // Without swing, total = 16 * 5512.5 = 88200.0
         assert!((total - 88200.0).abs() < 0.1, "swing should preserve total pattern length");
+    }
+
+    #[test]
+    fn host_rewind_resyncs_sequencer() {
+        let mut seq = Sequencer::new();
+        seq.lanes[0].steps[0].enabled = true;
+        seq.lanes[0].steps[8].enabled = true;
+
+        let kit = test_kit();
+        let mut voices = VoicePool::new(44100.0);
+
+        // Play forward to beat 2.0 (step 8)
+        let triggers1 = seq.process_buffer(
+            512, true, Some(120.0), Some(2.0), 44100.0,
+            &mut voices, &kit,
+        );
+        assert!(triggers1 > 0, "should fire step 8 at beat 2.0");
+
+        // Host rewinds to beat 0.0 — sequencer should resync and fire step 0
+        let triggers2 = seq.process_buffer(
+            512, true, Some(120.0), Some(0.0), 44100.0,
+            &mut voices, &kit,
+        );
+        assert!(triggers2 > 0, "should fire step 0 after rewind to beat 0.0");
+    }
+
+    #[test]
+    fn negative_pos_beats_does_not_trigger() {
+        let mut seq = Sequencer::new();
+        seq.lanes[0].steps[0].enabled = true;
+
+        let kit = test_kit();
+        let mut voices = VoicePool::new(44100.0);
+
+        let triggers = seq.process_buffer(
+            512, true, Some(120.0), Some(-1.0), 44100.0,
+            &mut voices, &kit,
+        );
+        assert_eq!(triggers, 0, "negative pos_beats should not trigger");
     }
 }

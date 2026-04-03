@@ -207,6 +207,9 @@ impl VoicePool {
                 }
             }
 
+            // Reset offset so next buffer plays from sample 0
+            voice.start_offset = 0;
+
             // Clean up finished voices
             if !voice.is_active() {
                 voice.deactivate();
@@ -270,5 +273,30 @@ mod tests {
         // Samples 4..12 should have audio (8 samples of the pad)
         let expected = (0.25 * std::f32::consts::PI).cos();
         assert!((left[4] - expected).abs() < 0.001, "sample 4 should have audio");
+    }
+
+    #[test]
+    fn start_offset_resets_after_first_buffer() {
+        let mut pool = VoicePool::new(44100.0);
+        let mut kit = DrumKit::new();
+        kit.pads[0].sample = Some(Arc::new(vec![1.0; 100]));
+        kit.pads[0].volume = 1.0;
+        kit.pads[0].pan = 0.0;
+        kit.pads[0].category = SampleCategory::Kick;
+
+        pool.trigger(0, 1.0, &kit, 4);
+
+        // First buffer: 8 samples, offset should apply (0..4 silent)
+        let mut left1 = vec![0.0f32; 8];
+        let mut right1 = vec![0.0f32; 8];
+        pool.process(&mut left1, &mut right1, &kit);
+        assert_eq!(left1[0], 0.0, "first buffer: sample 0 should be silent");
+
+        // Second buffer: offset should be reset, audio starts at sample 0
+        let mut left2 = vec![0.0f32; 8];
+        let mut right2 = vec![0.0f32; 8];
+        pool.process(&mut left2, &mut right2, &kit);
+        let expected = (0.25 * std::f32::consts::PI).cos();
+        assert!((left2[0] - expected).abs() < 0.001, "second buffer: sample 0 should have audio (offset reset)");
     }
 }
