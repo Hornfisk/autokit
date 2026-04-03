@@ -326,4 +326,50 @@ mod tests {
 
         assert_eq!(triggers, 0, "should not trigger when host is stopped");
     }
+
+    #[test]
+    fn full_pattern_cycles_through_16_steps() {
+        let mut seq = Sequencer::new();
+        // Enable step 0 on lane 0, step 4 on lane 1, step 8 on lane 2
+        seq.lanes[0].steps[0].enabled = true;
+        seq.lanes[1].steps[4].enabled = true;
+        seq.lanes[2].steps[8].enabled = true;
+
+        let kit = test_kit();
+        let mut voices = VoicePool::new(44100.0);
+
+        // At 120 BPM, one full pattern (16 sixteenths = 4 beats) = 2 seconds = 88200 samples
+        // Process in 512-sample blocks
+        let mut total_triggers = 0;
+        let samples_per_pattern: usize = 88200;
+        let block_size: usize = 512;
+        let blocks = samples_per_pattern / block_size;
+
+        for block in 0..blocks {
+            let beat_pos = (block * block_size) as f64 / 44100.0 * (120.0 / 60.0);
+            let triggers = seq.process_buffer(
+                block_size, true, Some(120.0), Some(beat_pos), 44100.0,
+                &mut voices, &kit,
+            );
+            total_triggers += triggers;
+        }
+
+        // Should have triggered exactly 3 times (one per enabled step)
+        assert_eq!(total_triggers, 3, "expected 3 triggers across one full pattern");
+    }
+
+    #[test]
+    fn swing_does_not_change_total_pattern_length() {
+        // With swing, even steps get longer and odd steps get shorter,
+        // but the total cycle should remain the same.
+        let mut seq = Sequencer::new();
+        seq.swing = 0.7;
+
+        let total: f64 = (0..16)
+            .map(|s| seq.step_duration_samples(s, 120.0, 44100.0))
+            .sum();
+
+        // Without swing, total = 16 * 5512.5 = 88200.0
+        assert!((total - 88200.0).abs() < 0.1, "swing should preserve total pattern length");
+    }
 }
