@@ -1,5 +1,6 @@
 use nih_plug::prelude::*;
 use nih_plug::util::permit_alloc;
+use nih_plug_egui::EguiState;
 use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,6 +22,9 @@ const WAVEFORM_POINTS: usize = 200;
 
 #[derive(Params)]
 pub struct AutokitParams {
+    #[persist = "editor-state"]
+    pub editor_state: Arc<EguiState>,
+
     #[id = "master_vol"]
     pub master_volume: FloatParam,
 }
@@ -28,6 +32,7 @@ pub struct AutokitParams {
 impl Default for AutokitParams {
     fn default() -> Self {
         Self {
+            editor_state: EguiState::from_size(900, 700),
             master_volume: FloatParam::new(
                 "Master Volume",
                 util::db_to_gain(0.0),
@@ -131,6 +136,24 @@ impl Plugin for Autokit {
 
     fn params(&self) -> Arc<dyn Params> {
         self.params.clone()
+    }
+
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        let shared = Arc::clone(&self.shared);
+        let params = Arc::clone(&self.params);
+
+        // Create a snapshot function that captures sequencer state.
+        // The sequencer lives on the audio thread; we snapshot it via a closure.
+        let seq = self.sequencer.snapshot();
+        let seq_snapshot: Arc<dyn Fn() -> crate::util::history::SequencerSnapshot + Send + Sync> =
+            Arc::new(move || seq.clone());
+
+        crate::ui::editor::create(
+            self.params.editor_state.clone(),
+            shared,
+            params,
+            seq_snapshot,
+        )
     }
 
     fn initialize(

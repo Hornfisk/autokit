@@ -127,6 +127,16 @@ impl SampleLibrary {
     /// Generate a default techno kit layout:
     /// 0-1: Kick, 2-3: Snare, 4-5: Hihat, 6: Clap, 7: Tom,
     /// 8-9: Perc, 10: Cymbal, 11: Bass, 12-13: Synth, 14-15: Other/Perc
+    /// Create a reference-only clone for use in dice operations.
+    /// The Arc'd sample data is shared, not copied.
+    pub fn clone_for_dice(&self) -> SampleLibrary {
+        SampleLibrary {
+            total: self.total,
+            by_category: self.by_category.clone(),
+            sample_rate: self.sample_rate,
+        }
+    }
+
     pub fn generate_kit(&self) -> Vec<(usize, SampleCategory)> {
         vec![
             (0, SampleCategory::Kick),
