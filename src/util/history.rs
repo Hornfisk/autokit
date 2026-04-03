@@ -199,4 +199,201 @@ mod tests {
         assert!(history.redo(make_snapshot("x")).is_none());
         assert!(!history.can_redo());
     }
+
+    use crate::engine::kit::DrumKit;
+    use crate::engine::sequencer::Sequencer;
+    use std::sync::Arc;
+
+    /// Helper: create a full HistorySnapshot from a kit and sequencer.
+    fn snapshot_from(kit: &DrumKit, seq: &Sequencer) -> HistorySnapshot {
+        HistorySnapshot {
+            pads: kit.snapshot(),
+            sequencer: seq.snapshot(),
+        }
+    }
+
+    #[test]
+    fn dice_then_undo_restores_original() {
+        use crate::analysis::library::{AnalyzedSample, SampleLibrary};
+        use crate::analysis::scanner::SampleEntry;
+        use crate::analysis::features::AudioFeatures;
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
+        // Build a minimal library
+        let mut by_category = HashMap::new();
+        let entry = SampleEntry {
+            path: PathBuf::from("/test/kick.wav"),
+            filename: "new-kick".to_string(),
+            category: SampleCategory::Kick,
+            folder_hint: None,
+            duration_ms: 100,
+            is_percussive: true,
+        };
+        by_category.entry(SampleCategory::Kick).or_insert_with(Vec::new).push(AnalyzedSample {
+            entry,
+            features: AudioFeatures {
+                attack_time: 0.001,
+                decay_time: 0.05,
+                spectral_centroid: 1000.0,
+                spectral_flatness: 0.5,
+                peak: 1.0,
+                duration: 0.1,
+                is_percussive: true,
+            },
+            data: Arc::new(vec![0.5; 100]),
+        });
+        let lib = SampleLibrary {
+            total: 1,
+            by_category,
+            sample_rate: 44100.0,
+        };
+
+        let mut kit = DrumKit::new();
+        kit.pads[0].category = SampleCategory::Kick;
+        kit.pads[0].name = "original-kick".to_string();
+        kit.pads[0].sample = Some(Arc::new(vec![1.0; 100]));
+
+        let seq = Sequencer::new();
+        let mut history = History::new();
+
+        // Snapshot before dice
+        let before = snapshot_from(&kit, &seq);
+        history.push(before);
+
+        // Dice
+        kit.dice_all(&lib);
+        assert_eq!(kit.pads[0].name, "new-kick");
+
+        // Undo
+        let current = snapshot_from(&kit, &seq);
+        let restored = history.undo(current).unwrap();
+        kit.restore(&restored.pads);
+
+        assert_eq!(kit.pads[0].name, "original-kick");
+    }
+
+    #[test]
+    fn dice_undo_redo_roundtrip() {
+        use crate::analysis::library::{AnalyzedSample, SampleLibrary};
+        use crate::analysis::scanner::SampleEntry;
+        use crate::analysis::features::AudioFeatures;
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
+        let mut by_category = HashMap::new();
+        let entry = SampleEntry {
+            path: PathBuf::from("/test/kick.wav"),
+            filename: "diced-kick".to_string(),
+            category: SampleCategory::Kick,
+            folder_hint: None,
+            duration_ms: 100,
+            is_percussive: true,
+        };
+        by_category.entry(SampleCategory::Kick).or_insert_with(Vec::new).push(AnalyzedSample {
+            entry,
+            features: AudioFeatures {
+                attack_time: 0.001,
+                decay_time: 0.05,
+                spectral_centroid: 1000.0,
+                spectral_flatness: 0.5,
+                peak: 1.0,
+                duration: 0.1,
+                is_percussive: true,
+            },
+            data: Arc::new(vec![0.5; 100]),
+        });
+        let lib = SampleLibrary {
+            total: 1,
+            by_category,
+            sample_rate: 44100.0,
+        };
+
+        let mut kit = DrumKit::new();
+        kit.pads[0].category = SampleCategory::Kick;
+        kit.pads[0].name = "before".to_string();
+
+        let seq = Sequencer::new();
+        let mut history = History::new();
+
+        // Push pre-dice snapshot, then dice
+        history.push(snapshot_from(&kit, &seq));
+        kit.dice_all(&lib);
+        assert_eq!(kit.pads[0].name, "diced-kick");
+
+        // Undo -> back to "before"
+        let current = snapshot_from(&kit, &seq);
+        let restored = history.undo(current).unwrap();
+        kit.restore(&restored.pads);
+        assert_eq!(kit.pads[0].name, "before");
+
+        // Redo -> back to "diced-kick"
+        let current = snapshot_from(&kit, &seq);
+        let redone = history.redo(current).unwrap();
+        kit.restore(&redone.pads);
+        assert_eq!(kit.pads[0].name, "diced-kick");
+    }
+
+    #[test]
+    fn multiple_dice_multiple_undos() {
+        use crate::analysis::library::{AnalyzedSample, SampleLibrary};
+        use crate::analysis::scanner::SampleEntry;
+        use crate::analysis::features::AudioFeatures;
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
+        // Library with distinct kick samples
+        let mut by_category: HashMap<SampleCategory, Vec<AnalyzedSample>> = HashMap::new();
+        for i in 0..5 {
+            let entry = SampleEntry {
+                path: PathBuf::from(format!("/test/kick{i}.wav")),
+                filename: format!("kick-{i}"),
+                category: SampleCategory::Kick,
+                folder_hint: None,
+                duration_ms: 100,
+                is_percussive: true,
+            };
+            by_category.entry(SampleCategory::Kick).or_insert_with(Vec::new).push(AnalyzedSample {
+                entry,
+                features: AudioFeatures {
+                    attack_time: 0.001,
+                    decay_time: 0.05,
+                    spectral_centroid: 1000.0,
+                    spectral_flatness: 0.5,
+                    peak: 1.0,
+                    duration: 0.1,
+                    is_percussive: true,
+                },
+                data: Arc::new(vec![0.5; 100]),
+            });
+        }
+        let lib = SampleLibrary {
+            total: 5,
+            by_category,
+            sample_rate: 44100.0,
+        };
+
+        let mut kit = DrumKit::new();
+        kit.pads[0].category = SampleCategory::Kick;
+        kit.pads[0].name = "initial".to_string();
+
+        let seq = Sequencer::new();
+        let mut history = History::new();
+        let mut names: Vec<String> = vec!["initial".to_string()];
+
+        // Dice 3 times, tracking names
+        for _ in 0..3 {
+            history.push(snapshot_from(&kit, &seq));
+            kit.dice_all(&lib);
+            names.push(kit.pads[0].name.clone());
+        }
+
+        // Undo 3 times — should walk back through names
+        for i in (0..3).rev() {
+            let current = snapshot_from(&kit, &seq);
+            let restored = history.undo(current).unwrap();
+            kit.restore(&restored.pads);
+            assert_eq!(kit.pads[0].name, names[i]);
+        }
+    }
 }
