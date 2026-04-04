@@ -202,6 +202,37 @@ impl SampleLibrary {
         }
     }
 
+    /// Return all samples in a deterministic flat order (sorted by category discriminant).
+    /// The index into this vec is `library_index` used by MapPoint.
+    pub fn all_samples_flat(&self) -> Vec<&AnalyzedSample> {
+        let mut categories: Vec<SampleCategory> = self.by_category.keys().copied().collect();
+        categories.sort_by_key(|c| *c as u8);
+        let mut flat = Vec::with_capacity(self.total);
+        for cat in categories {
+            if let Some(samples) = self.by_category.get(&cat) {
+                flat.extend(samples.iter());
+            }
+        }
+        flat
+    }
+
+    /// Retrieve a sample by its flat index (as returned by `all_samples_flat`).
+    /// Returns None if index is out of bounds.
+    pub fn sample_by_flat_index(&self, index: usize) -> Option<&AnalyzedSample> {
+        let mut categories: Vec<SampleCategory> = self.by_category.keys().copied().collect();
+        categories.sort_by_key(|c| *c as u8);
+        let mut offset = 0;
+        for cat in categories {
+            if let Some(samples) = self.by_category.get(&cat) {
+                if index < offset + samples.len() {
+                    return Some(&samples[index - offset]);
+                }
+                offset += samples.len();
+            }
+        }
+        None
+    }
+
     /// Generate a default 8-pad techno kit layout.
     pub fn generate_kit(&self) -> Vec<(usize, SampleCategory)> {
         vec![
@@ -214,6 +245,77 @@ impl SampleLibrary {
             (6, SampleCategory::Cymbal),
             (7, SampleCategory::Synth),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::features::AudioFeatures;
+    use crate::analysis::scanner::SampleEntry;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn test_library() -> SampleLibrary {
+        let mut by_category: HashMap<SampleCategory, Vec<AnalyzedSample>> = HashMap::new();
+        for cat in SampleCategory::all() {
+            let entry = SampleEntry {
+                path: PathBuf::from(format!("/test/{}.wav", cat.label())),
+                filename: format!("test-{}", cat.label()),
+                category: *cat,
+                folder_hint: None,
+                duration_ms: 100,
+                is_percussive: true,
+            };
+            let sample = AnalyzedSample {
+                entry,
+                features: AudioFeatures {
+                    attack_time: 0.001,
+                    decay_time: 0.05,
+                    spectral_centroid: 1000.0,
+                    spectral_flatness: 0.5,
+                    peak: 1.0,
+                    duration: 0.1,
+                    is_percussive: true,
+                },
+                data: Arc::new(vec![0.5; 4410]),
+            };
+            by_category.entry(*cat).or_default().push(sample);
+        }
+        SampleLibrary { total: 10, by_category, sample_rate: 44100.0 }
+    }
+
+    #[test]
+    fn all_samples_flat_returns_all_samples() {
+        let lib = test_library();
+        let flat = lib.all_samples_flat();
+        assert_eq!(flat.len(), lib.total);
+    }
+
+    #[test]
+    fn all_samples_flat_deterministic_order() {
+        let lib = test_library();
+        let flat1 = lib.all_samples_flat();
+        let flat2 = lib.all_samples_flat();
+        for (a, b) in flat1.iter().zip(flat2.iter()) {
+            assert_eq!(a.entry.filename, b.entry.filename);
+        }
+    }
+
+    #[test]
+    fn sample_by_flat_index_round_trips() {
+        let lib = test_library();
+        let flat = lib.all_samples_flat();
+        for (i, sample) in flat.iter().enumerate() {
+            let retrieved = lib.sample_by_flat_index(i).expect("should exist");
+            assert_eq!(retrieved.entry.filename, sample.entry.filename);
+        }
+    }
+
+    #[test]
+    fn sample_by_flat_index_out_of_bounds() {
+        let lib = test_library();
+        assert!(lib.sample_by_flat_index(999999).is_none());
     }
 }
 

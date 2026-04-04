@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Sample categories for classification and color coding.
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SampleCategory {
     Kick,
