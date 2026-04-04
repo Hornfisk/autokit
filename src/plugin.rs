@@ -139,6 +139,8 @@ impl Plugin for Autokit {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        tracing::info!("editor() called — creating egui editor");
+
         let shared = Arc::clone(&self.shared);
         let params = Arc::clone(&self.params);
 
@@ -148,12 +150,14 @@ impl Plugin for Autokit {
         let seq_snapshot: Arc<dyn Fn() -> crate::util::history::SequencerSnapshot + Send + Sync> =
             Arc::new(move || seq.clone());
 
-        crate::ui::editor::create(
+        let result = crate::ui::editor::create(
             self.params.editor_state.clone(),
             shared,
             params,
             seq_snapshot,
-        )
+        );
+        tracing::info!("editor() result: {}", if result.is_some() { "Some" } else { "None" });
+        result
     }
 
     fn initialize(
@@ -234,10 +238,11 @@ impl Plugin for Autokit {
             self.process_count += 1;
             if self.process_count % 1000 == 1 {
                 let active = self.voices.as_ref().map(|v| v.active_count()).unwrap_or(0);
-                let has_lib = {
-                    let shared = self.shared.lock();
-                    shared.library.is_some()
-                };
+                let has_lib = self
+                    .shared
+                    .try_lock()
+                    .map(|s| s.library.is_some())
+                    .unwrap_or(false);
                 let seq_step = self.sequencer.current_step();
                 let seq_playing = self.sequencer.is_playing();
                 permit_alloc(|| {
@@ -258,59 +263,66 @@ impl Plugin for Autokit {
             None => return ProcessStatus::KeepAlive,
         };
 
-        // Lock shared state for the render section — holds for MIDI + sequencer + voice render
-        let mut shared = self.shared.lock();
+        let num_samples = buffer.samples();
 
-        // Drain MIDI events and trigger voices
-        while let Some(event) = context.next_event() {
-            match event {
-                NoteEvent::NoteOn { note, velocity, .. } => {
-                    if let Some(pad_idx) = shared.kit.pad_for_note(note) {
-                        voices.trigger(pad_idx, velocity, &shared.kit, 0);
+        // Try to lock shared state — if the GUI holds it, skip MIDI/sequencer
+        // this buffer (a few ms) rather than blocking the audio thread.
+        if let Some(shared) = self.shared.try_lock() {
+            // Drain MIDI events and trigger voices
+            while let Some(event) = context.next_event() {
+                match event {
+                    NoteEvent::NoteOn { note, velocity, .. } => {
+                        if let Some(pad_idx) = shared.kit.pad_for_note(note) {
+                            voices.trigger(pad_idx, velocity, &shared.kit, 0);
+                        }
                     }
+                    NoteEvent::NoteOff { .. } => {}
+                    _ => {}
                 }
-                NoteEvent::NoteOff { .. } => {}
-                _ => {}
+            }
+
+            // Run sequencer — triggers voices at step boundaries
+            let transport = context.transport();
+            self.sequencer.process_buffer(
+                num_samples,
+                transport.playing,
+                transport.tempo,
+                transport.pos_beats(),
+                self.sample_rate,
+                voices,
+                &shared.kit,
+            );
+
+            let channels = buffer.as_slice();
+            if channels.len() >= 2 {
+                let (left_channels, right_channels) = channels.split_at_mut(1);
+                let output_left = &mut left_channels[0][..num_samples];
+                let output_right = &mut right_channels[0][..num_samples];
+                output_left.fill(0.0);
+                output_right.fill(0.0);
+                voices.process(output_left, output_right, &shared.kit);
+            }
+            drop(shared);
+        } else {
+            // GUI holds the lock — output silence this buffer.
+            let channels = buffer.as_slice();
+            if channels.len() >= 2 {
+                let (left_channels, right_channels) = channels.split_at_mut(1);
+                left_channels[0][..num_samples].fill(0.0);
+                right_channels[0][..num_samples].fill(0.0);
             }
         }
 
-        // Run sequencer — triggers voices at step boundaries
-        let transport = context.transport();
-        self.sequencer.process_buffer(
-            buffer.samples(),
-            transport.playing,
-            transport.tempo,
-            transport.pos_beats(),
-            self.sample_rate,
-            voices,
-            &shared.kit,
-        );
-
-        let num_samples = buffer.samples();
-        let channels = buffer.as_slice();
-
-        if channels.len() < 2 {
-            return ProcessStatus::KeepAlive;
-        }
-
-        let (left_channels, right_channels) = channels.split_at_mut(1);
-        let output_left = &mut left_channels[0][..num_samples];
-        let output_right = &mut right_channels[0][..num_samples];
-
-        output_left.fill(0.0);
-        output_right.fill(0.0);
-
-        voices.process(output_left, output_right, &shared.kit);
-
-        // Drop the lock before param smoothing
-        drop(shared);
-
+        // Apply master volume after lock is released
         let master_gain = self.params.master_volume.smoothed.next();
-        for s in output_left.iter_mut() {
-            *s *= master_gain;
-        }
-        for s in output_right.iter_mut() {
-            *s *= master_gain;
+        let channels = buffer.as_slice();
+        if channels.len() >= 2 {
+            for s in channels[0][..num_samples].iter_mut() {
+                *s *= master_gain;
+            }
+            for s in channels[1][..num_samples].iter_mut() {
+                *s *= master_gain;
+            }
         }
 
         ProcessStatus::KeepAlive
