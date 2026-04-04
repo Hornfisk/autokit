@@ -1,6 +1,6 @@
 use nih_plug_egui::egui;
 
-use crate::engine::kit::DrumPad;
+use crate::engine::kit::SampleCategory;
 use crate::ui::knob;
 use crate::ui::state::WaveformSummary;
 use crate::ui::theme::{self, category_color};
@@ -9,33 +9,28 @@ use crate::ui::waveform;
 /// Actions that a pad row can trigger.
 pub enum PadRowAction {
     None,
-    /// Toggle expand/collapse for this pad.
     ToggleExpand,
-    /// Quick-dice this pad (from the inline button).
     DicePad,
-    /// Dice all pads of this pad's category.
     DiceCategory,
-    /// Toggle lock on this pad.
     ToggleLock,
-    /// Volume changed.
     SetVolume(f32),
-    /// Pan changed.
     SetPan(f32),
-    /// Pitch changed.
     SetPitch(f32),
 }
 
-/// Draw a single collapsed pad row.
-/// Returns the action triggered (if any).
-pub fn draw_collapsed(
+/// Draw a collapsed pad row from snapshot data (no mutex held).
+pub fn draw_collapsed_from_snapshot(
     ui: &mut egui::Ui,
     _index: usize,
-    pad: &DrumPad,
+    has_sample: bool,
+    name: &str,
+    category: SampleCategory,
+    volume: f32,
     waveform_summary: Option<&WaveformSummary>,
     is_selected: bool,
 ) -> PadRowAction {
     let mut action = PadRowAction::None;
-    let cat_color = category_color(pad.category);
+    let cat_color = category_color(category);
     let cat_egui = cat_color.to_egui();
     let waveform_opacity = if is_selected { 0.85 } else { 0.5 };
 
@@ -45,7 +40,6 @@ pub fn draw_collapsed(
         theme::BG_ROW
     };
 
-    // Outer frame for the row
     egui::Frame::NONE
         .fill(bg)
         .corner_radius(egui::CornerRadius {
@@ -67,7 +61,6 @@ pub fn draw_collapsed(
 
                 ui.add_space(10.0);
 
-                // Clickable area for the main content
                 let content_response = ui
                     .horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 10.0;
@@ -82,22 +75,18 @@ pub fn draw_collapsed(
                             painter.text(
                                 tag_rect.center(),
                                 egui::Align2::CENTER_CENTER,
-                                pad.category.label(),
+                                category.label(),
                                 egui::FontId::new(8.0, egui::FontFamily::Monospace),
                                 theme::BG_MAIN,
                             );
                         }
 
                         // Sample name
-                        let name = if pad.sample.is_some() {
-                            &pad.name
-                        } else {
-                            "—"
-                        };
+                        let display_name = if has_sample { name } else { "—" };
                         ui.add_sized(
                             egui::vec2(170.0, ui.available_height()),
                             egui::Label::new(
-                                egui::RichText::new(name)
+                                egui::RichText::new(display_name)
                                     .font(egui::FontId::new(11.0, egui::FontFamily::Monospace))
                                     .color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)),
                             )
@@ -121,13 +110,12 @@ pub fn draw_collapsed(
                         if ui.is_rect_visible(vol_rect) {
                             let painter = ui.painter_at(vol_rect);
                             painter.rect_filled(vol_rect, 2, theme::BG_MAIN);
-                            let fill_width = vol_rect.width() * pad.volume;
+                            let fill_width = vol_rect.width() * volume;
                             let fill_rect = egui::Rect::from_min_size(
                                 vol_rect.min,
                                 egui::vec2(fill_width, vol_rect.height()),
                             );
                             let fill_color = cat_color.to_egui_alpha(0x66);
-                            // Glow: wider rect behind at low opacity
                             let glow_rect = fill_rect.expand2(egui::vec2(0.0, 1.5));
                             painter.rect_filled(glow_rect, 2, cat_color.to_egui_alpha(0x18));
                             painter.rect_filled(fill_rect, 2, fill_color);
@@ -135,12 +123,11 @@ pub fn draw_collapsed(
                     })
                     .response;
 
-                // Check if the main content area was clicked
                 if content_response.interact(egui::Sense::click()).clicked() {
                     action = PadRowAction::ToggleExpand;
                 }
 
-                // Dice button (right side)
+                // Dice button
                 ui.add_space(2.0);
                 let dice_response = ui.add(
                     egui::Button::new(
@@ -160,15 +147,18 @@ pub fn draw_collapsed(
     action
 }
 
-/// Draw the expanded detail panel for a pad.
-/// Returns the action triggered (if any).
-pub fn draw_expanded(
+/// Draw the expanded detail panel from snapshot data (no mutex held).
+pub fn draw_expanded_from_snapshot(
     ui: &mut egui::Ui,
     index: usize,
-    pad: &DrumPad,
+    category: SampleCategory,
+    volume: f32,
+    pan: f32,
+    pitch: f32,
+    locked: bool,
 ) -> PadRowAction {
     let mut action = PadRowAction::None;
-    let cat_color = category_color(pad.category);
+    let cat_color = category_color(category);
     let cat_egui = cat_color.to_egui();
 
     egui::Frame::NONE
@@ -182,7 +172,6 @@ pub fn draw_expanded(
         })
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                // Left border continuation
                 let (strip_rect, _) =
                     ui.allocate_exact_size(egui::vec2(3.0, 50.0), egui::Sense::hover());
                 ui.painter().rect_filled(
@@ -193,19 +182,16 @@ pub fn draw_expanded(
 
                 ui.add_space(12.0);
 
-                // Knobs — vertically centered
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 16.0;
 
                     // Volume knob
-                    let mut vol = pad.volume;
+                    let mut vol = volume;
                     let vol_result = knob::knob(
                         ui,
                         egui::Id::new(("vol", index)),
                         &mut vol,
-                        0.0,
-                        1.0,
-                        1.0,
+                        0.0, 1.0, 1.0,
                         "VOL",
                         |v| format!("{}", (v * 100.0) as u32),
                         cat_egui,
@@ -216,14 +202,12 @@ pub fn draw_expanded(
                     }
 
                     // Pan knob
-                    let mut pan = pad.pan;
+                    let mut p = pan;
                     let pan_result = knob::knob(
                         ui,
                         egui::Id::new(("pan", index)),
-                        &mut pan,
-                        -1.0,
-                        1.0,
-                        0.0,
+                        &mut p,
+                        -1.0, 1.0, 0.0,
                         "PAN",
                         |v| {
                             if v.abs() < 0.01 {
@@ -238,40 +222,33 @@ pub fn draw_expanded(
                         34.0,
                     );
                     if pan_result.changed {
-                        action = PadRowAction::SetPan(pan);
+                        action = PadRowAction::SetPan(p);
                     }
 
                     // Pitch knob
-                    let mut pitch = pad.pitch;
+                    let mut pt = pitch;
                     let pitch_result = knob::knob(
                         ui,
                         egui::Id::new(("pitch", index)),
-                        &mut pitch,
-                        -24.0,
-                        24.0,
-                        0.0,
+                        &mut pt,
+                        -24.0, 24.0, 0.0,
                         "PITCH",
                         |v| format!("{:+.0}", v),
                         cat_color.to_egui_alpha(0x88),
                         34.0,
                     );
                     if pitch_result.changed {
-                        action = PadRowAction::SetPitch(pitch);
+                        action = PadRowAction::SetPitch(pt);
                     }
 
-                    // Divider
                     ui.add(egui::Separator::default().vertical().spacing(8.0));
 
-                    // Lock checkbox
-                    let lock_color = if pad.locked {
-                        theme::ACCENT
-                    } else {
-                        theme::TEXT_DISABLED
-                    };
+                    // Lock button
+                    let lock_color = if locked { theme::ACCENT } else { theme::TEXT_DISABLED };
                     if ui
                         .add(
                             egui::Button::new(
-                                egui::RichText::new(if pad.locked { "LOCKED" } else { "LOCK" })
+                                egui::RichText::new(if locked { "LOCKED" } else { "LOCK" })
                                     .font(egui::FontId::new(8.0, egui::FontFamily::Monospace))
                                     .color(lock_color),
                             )
@@ -299,7 +276,7 @@ pub fn draw_expanded(
                     }
 
                     // Dice category button
-                    let cat_label = format!("DICE {}S", pad.category.label());
+                    let cat_label = format!("DICE {}S", category.label());
                     if ui
                         .add(
                             egui::Button::new(

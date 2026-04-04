@@ -2,7 +2,7 @@ use nih_plug::prelude::*;
 use nih_plug_egui::egui;
 
 use crate::plugin::AutokitParams;
-use crate::ui::state::{ScanStatus, SharedState};
+use crate::ui::state::ScanStatus;
 use crate::ui::theme;
 
 /// Actions the toolbar can trigger.
@@ -15,10 +15,13 @@ pub enum ToolbarAction {
     SetScale(f32),
 }
 
-/// Draw the toolbar. Returns an action if a button was clicked.
-pub fn draw_toolbar(
+/// Draw the toolbar from snapshot data (no mutex held).
+pub fn draw_toolbar_snapshot(
     ui: &mut egui::Ui,
-    shared: &SharedState,
+    scan_status: &ScanStatus,
+    can_undo: bool,
+    can_redo: bool,
+    all_locked: bool,
     params: &AutokitParams,
     setter: &ParamSetter,
     current_scale: f32,
@@ -46,7 +49,7 @@ pub fn draw_toolbar(
                         .color(theme::TEXT_DISABLED),
                 );
 
-                match &shared.scan_status {
+                match scan_status {
                     ScanStatus::Scanning => {
                         ui.label(
                             egui::RichText::new("scanning...")
@@ -63,14 +66,10 @@ pub fn draw_toolbar(
                     }
                 }
 
-                ui.add_space(ui.available_width() - 380.0); // Push center/right sections
+                ui.add_space(ui.available_width() - 380.0);
 
-                // Center: undo/redo + dice/lock
-                let undo_color = if shared.history.can_undo() {
-                    theme::TEXT_DIM
-                } else {
-                    theme::TEXT_DISABLED
-                };
+                // Undo
+                let undo_color = if can_undo { theme::TEXT_DIM } else { theme::TEXT_DISABLED };
                 if ui
                     .add(
                         egui::Button::new(
@@ -82,16 +81,13 @@ pub fn draw_toolbar(
                         .min_size(egui::vec2(44.0, 22.0)),
                     )
                     .clicked()
-                    && shared.history.can_undo()
+                    && can_undo
                 {
                     action = ToolbarAction::Undo;
                 }
 
-                let redo_color = if shared.history.can_redo() {
-                    theme::TEXT_DIM
-                } else {
-                    theme::TEXT_DISABLED
-                };
+                // Redo
+                let redo_color = if can_redo { theme::TEXT_DIM } else { theme::TEXT_DISABLED };
                 if ui
                     .add(
                         egui::Button::new(
@@ -103,12 +99,11 @@ pub fn draw_toolbar(
                         .min_size(egui::vec2(44.0, 22.0)),
                     )
                     .clicked()
-                    && shared.history.can_redo()
+                    && can_redo
                 {
                     action = ToolbarAction::Redo;
                 }
 
-                // Divider
                 ui.add(egui::Separator::default().vertical().spacing(4.0));
 
                 // Dice All
@@ -129,7 +124,6 @@ pub fn draw_toolbar(
                 }
 
                 // Lock All
-                let all_locked = shared.kit.pads.iter().all(|p| p.locked);
                 let lock_label = if all_locked { "UNLOCK ALL" } else { "LOCK ALL" };
                 if ui
                     .add(
@@ -146,7 +140,6 @@ pub fn draw_toolbar(
                     action = ToolbarAction::LockAll;
                 }
 
-                // Divider
                 ui.add(egui::Separator::default().vertical().spacing(4.0));
 
                 // Master volume

@@ -4,15 +4,62 @@ use nih_plug_egui::{create_egui_editor, EguiState};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
+use crate::engine::kit::SampleCategory;
 use crate::plugin::AutokitParams;
 use crate::ui::pad_row::{self, PadRowAction};
-use crate::ui::state::SharedState;
+use crate::ui::state::{ScanStatus, SharedState, WaveformSummary};
 use crate::ui::theme;
 use crate::ui::toolbar::{self, ToolbarAction};
 use crate::util::history::HistorySnapshot;
 
 /// Number of points in waveform summaries.
 const WAVEFORM_POINTS: usize = 200;
+
+/// Lightweight snapshot of one pad for display — no sample data, just metadata.
+struct PadDisplay {
+    name: String,
+    category: SampleCategory,
+    has_sample: bool,
+    locked: bool,
+    volume: f32,
+    pan: f32,
+    pitch: f32,
+}
+
+/// Everything the GUI needs to render one frame, captured in a brief lock.
+struct DisplaySnapshot {
+    pads: [PadDisplay; 16],
+    waveforms: [Option<WaveformSummary>; 16],
+    scan_status: ScanStatus,
+    can_undo: bool,
+    can_redo: bool,
+    has_library: bool,
+}
+
+impl DisplaySnapshot {
+    fn from_shared(shared: &SharedState) -> Self {
+        let pads = core::array::from_fn(|i| {
+            let pad = &shared.kit.pads[i];
+            PadDisplay {
+                name: pad.name.clone(),
+                category: pad.category,
+                has_sample: pad.sample.is_some(),
+                locked: pad.locked,
+                volume: pad.volume,
+                pan: pad.pan,
+                pitch: pad.pitch,
+            }
+        });
+        Self {
+            pads,
+            waveforms: shared.waveforms.clone(),
+            scan_status: shared.scan_status.clone(),
+            can_undo: shared.history.can_undo(),
+            can_redo: shared.history.can_redo(),
+            has_library: shared.library.is_some(),
+        }
+    }
+}
 
 /// GUI-only state (not shared with audio thread).
 pub struct EditorState {
@@ -56,59 +103,41 @@ pub fn create(
                 state.initialized = true;
             }
 
+            // --- Phase 1: Brief lock to snapshot display state ---
+            let snap = {
+                let shared = shared.lock();
+                DisplaySnapshot::from_shared(&shared)
+            };
+            // Lock is now released — audio thread can proceed freely.
+
+            // Collect any actions triggered during rendering.
+            let mut pending_action: Option<GuiAction> = None;
+
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(theme::BG_MAIN))
                 .show(ctx, |ui| {
-                    let mut shared = shared.lock();
-
-                    // Toolbar
-                    let toolbar_action = toolbar::draw_toolbar(
+                    // Toolbar (uses snapshot data, no mutex held)
+                    let all_locked = snap.pads.iter().all(|p| p.locked);
+                    let toolbar_action = toolbar::draw_toolbar_snapshot(
                         ui,
-                        &shared,
+                        &snap.scan_status,
+                        snap.can_undo,
+                        snap.can_redo,
+                        all_locked,
                         &params,
                         setter,
                         state.scale,
                     );
 
                     match toolbar_action {
-                        ToolbarAction::Undo => {
-                            let current = HistorySnapshot {
-                                pads: shared.kit.snapshot(),
-                                sequencer: sequencer_snapshot_fn(),
-                            };
-                            if let Some(restored) = shared.history.undo(current) {
-                                shared.kit.restore(&restored.pads);
-                                shared.update_all_waveforms(WAVEFORM_POINTS);
-                            }
-                        }
-                        ToolbarAction::Redo => {
-                            let current = HistorySnapshot {
-                                pads: shared.kit.snapshot(),
-                                sequencer: sequencer_snapshot_fn(),
-                            };
-                            if let Some(restored) = shared.history.redo(current) {
-                                shared.kit.restore(&restored.pads);
-                                shared.update_all_waveforms(WAVEFORM_POINTS);
-                            }
-                        }
+                        ToolbarAction::Undo => pending_action = Some(GuiAction::Undo),
+                        ToolbarAction::Redo => pending_action = Some(GuiAction::Redo),
                         ToolbarAction::DiceAll => {
-                            if shared.library.is_some() {
-                                let snapshot = HistorySnapshot {
-                                    pads: shared.kit.snapshot(),
-                                    sequencer: sequencer_snapshot_fn(),
-                                };
-                                shared.history.push(snapshot);
-                                let lib = shared.library.as_ref().unwrap().clone_for_dice();
-                                shared.kit.dice_all(&lib);
-                                shared.update_all_waveforms(WAVEFORM_POINTS);
+                            if snap.has_library {
+                                pending_action = Some(GuiAction::DiceAll);
                             }
                         }
-                        ToolbarAction::LockAll => {
-                            let all_locked = shared.kit.pads.iter().all(|p| p.locked);
-                            for pad in &mut shared.kit.pads {
-                                pad.locked = !all_locked;
-                            }
-                        }
+                        ToolbarAction::LockAll => pending_action = Some(GuiAction::LockAll),
                         ToolbarAction::SetScale(s) => {
                             state.scale = s;
                             ctx.set_pixels_per_point(s);
@@ -127,11 +156,13 @@ pub fn create(
 
                             for i in 0..16 {
                                 let is_selected = state.selected_pad == Some(i);
-                                let pad = &shared.kit.pads[i];
-                                let wf = shared.waveforms[i].as_ref();
+                                let pad = &snap.pads[i];
+                                let wf = snap.waveforms[i].as_ref();
 
-                                let row_action =
-                                    pad_row::draw_collapsed(ui, i, pad, wf, is_selected);
+                                let row_action = pad_row::draw_collapsed_from_snapshot(
+                                    ui, i, pad.has_sample, &pad.name, pad.category,
+                                    pad.volume, wf, is_selected,
+                                );
 
                                 match row_action {
                                     PadRowAction::ToggleExpand => {
@@ -139,16 +170,8 @@ pub fn create(
                                             if is_selected { None } else { Some(i) };
                                     }
                                     PadRowAction::DicePad => {
-                                        if shared.library.is_some() {
-                                            let snapshot = HistorySnapshot {
-                                                pads: shared.kit.snapshot(),
-                                                sequencer: sequencer_snapshot_fn(),
-                                            };
-                                            shared.history.push(snapshot);
-                                            let lib =
-                                                shared.library.as_ref().unwrap().clone_for_dice();
-                                            shared.kit.dice_pad(i, &lib);
-                                            shared.update_waveform(i, WAVEFORM_POINTS);
+                                        if snap.has_library {
+                                            pending_action = Some(GuiAction::DicePad(i));
                                         }
                                     }
                                     _ => {}
@@ -156,53 +179,33 @@ pub fn create(
 
                                 // Expanded detail
                                 if is_selected {
-                                    let pad = &shared.kit.pads[i];
-                                    let detail_action = pad_row::draw_expanded(ui, i, pad);
+                                    let detail_action = pad_row::draw_expanded_from_snapshot(
+                                        ui, i, pad.category, pad.volume, pad.pan,
+                                        pad.pitch, pad.locked,
+                                    );
 
                                     match detail_action {
                                         PadRowAction::SetVolume(v) => {
-                                            shared.kit.pads[i].volume = v;
+                                            pending_action = Some(GuiAction::SetPadVolume(i, v));
                                         }
                                         PadRowAction::SetPan(v) => {
-                                            shared.kit.pads[i].pan = v;
+                                            pending_action = Some(GuiAction::SetPadPan(i, v));
                                         }
                                         PadRowAction::SetPitch(v) => {
-                                            shared.kit.pads[i].pitch = v;
+                                            pending_action = Some(GuiAction::SetPadPitch(i, v));
                                         }
                                         PadRowAction::ToggleLock => {
-                                            shared.kit.toggle_lock(i);
+                                            pending_action = Some(GuiAction::ToggleLock(i));
                                         }
                                         PadRowAction::DicePad => {
-                                            if shared.library.is_some() {
-                                                let snapshot = HistorySnapshot {
-                                                    pads: shared.kit.snapshot(),
-                                                    sequencer: sequencer_snapshot_fn(),
-                                                };
-                                                shared.history.push(snapshot);
-                                                let lib = shared
-                                                    .library
-                                                    .as_ref()
-                                                    .unwrap()
-                                                    .clone_for_dice();
-                                                shared.kit.dice_pad(i, &lib);
-                                                shared.update_waveform(i, WAVEFORM_POINTS);
+                                            if snap.has_library {
+                                                pending_action = Some(GuiAction::DicePad(i));
                                             }
                                         }
                                         PadRowAction::DiceCategory => {
-                                            if shared.library.is_some() {
-                                                let cat = shared.kit.pads[i].category;
-                                                let snapshot = HistorySnapshot {
-                                                    pads: shared.kit.snapshot(),
-                                                    sequencer: sequencer_snapshot_fn(),
-                                                };
-                                                shared.history.push(snapshot);
-                                                let lib = shared
-                                                    .library
-                                                    .as_ref()
-                                                    .unwrap()
-                                                    .clone_for_dice();
-                                                shared.kit.dice_category(cat, &lib);
-                                                shared.update_all_waveforms(WAVEFORM_POINTS);
+                                            if snap.has_library {
+                                                pending_action =
+                                                    Some(GuiAction::DiceCategory(i, pad.category));
                                             }
                                         }
                                         _ => {}
@@ -211,6 +214,97 @@ pub fn create(
                             }
                         });
                 });
+
+            // --- Phase 2: Brief lock to apply any mutation ---
+            if let Some(action) = pending_action {
+                let mut shared = shared.lock();
+                let seq_snap = &sequencer_snapshot_fn;
+                match action {
+                    GuiAction::Undo => {
+                        let current = HistorySnapshot {
+                            pads: shared.kit.snapshot(),
+                            sequencer: seq_snap(),
+                        };
+                        if let Some(restored) = shared.history.undo(current) {
+                            shared.kit.restore(&restored.pads);
+                            shared.update_all_waveforms(WAVEFORM_POINTS);
+                        }
+                    }
+                    GuiAction::Redo => {
+                        let current = HistorySnapshot {
+                            pads: shared.kit.snapshot(),
+                            sequencer: seq_snap(),
+                        };
+                        if let Some(restored) = shared.history.redo(current) {
+                            shared.kit.restore(&restored.pads);
+                            shared.update_all_waveforms(WAVEFORM_POINTS);
+                        }
+                    }
+                    GuiAction::DiceAll => {
+                        let snapshot = HistorySnapshot {
+                            pads: shared.kit.snapshot(),
+                            sequencer: seq_snap(),
+                        };
+                        shared.history.push(snapshot);
+                        let lib = shared.library.as_ref().unwrap().clone_for_dice();
+                        shared.kit.dice_all(&lib);
+                        shared.update_all_waveforms(WAVEFORM_POINTS);
+                    }
+                    GuiAction::DicePad(i) => {
+                        let snapshot = HistorySnapshot {
+                            pads: shared.kit.snapshot(),
+                            sequencer: seq_snap(),
+                        };
+                        shared.history.push(snapshot);
+                        let lib = shared.library.as_ref().unwrap().clone_for_dice();
+                        shared.kit.dice_pad(i, &lib);
+                        shared.update_waveform(i, WAVEFORM_POINTS);
+                    }
+                    GuiAction::DiceCategory(i, cat) => {
+                        let snapshot = HistorySnapshot {
+                            pads: shared.kit.snapshot(),
+                            sequencer: seq_snap(),
+                        };
+                        shared.history.push(snapshot);
+                        let lib = shared.library.as_ref().unwrap().clone_for_dice();
+                        shared.kit.dice_category(cat, &lib);
+                        shared.update_all_waveforms(WAVEFORM_POINTS);
+                    }
+                    GuiAction::LockAll => {
+                        let all_locked = shared.kit.pads.iter().all(|p| p.locked);
+                        for pad in &mut shared.kit.pads {
+                            pad.locked = !all_locked;
+                        }
+                    }
+                    GuiAction::ToggleLock(i) => {
+                        shared.kit.toggle_lock(i);
+                    }
+                    GuiAction::SetPadVolume(i, v) => {
+                        shared.kit.pads[i].volume = v;
+                    }
+                    GuiAction::SetPadPan(i, v) => {
+                        shared.kit.pads[i].pan = v;
+                    }
+                    GuiAction::SetPadPitch(i, v) => {
+                        shared.kit.pads[i].pitch = v;
+                    }
+                }
+                // Lock drops here — held only for the mutation.
+            }
         },
     )
+}
+
+/// Actions that the GUI can trigger, applied in a brief second lock.
+enum GuiAction {
+    Undo,
+    Redo,
+    DiceAll,
+    DicePad(usize),
+    DiceCategory(usize, SampleCategory),
+    LockAll,
+    ToggleLock(usize),
+    SetPadVolume(usize, f32),
+    SetPadPan(usize, f32),
+    SetPadPitch(usize, f32),
 }
