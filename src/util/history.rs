@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use crate::engine::kit::SampleCategory;
+use crate::engine::kit::{SampleCategory, NUM_PADS};
 
 const MAX_HISTORY: usize = 64;
 
@@ -16,6 +16,7 @@ pub struct PadSnapshot {
     pub volume: f32,
     pub pan: f32,
     pub pitch: f32,
+    pub decay: f32,
 }
 
 /// Snapshot of one sequencer step.
@@ -24,6 +25,9 @@ pub struct StepSnapshot {
     pub enabled: bool,
     pub velocity: f32,
     pub probability: f32,
+    pub pan: Option<f32>,
+    pub pitch: Option<f32>,
+    pub condition: crate::engine::sequencer::ConditionTrig,
 }
 
 /// Snapshot of one sequencer lane.
@@ -33,11 +37,18 @@ pub struct LaneSnapshot {
     pub muted: bool,
 }
 
-/// Snapshot of the full sequencer state.
+/// Snapshot of one pattern.
+#[derive(Clone)]
+pub struct PatternSnapshot {
+    pub lanes: [LaneSnapshot; NUM_PADS],
+    pub swing: f32,
+}
+
+/// Snapshot of the full sequencer state (all 16 patterns).
 #[derive(Clone)]
 pub struct SequencerSnapshot {
-    pub lanes: [LaneSnapshot; 16],
-    pub swing: f32,
+    pub patterns: Vec<PatternSnapshot>,
+    pub active_pattern: usize,
 }
 
 /// Combined snapshot for one undo entry.
@@ -100,7 +111,7 @@ mod tests {
 
     /// Create a minimal snapshot with identifiable pad names.
     fn make_snapshot(label: &str) -> HistorySnapshot {
-        let pads: Vec<PadSnapshot> = (0..16)
+        let pads: Vec<PadSnapshot> = (0..NUM_PADS)
             .map(|i| PadSnapshot {
                 sample: None,
                 sample_path: None,
@@ -109,21 +120,28 @@ mod tests {
                 volume: 1.0,
                 pan: 0.0,
                 pitch: 0.0,
+                decay: 1.0,
             })
             .collect();
 
-        let lanes: [LaneSnapshot; 16] = core::array::from_fn(|_| LaneSnapshot {
-            steps: [StepSnapshot {
-                enabled: false,
-                velocity: 0.8,
-                probability: 1.0,
-            }; 16],
-            muted: false,
-        });
+        let patterns: Vec<PatternSnapshot> = (0..16).map(|_| {
+            let lanes: [LaneSnapshot; NUM_PADS] = core::array::from_fn(|_| LaneSnapshot {
+                steps: [StepSnapshot {
+                    enabled: false,
+                    velocity: 0.8,
+                    probability: 1.0,
+                    pan: None,
+                    pitch: None,
+                    condition: crate::engine::sequencer::ConditionTrig::Always,
+                }; 16],
+                muted: false,
+            });
+            PatternSnapshot { lanes, swing: 0.0 }
+        }).collect();
 
         HistorySnapshot {
             pads,
-            sequencer: SequencerSnapshot { lanes, swing: 0.0 },
+            sequencer: SequencerSnapshot { patterns, active_pattern: 0 },
         }
     }
 

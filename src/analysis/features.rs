@@ -1,9 +1,11 @@
 use realfft::RealFftPlanner;
 
+use serde::{Deserialize, Serialize};
+
 use crate::engine::kit::SampleCategory;
 
 /// Audio features extracted from a sample for classification.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioFeatures {
     /// Time from start to peak amplitude, in seconds.
     pub attack_time: f32,

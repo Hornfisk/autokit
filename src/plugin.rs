@@ -1,22 +1,33 @@
 use nih_plug::prelude::*;
 use nih_plug::util::permit_alloc;
+use nih_plug_egui::EguiState;
+use parking_lot::Mutex;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use crossbeam_channel::Receiver;
+use crate::engine::kit::NUM_PADS;
 
 use crate::analysis::library::SampleLibrary;
-use crate::engine::kit::DrumKit;
 use crate::engine::sampler::VoicePool;
 use crate::engine::sequencer::Sequencer;
 use crate::logging;
-use crate::util::history::{History, HistorySnapshot};
+use crate::ui::state::{ScanStatus, SharedState};
+use crate::util::history::HistorySnapshot;
 
 /// Hard-coded sample library root — folder picker comes in GUI phase.
 const SAMPLE_LIBRARY_ROOT: &str = "/home/natalia/Music/Samples";
 
+/// Number of waveform display points per pad.
+const WAVEFORM_POINTS: usize = 200;
+
 #[derive(Params)]
 pub struct AutokitParams {
+    #[persist = "editor-state"]
+    pub editor_state: Arc<EguiState>,
+
     #[id = "master_vol"]
     pub master_volume: FloatParam,
 }
@@ -24,6 +35,7 @@ pub struct AutokitParams {
 impl Default for AutokitParams {
     fn default() -> Self {
         Self {
+            editor_state: EguiState::from_size(900, 365),
             master_volume: FloatParam::new(
                 "Master Volume",
                 util::db_to_gain(0.0),
@@ -47,18 +59,71 @@ enum BgMessage {
     LibraryReady(SampleLibrary),
 }
 
+/// Lightweight preview voice — separate from VoicePool.
+struct PreviewVoice {
+    data: Option<Arc<Vec<f32>>>,
+    position: usize,
+}
+
+impl PreviewVoice {
+    fn new() -> Self {
+        Self { data: None, position: 0 }
+    }
+
+    /// Start a new preview. Replaces any currently playing preview.
+    fn start(&mut self, sample: Arc<Vec<f32>>) {
+        permit_alloc(|| {
+            self.data = Some(sample);
+        });
+        self.position = 0;
+    }
+
+    /// Render into stereo buffers (center pan, unity gain). Adds to existing content.
+    fn process(&mut self, output_left: &mut [f32], output_right: &mut [f32]) {
+        let data = match &self.data {
+            Some(d) => d,
+            None => return,
+        };
+
+        for (l, r) in output_left.iter_mut().zip(output_right.iter_mut()) {
+            if self.position >= data.len() {
+                permit_alloc(|| {
+                    self.data = None;
+                });
+                return;
+            }
+            let s = data[self.position] * 0.7071; // center pan (sqrt(0.5))
+            *l += s;
+            *r += s;
+            self.position += 1;
+        }
+    }
+}
+
 pub struct Autokit {
     params: Arc<AutokitParams>,
     sample_rate: f32,
-    kit: DrumKit,
+    /// State shared with the GUI thread.
+    pub shared: Arc<Mutex<SharedState>>,
     voices: Option<VoicePool>,
     /// Receive messages from background thread (checked in process()).
     bg_rx: Option<Receiver<BgMessage>>,
-    /// Library reference kept for kit regeneration.
-    library: Option<SampleLibrary>,
     sequencer: Sequencer,
-    /// Undo/redo history for kit + sequencer changes.
-    history: History,
+    /// Lockfree trigger counters — incremented each time a pad fires.
+    /// Shared with the GUI thread which reads them each frame for activity animation.
+    pub trigger_flags: Arc<[AtomicU8; NUM_PADS]>,
+    /// GUI-to-audio trigger requests — GUI sets to 1, audio thread reads and clears.
+    pub gui_triggers: Arc<[AtomicU8; NUM_PADS]>,
+    /// Lightweight preview voice for sample map auditioning.
+    preview_voice: PreviewVoice,
+    /// Current step position — written by audio thread, read by GUI.
+    pub seq_current_step: Arc<AtomicUsize>,
+    /// Whether sequencer is playing — written by audio thread, read by GUI.
+    pub seq_playing: Arc<AtomicBool>,
+    /// Active pattern index — written by audio thread, read by GUI.
+    pub seq_active_pattern: Arc<AtomicUsize>,
+    /// Fill mode — written by GUI, read by audio thread.
+    pub seq_fill_active: Arc<AtomicBool>,
     /// Debug: counts process() calls to log periodic status.
     #[cfg(debug_assertions)]
     process_count: u64,
@@ -69,43 +134,62 @@ impl Default for Autokit {
         Self {
             params: Arc::new(AutokitParams::default()),
             sample_rate: 44100.0,
-            kit: DrumKit::new(),
+            shared: Arc::new(Mutex::new(SharedState::new())),
             voices: None,
             bg_rx: None,
-            library: None,
             sequencer: Sequencer::new(),
-            history: History::new(),
+            trigger_flags: Arc::new(core::array::from_fn(|_| AtomicU8::new(0))),
+            gui_triggers: Arc::new(core::array::from_fn(|_| AtomicU8::new(0))),
+            preview_voice: PreviewVoice::new(),
+            seq_current_step: Arc::new(AtomicUsize::new(0)),
+            seq_playing: Arc::new(AtomicBool::new(false)),
+            seq_active_pattern: Arc::new(AtomicUsize::new(0)),
+            seq_fill_active: Arc::new(AtomicBool::new(false)),
             #[cfg(debug_assertions)]
             process_count: 0,
         }
     }
 }
 
-/// Populate the kit from the library using the default layout.
-fn populate_kit_from_library(kit: &mut DrumKit, library: &SampleLibrary) {
-    let layout = library.generate_kit();
+/// Populate the kit from the library using the default layout, then update waveforms.
+/// Ensures each pad receives a unique sample (best-effort when category has fewer samples than pads).
+fn populate_kit_from_library(shared: &mut SharedState) {
+    let layout = shared.library.as_ref().expect("library must be set before populate").generate_kit();
     let mut assigned = 0u32;
 
+    // Seed exclusion set with paths from locked pads so we don't duplicate those either
+    let mut used: HashSet<String> = shared
+        .kit
+        .pads
+        .iter()
+        .filter(|p| p.locked)
+        .filter_map(|p| p.sample_path.clone())
+        .collect();
+
     for (pad_idx, category) in layout {
-        if pad_idx >= kit.pads.len() {
+        if pad_idx >= shared.kit.pads.len() {
             break;
         }
 
         // Skip locked pads
-        if kit.pads[pad_idx].locked {
+        if shared.kit.pads[pad_idx].locked {
             continue;
         }
 
-        if let Some(sample) = library.random_from(category) {
-            kit.pads[pad_idx].sample = Some(Arc::clone(&sample.data));
-            kit.pads[pad_idx].sample_path = Some(sample.entry.path.to_string_lossy().to_string());
-            kit.pads[pad_idx].name = sample.entry.filename.clone();
-            kit.pads[pad_idx].category = sample.entry.category;
+        if let Some(sample) = shared.library.as_ref().unwrap().random_from_excluding(category, &used) {
+            let path = sample.entry.path.to_string_lossy().to_string();
+            used.insert(path.clone());
+            shared.kit.pads[pad_idx].sample = Some(Arc::clone(&sample.data));
+            shared.kit.pads[pad_idx].sample_path = Some(path);
+            shared.kit.pads[pad_idx].name = sample.entry.filename.clone();
+            shared.kit.pads[pad_idx].category = sample.entry.category;
             assigned += 1;
         }
     }
 
-    tracing::info!(assigned, total_pads = kit.pads.len(), "kit populated from library");
+    tracing::info!(assigned, total_pads = shared.kit.pads.len(), "kit populated from library");
+
+    shared.update_all_waveforms(WAVEFORM_POINTS);
 }
 
 impl Plugin for Autokit {
@@ -130,6 +214,27 @@ impl Plugin for Autokit {
 
     fn params(&self) -> Arc<dyn Params> {
         self.params.clone()
+    }
+
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        tracing::info!("editor() called — creating egui editor");
+
+        let shared = Arc::clone(&self.shared);
+        let params = Arc::clone(&self.params);
+
+        let result = crate::ui::editor::create(
+            self.params.editor_state.clone(),
+            shared,
+            params,
+            Arc::clone(&self.trigger_flags),
+            Arc::clone(&self.gui_triggers),
+            Arc::clone(&self.seq_current_step),
+            Arc::clone(&self.seq_playing),
+            Arc::clone(&self.seq_active_pattern),
+            Arc::clone(&self.seq_fill_active),
+        );
+        tracing::info!("editor() result: {}", if result.is_some() { "Some" } else { "None" });
+        result
     }
 
     fn initialize(
@@ -186,14 +291,18 @@ impl Plugin for Autokit {
                                 total = library.total,
                                 "library received — populating kit"
                             );
+                            let mut shared = self.shared.lock();
                             // Push snapshot before first population for undo support
                             let snapshot = HistorySnapshot {
-                                pads: self.kit.snapshot(),
+                                pads: shared.kit.snapshot(),
                                 sequencer: self.sequencer.snapshot(),
                             };
-                            self.history.push(snapshot);
-                            populate_kit_from_library(&mut self.kit, &library);
-                            self.library = Some(library);
+                            shared.history.push(snapshot);
+                            shared.library = Some(library);
+                            populate_kit_from_library(&mut shared);
+                            shared.scan_status = ScanStatus::Ready {
+                                total: shared.library.as_ref().map(|l| l.total).unwrap_or(0),
+                            };
                         }
                     }
                 });
@@ -206,7 +315,11 @@ impl Plugin for Autokit {
             self.process_count += 1;
             if self.process_count % 1000 == 1 {
                 let active = self.voices.as_ref().map(|v| v.active_count()).unwrap_or(0);
-                let has_lib = self.library.is_some();
+                let has_lib = self
+                    .shared
+                    .try_lock()
+                    .map(|s| s.library.is_some())
+                    .unwrap_or(false);
                 let seq_step = self.sequencer.current_step();
                 let seq_playing = self.sequencer.is_playing();
                 permit_alloc(|| {
@@ -227,53 +340,101 @@ impl Plugin for Autokit {
             None => return ProcessStatus::KeepAlive,
         };
 
-        // Drain MIDI events and trigger voices
-        while let Some(event) = context.next_event() {
-            match event {
-                NoteEvent::NoteOn { note, velocity, .. } => {
-                    if let Some(pad_idx) = self.kit.pad_for_note(note) {
-                        voices.trigger(pad_idx, velocity, &self.kit, 0);
+        let num_samples = buffer.samples();
+
+        // Try to lock shared state — if the GUI holds it, skip MIDI/sequencer
+        // this buffer (a few ms) rather than blocking the audio thread.
+        // permit_alloc: parking_lot may allocate during contended unlock_slow(),
+        // which would otherwise trigger assert_no_alloc panic.
+        let got_lock = permit_alloc(|| self.shared.try_lock());
+        if let Some(mut shared) = got_lock {
+            // Drain MIDI events and trigger voices
+            while let Some(event) = context.next_event() {
+                match event {
+                    NoteEvent::NoteOn { note, velocity, .. } => {
+                        if let Some(pad_idx) = shared.kit.pad_for_note(note) {
+                            voices.trigger(pad_idx, velocity, &shared.kit, 0, None, None);
+                            self.trigger_flags[pad_idx].fetch_add(1, Ordering::Relaxed);
+                        }
                     }
+                    NoteEvent::NoteOff { .. } => {}
+                    _ => {}
                 }
-                NoteEvent::NoteOff { .. } => {}
-                _ => {}
+            }
+
+            // Check GUI trigger requests (keyboard/click-to-play)
+            for i in 0..NUM_PADS {
+                if self.gui_triggers[i].swap(0, Ordering::Relaxed) != 0 {
+                    voices.trigger(i, 0.8, &shared.kit, 0, None, None);
+                    self.trigger_flags[i].fetch_add(1, Ordering::Relaxed);
+                }
+            }
+
+            // Check for preview sample request
+            if let Some(preview_data) = shared.preview_sample.take() {
+                self.preview_voice.start(preview_data);
+            }
+
+            // Sync sequencer fill state from GUI
+            self.sequencer.fill_active = self.seq_fill_active.load(Ordering::Relaxed);
+
+            // Run sequencer with pattern data from SharedState
+            let transport = context.transport();
+            self.sequencer.process_buffer_with_patterns(
+                num_samples,
+                transport.playing,
+                transport.tempo,
+                transport.pos_beats(),
+                self.sample_rate,
+                voices,
+                &shared.kit,
+                &shared.pattern_bank,
+                &self.trigger_flags,
+            );
+
+            // Write playback state for GUI
+            self.seq_current_step.store(self.sequencer.current_step(), Ordering::Relaxed);
+            self.seq_playing.store(self.sequencer.is_playing(), Ordering::Relaxed);
+            self.seq_active_pattern.store(shared.pattern_bank.active, Ordering::Relaxed);
+
+            let channels = buffer.as_slice();
+            if channels.len() >= 2 {
+                let (left_channels, right_channels) = channels.split_at_mut(1);
+                let output_left = &mut left_channels[0][..num_samples];
+                let output_right = &mut right_channels[0][..num_samples];
+                output_left.fill(0.0);
+                output_right.fill(0.0);
+                voices.process(output_left, output_right, &shared.kit);
+                // Mix preview voice
+                self.preview_voice.process(output_left, output_right);
+            }
+            // permit_alloc for drop: parking_lot unlock_slow() may allocate.
+            permit_alloc(|| drop(shared));
+        } else {
+            // GUI holds the lock — output silence this buffer.
+            let channels = buffer.as_slice();
+            if channels.len() >= 2 {
+                let (left_channels, right_channels) = channels.split_at_mut(1);
+                left_channels[0][..num_samples].fill(0.0);
+                right_channels[0][..num_samples].fill(0.0);
+                // Preview voice can still play even without shared state lock
+                self.preview_voice.process(
+                    &mut left_channels[0][..num_samples],
+                    &mut right_channels[0][..num_samples],
+                );
             }
         }
 
-        // Run sequencer — triggers voices at step boundaries
-        let transport = context.transport();
-        self.sequencer.process_buffer(
-            buffer.samples(),
-            transport.playing,
-            transport.tempo,
-            transport.pos_beats(),
-            self.sample_rate,
-            voices,
-            &self.kit,
-        );
-
-        let num_samples = buffer.samples();
-        let channels = buffer.as_slice();
-
-        if channels.len() < 2 {
-            return ProcessStatus::KeepAlive;
-        }
-
-        let (left_channels, right_channels) = channels.split_at_mut(1);
-        let output_left = &mut left_channels[0][..num_samples];
-        let output_right = &mut right_channels[0][..num_samples];
-
-        output_left.fill(0.0);
-        output_right.fill(0.0);
-
-        voices.process(output_left, output_right, &self.kit);
-
+        // Apply master volume after lock is released
         let master_gain = self.params.master_volume.smoothed.next();
-        for s in output_left.iter_mut() {
-            *s *= master_gain;
-        }
-        for s in output_right.iter_mut() {
-            *s *= master_gain;
+        let channels = buffer.as_slice();
+        if channels.len() >= 2 {
+            for s in channels[0][..num_samples].iter_mut() {
+                *s *= master_gain;
+            }
+            for s in channels[1][..num_samples].iter_mut() {
+                *s *= master_gain;
+            }
         }
 
         ProcessStatus::KeepAlive

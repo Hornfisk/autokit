@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+use serde::{Deserialize, Serialize};
 
 use crate::engine::kit::SampleCategory;
 
@@ -20,11 +21,24 @@ const FOLDER_HINTS: &[(&[&str], SampleCategory)] = &[
     (&["fx", "sfx", "effect", "noise"], SampleCategory::Other),
 ];
 
+/// Filename keywords (typically short abbreviations) that hint at a sample category.
+/// These are matched as whole "tokens" in the filename (split by non-alphanumeric chars)
+/// to avoid false positives (e.g., "bd" inside "kbd" or "abdomen").
+const FILENAME_HINTS: &[(&[&str], SampleCategory)] = &[
+    (&["bd", "kick", "kik", "kck"], SampleCategory::Kick),
+    (&["sd", "snare", "snr"], SampleCategory::Snare),
+    (&["hh", "hihat", "hat", "oh", "ch"], SampleCategory::Hihat),
+    (&["cp", "clap", "clp"], SampleCategory::Clap),
+    (&["tom"], SampleCategory::Tom),
+    (&["perc", "rim", "rs", "cb", "cowbell"], SampleCategory::Perc),
+    (&["cy", "cymbal", "crash", "cr", "ride", "rd"], SampleCategory::Cymbal),
+];
+
 /// Keywords in filename/path that suggest a loop (not a oneshot).
 const LOOP_KEYWORDS: &[&str] = &["loop", "bpm", "_lp_", "_lp.", "groove", "break"];
 
 /// A discovered sample file with metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SampleEntry {
     pub path: PathBuf,
     pub filename: String,
@@ -79,8 +93,9 @@ pub fn scan_folder(root: &Path) -> Vec<SampleEntry> {
             continue;
         }
 
-        // Extract folder hint from parent directory names
-        let folder_hint = extract_folder_hint(path);
+        // Extract hint from parent directory names, then fall back to filename
+        let folder_hint = extract_folder_hint(path)
+            .or_else(|| extract_filename_hint(&lower_name));
 
         entries.push(SampleEntry {
             path: path.to_path_buf(),
@@ -118,6 +133,27 @@ fn extract_folder_hint(path: &Path) -> Option<SampleCategory> {
                 if lower.contains(kw) {
                     return Some(*category);
                 }
+            }
+        }
+    }
+
+    None
+}
+
+/// Check filename for category hints using token-based matching.
+/// The filename (without extension) is split on non-alphanumeric boundaries,
+/// and each token is compared against known abbreviations.
+fn extract_filename_hint(lower_filename: &str) -> Option<SampleCategory> {
+    // Strip extension for matching
+    let stem = lower_filename.rsplit_once('.').map(|(s, _)| s).unwrap_or(lower_filename);
+
+    // Split into tokens on non-alphanumeric boundaries (e.g., "bd_01" -> ["bd", "01"])
+    let tokens: Vec<&str> = stem.split(|c: char| !c.is_alphanumeric()).filter(|t| !t.is_empty()).collect();
+
+    for token in &tokens {
+        for (keywords, category) in FILENAME_HINTS {
+            if keywords.contains(token) {
+                return Some(*category);
             }
         }
     }
