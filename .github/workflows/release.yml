@@ -63,6 +63,7 @@ jobs:
           mkdir -p staging
           cp target/${{ matrix.target }}/release/${{ matrix.standalone }} staging/
           cp target/${{ matrix.target }}/release/${{ matrix.plugin }} staging/
+          cp install.sh staging/
           cd staging && tar czf ../${{ matrix.artifact }}.tar.gz * && cd ..
 
       - name: Package artifacts (Windows)
@@ -72,6 +73,7 @@ jobs:
           mkdir -p staging
           cp target/${{ matrix.target }}/release/${{ matrix.standalone }} staging/
           cp target/${{ matrix.target }}/release/${{ matrix.plugin }} staging/
+          cp install.bat staging/
           cd staging && 7z a ../${{ matrix.artifact }}.zip * && cd ..
 
       - name: Upload artifact

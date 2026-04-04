@@ -107,30 +107,29 @@ This produces:
 
 ### Install
 
-**VST3:**
+Each release archive includes an installer script that copies plugins to the standard paths.
+
+**Linux / macOS:**
 ```bash
-mkdir -p ~/.vst3/autokit.vst3/Contents/x86_64-linux
-cp target/release/libautokit.so ~/.vst3/autokit.vst3/Contents/x86_64-linux/autokit.so
+./install.sh
 ```
 
-**CLAP:**
-```bash
-mkdir -p ~/.clap
-cp target/release/libautokit.so ~/.clap/autokit.clap
+**Windows** (run as Administrator):
+```
+install.bat
 ```
 
-**Standalone** (run directly):
-```bash
-./target/release/autokit-standalone
-```
+The installer places plugins in the standard locations:
 
-### Verify installation
+| Format | Linux | macOS | Windows |
+|--------|-------|-------|---------|
+| VST3 | `~/.vst3/` | `~/Library/Audio/Plug-Ins/VST3/` | `C:\Program Files\Common Files\VST3\` |
+| CLAP | `~/.clap/` | `~/Library/Audio/Plug-Ins/CLAP/` | `C:\Program Files\Common Files\CLAP\` |
+| Standalone | `~/.local/bin/autokit` | `~/.local/bin/autokit` | `%LocalAppData%\Autokit\autokit.exe` |
 
-```bash
-# Check the plugin has GUI code linked
-strings ~/.vst3/autokit.vst3/Contents/x86_64-linux/autokit.so | grep -c egui
-# Should output a number > 0
-```
+Rescan plugins in your DAW after installing.
+
+> **Note:** Audio Unit (AU) is not supported. macOS DAWs that require AU (e.g. Logic Pro) will not see Autokit. Most other macOS DAWs (Ableton, Bitwig, REAPER, Renoise) support VST3 or CLAP.
 
 Rescan plugins in your DAW (Renoise: Preferences → VST/CLAP paths → Rescan). Autokit should appear as **REXIST / Autokit**.
 
