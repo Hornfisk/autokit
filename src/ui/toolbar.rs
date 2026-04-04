@@ -2,6 +2,7 @@ use nih_plug::prelude::*;
 use nih_plug_egui::egui;
 
 use crate::plugin::AutokitParams;
+use crate::ui::editor::ViewMode;
 use crate::ui::state::ScanStatus;
 use crate::ui::theme;
 
@@ -15,6 +16,7 @@ pub enum ToolbarAction {
     SetScale(f32),
     OpenSaveDialog,
     OpenLoadDialog,
+    ToggleView,
 }
 
 /// Draw the toolbar from snapshot data (no mutex held).
@@ -27,6 +29,7 @@ pub fn draw_toolbar_snapshot(
     params: &AutokitParams,
     setter: &ParamSetter,
     current_scale: f32,
+    view_mode: ViewMode,
 ) -> ToolbarAction {
     let mut action = ToolbarAction::None;
 
@@ -50,6 +53,62 @@ pub fn draw_toolbar_snapshot(
                         .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
                         .color(theme::TEXT_DISABLED),
                 );
+
+                // View toggle: MAP / PADS
+                {
+                    let map_color = if matches!(view_mode, ViewMode::SampleMap) {
+                        theme::ACCENT
+                    } else {
+                        theme::TEXT_DIM
+                    };
+                    let pads_color = if matches!(view_mode, ViewMode::PadStrip) {
+                        theme::ACCENT
+                    } else {
+                        theme::TEXT_DIM
+                    };
+                    let map_bg = if matches!(view_mode, ViewMode::SampleMap) {
+                        theme::ACCENT_DIM
+                    } else {
+                        theme::BG_ROW
+                    };
+                    let pads_bg = if matches!(view_mode, ViewMode::PadStrip) {
+                        theme::ACCENT_DIM
+                    } else {
+                        theme::BG_ROW
+                    };
+
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("MAP")
+                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                    .color(map_color),
+                            )
+                            .fill(map_bg)
+                            .min_size(egui::vec2(36.0, 22.0)),
+                        )
+                        .clicked()
+                        && !matches!(view_mode, ViewMode::SampleMap)
+                    {
+                        action = ToolbarAction::ToggleView;
+                    }
+
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("PADS")
+                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                    .color(pads_color),
+                            )
+                            .fill(pads_bg)
+                            .min_size(egui::vec2(36.0, 22.0)),
+                        )
+                        .clicked()
+                        && !matches!(view_mode, ViewMode::PadStrip)
+                    {
+                        action = ToolbarAction::ToggleView;
+                    }
+                }
 
                 match scan_status {
                     ScanStatus::Scanning => {

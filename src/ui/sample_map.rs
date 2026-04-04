@@ -33,7 +33,9 @@ fn normalize_decay(secs: f32) -> f32 {
     (secs / 4.0).clamp(0.0, 1.0)
 }
 
+use nih_plug_egui::egui;
 use crate::analysis::library::SampleLibrary;
+use crate::ui::theme;
 
 /// Build map points from the full sample library.
 /// Call once when library scan completes; cache the result in EditorState.
@@ -51,6 +53,231 @@ pub fn build_map_points(library: &SampleLibrary) -> Vec<MapPoint> {
             decay_secs: sample.features.decay_time,
         })
         .collect()
+}
+
+/// View state for zoom/pan.
+pub struct MapViewState {
+    pub zoom: f32,
+    pub pan_x: f32,
+    pub pan_y: f32,
+}
+
+impl Default for MapViewState {
+    fn default() -> Self {
+        Self { zoom: 1.0, pan_x: 0.0, pan_y: 0.0 }
+    }
+}
+
+/// Convert normalized (0–1) coords to screen position within the map rect.
+fn to_screen(nx: f32, ny: f32, view: &MapViewState, rect: egui::Rect) -> egui::Pos2 {
+    let x = (nx - view.pan_x) * view.zoom * rect.width() + rect.left();
+    let y = (ny - view.pan_y) * view.zoom * rect.height() + rect.top();
+    egui::pos2(x, y)
+}
+
+/// Convert screen position back to normalized coords.
+fn from_screen(pos: egui::Pos2, view: &MapViewState, rect: egui::Rect) -> (f32, f32) {
+    let nx = (pos.x - rect.left()) / (view.zoom * rect.width()) + view.pan_x;
+    let ny = (pos.y - rect.top()) / (view.zoom * rect.height()) + view.pan_y;
+    (nx, ny)
+}
+
+/// Hit test result.
+pub struct HitResult {
+    pub point_index: usize,
+    pub screen_pos: egui::Pos2,
+}
+
+/// Find the nearest map point within `max_dist` screen pixels of `cursor`.
+pub fn hit_test(
+    cursor: egui::Pos2,
+    points: &[MapPoint],
+    view: &MapViewState,
+    rect: egui::Rect,
+    max_dist: f32,
+) -> Option<HitResult> {
+    let mut best: Option<(usize, f32, egui::Pos2)> = None;
+    for (i, p) in points.iter().enumerate() {
+        let screen = to_screen(p.nx, p.ny, view, rect);
+        if !rect.expand(max_dist).contains(screen) {
+            continue;
+        }
+        let dist = cursor.distance(screen);
+        if dist < max_dist {
+            if best.is_none() || dist < best.unwrap().1 {
+                best = Some((i, dist, screen));
+            }
+        }
+    }
+    best.map(|(i, _, pos)| HitResult { point_index: i, screen_pos: pos })
+}
+
+/// Actions returned by draw_map for the editor to handle.
+pub enum MapAction {
+    None,
+    ClickedDot { point_index: usize },
+}
+
+/// Draw the scatter plot. Returns any action triggered.
+pub fn draw_map(
+    ui: &mut egui::Ui,
+    points: &[MapPoint],
+    view: &mut MapViewState,
+    kit_paths: &[Option<String>],
+    hovered_index: &mut Option<usize>,
+) -> MapAction {
+    let mut action = MapAction::None;
+    let available = ui.available_size();
+    let (response, painter) = ui.allocate_painter(available, egui::Sense::click_and_drag());
+    let rect = response.rect;
+
+    // Background
+    painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(0x08, 0x08, 0x1a));
+
+    // Axis labels
+    let label_color = egui::Color32::from_rgba_premultiplied(0x63, 0x6e, 0x72, 0x4c);
+    let label_font = egui::FontId::new(8.0, egui::FontFamily::Monospace);
+    painter.text(
+        egui::pos2(rect.center().x, rect.bottom() - 6.0),
+        egui::Align2::CENTER_BOTTOM,
+        "BRIGHTNESS \u{2192}",
+        label_font.clone(),
+        label_color,
+    );
+    painter.text(
+        egui::pos2(rect.left() + 6.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        "D\nE\nC\nA\nY\n\u{2192}",
+        egui::FontId::new(7.0, egui::FontFamily::Monospace),
+        label_color,
+    );
+
+    // --- Zoom (scroll wheel) ---
+    if response.hovered() {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll.abs() > 0.0 {
+            let old_zoom = view.zoom;
+            view.zoom = (view.zoom * (1.0 + scroll * 0.002)).clamp(1.0, 8.0);
+            if let Some(cursor) = response.hover_pos() {
+                let (nx, ny) = from_screen(
+                    cursor,
+                    &MapViewState { zoom: old_zoom, pan_x: view.pan_x, pan_y: view.pan_y },
+                    rect,
+                );
+                view.pan_x = nx - (cursor.x - rect.left()) / (view.zoom * rect.width());
+                view.pan_y = ny - (cursor.y - rect.top()) / (view.zoom * rect.height());
+            }
+        }
+    }
+
+    // --- Pan (drag) ---
+    if response.dragged() && response.drag_delta().length() > 0.0 {
+        let delta = response.drag_delta();
+        view.pan_x -= delta.x / (view.zoom * rect.width());
+        view.pan_y -= delta.y / (view.zoom * rect.height());
+    }
+
+    // --- Double-click to reset ---
+    if response.double_clicked() {
+        view.zoom = 1.0;
+        view.pan_x = 0.0;
+        view.pan_y = 0.0;
+    }
+
+    // --- Draw library dots (dim) ---
+    for (i, p) in points.iter().enumerate() {
+        let screen = to_screen(p.nx, p.ny, view, rect);
+        if !rect.contains(screen) {
+            continue;
+        }
+
+        let color = theme::category_color(p.category);
+        let is_kit = kit_paths
+            .iter()
+            .any(|kp| kp.as_ref().is_some_and(|path| path.ends_with(&p.name)));
+
+        if is_kit {
+            continue; // Kit dots drawn in second pass
+        }
+
+        let is_hovered = *hovered_index == Some(i);
+        let (radius, alpha) = if is_hovered { (5.0, 0.7) } else { (3.0, 0.25) };
+        painter.circle_filled(screen, radius, color.to_egui_alpha((alpha * 255.0) as u8));
+    }
+
+    // --- Draw kit dots (bright + ring) ---
+    for (_i, p) in points.iter().enumerate() {
+        let screen = to_screen(p.nx, p.ny, view, rect);
+        if !rect.contains(screen) {
+            continue;
+        }
+
+        let is_kit = kit_paths
+            .iter()
+            .any(|kp| kp.as_ref().is_some_and(|path| path.ends_with(&p.name)));
+        if !is_kit {
+            continue;
+        }
+
+        let color = theme::category_color(p.category);
+        painter.circle_filled(screen, 8.0, color.to_egui_alpha(40));
+        painter.circle_filled(screen, 5.0, color.to_egui());
+        painter.circle_stroke(screen, 5.0, egui::Stroke::new(2.0, egui::Color32::WHITE));
+    }
+
+    // --- Hit test for hover ---
+    if let Some(cursor) = response.hover_pos() {
+        if let Some(hit) = hit_test(cursor, points, view, rect, 8.0) {
+            *hovered_index = Some(hit.point_index);
+            let p = &points[hit.point_index];
+            let color = theme::category_color(p.category);
+
+            let mut tooltip_pos = egui::pos2(cursor.x + 15.0, cursor.y - 10.0);
+            if tooltip_pos.x + 150.0 > rect.right() {
+                tooltip_pos.x = cursor.x - 165.0;
+            }
+            if tooltip_pos.y < rect.top() + 10.0 {
+                tooltip_pos.y = cursor.y + 15.0;
+            }
+
+            let tooltip_rect =
+                egui::Rect::from_min_size(tooltip_pos, egui::vec2(150.0, 32.0));
+            painter.rect_filled(
+                tooltip_rect,
+                4.0,
+                egui::Color32::from_rgba_premultiplied(0x11, 0x11, 0x26, 0xee),
+            );
+            painter.text(
+                tooltip_rect.min + egui::vec2(6.0, 4.0),
+                egui::Align2::LEFT_TOP,
+                &p.name,
+                egui::FontId::new(9.0, egui::FontFamily::Monospace),
+                color.to_egui(),
+            );
+            painter.text(
+                tooltip_rect.min + egui::vec2(6.0, 17.0),
+                egui::Align2::LEFT_TOP,
+                format!("{} \u{00b7} {:.0}Hz \u{00b7} {:.2}s", p.category.label(), p.centroid_hz, p.decay_secs),
+                egui::FontId::new(8.0, egui::FontFamily::Monospace),
+                theme::TEXT_DIM,
+            );
+        } else {
+            *hovered_index = None;
+        }
+    } else {
+        *hovered_index = None;
+    }
+
+    // --- Click detection ---
+    if response.clicked() {
+        if let Some(cursor) = response.interact_pointer_pos() {
+            if let Some(hit) = hit_test(cursor, points, view, rect, 8.0) {
+                action = MapAction::ClickedDot { point_index: hit.point_index };
+            }
+        }
+    }
+
+    action
 }
 
 #[cfg(test)]
@@ -141,5 +368,24 @@ mod tests {
             assert!(p.nx >= 0.0 && p.nx <= 1.0, "nx out of range: {}", p.nx);
             assert!(p.ny >= 0.0 && p.ny <= 1.0, "ny out of range: {}", p.ny);
         }
+    }
+
+    #[test]
+    fn screen_transform_round_trips() {
+        let view = MapViewState::default();
+        let rect = egui::Rect::from_min_size(egui::pos2(50.0, 50.0), egui::vec2(400.0, 200.0));
+        let screen = to_screen(0.5, 0.5, &view, rect);
+        let (nx, ny) = from_screen(screen, &view, rect);
+        assert!((nx - 0.5).abs() < 0.001);
+        assert!((ny - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn screen_transform_with_zoom() {
+        let view = MapViewState { zoom: 2.0, pan_x: 0.25, pan_y: 0.25 };
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 200.0));
+        let screen = to_screen(0.5, 0.5, &view, rect);
+        assert!((screen.x - 200.0).abs() < 0.1);
+        assert!((screen.y - 100.0).abs() < 0.1);
     }
 }

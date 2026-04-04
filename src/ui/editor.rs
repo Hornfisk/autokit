@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use crate::engine::kit::{SampleCategory, NUM_PADS};
 use crate::plugin::AutokitParams;
 use crate::ui::pad_row::{self, PadRowAction};
+use crate::ui::sample_map::{self, MapPoint};
 use crate::ui::state::{ScanStatus, SharedState, WaveformSummary};
 use crate::ui::theme;
 use crate::ui::toolbar::{self, ToolbarAction};
@@ -79,6 +80,13 @@ const PAD_KEYS: [egui::Key; NUM_PADS] = [
     egui::Key::Comma,
 ];
 
+/// Which view is currently active.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ViewMode {
+    PadStrip,
+    SampleMap,
+}
+
 /// GUI-only state (not shared with audio thread).
 pub struct EditorState {
     /// Which pad is expanded (None = all collapsed).
@@ -101,6 +109,16 @@ pub struct EditorState {
     pub preset_list: Vec<(String, PathBuf)>,
     /// Status message shown briefly after save/load.
     pub status_message: Option<String>,
+    /// Which view is active (pad strip or sample map scatter plot).
+    pub view_mode: ViewMode,
+    /// Cached scatter plot points (built lazily when map view first opened).
+    pub map_points: Vec<MapPoint>,
+    /// Whether map points have been built for the current library.
+    pub map_built: bool,
+    /// Zoom/pan state for the sample map view.
+    pub map_view: sample_map::MapViewState,
+    /// Index of the hovered dot in the map view.
+    pub map_hovered: Option<usize>,
 }
 
 impl Default for EditorState {
@@ -116,6 +134,11 @@ impl Default for EditorState {
             show_load_dialog: false,
             preset_list: Vec::new(),
             status_message: None,
+            view_mode: ViewMode::PadStrip,
+            map_points: Vec::new(),
+            map_built: false,
+            map_view: sample_map::MapViewState::default(),
+            map_hovered: None,
         }
     }
 }
@@ -221,6 +244,7 @@ pub fn create(
                         &params,
                         setter,
                         state.scale,
+                        state.view_mode,
                     );
 
                     match toolbar_action {
@@ -245,79 +269,120 @@ pub fn create(
                             state.show_load_dialog = true;
                             state.show_save_dialog = false;
                         }
+                        ToolbarAction::ToggleView => {
+                            state.view_mode = match state.view_mode {
+                                ViewMode::PadStrip => ViewMode::SampleMap,
+                                ViewMode::SampleMap => ViewMode::PadStrip,
+                            };
+                        }
                         ToolbarAction::None => {}
                     }
 
                     // Separator line
                     ui.add(egui::Separator::default().spacing(0.0));
 
-                    // Pad list
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            ui.spacing_mut().item_spacing.y = 2.0;
+                    match state.view_mode {
+                        ViewMode::PadStrip => {
+                            // Pad list
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    ui.spacing_mut().item_spacing.y = 2.0;
 
-                            for i in 0..NUM_PADS {
-                                let is_selected = state.selected_pad == Some(i);
-                                let pad = &snap.pads[i];
-                                let wf = snap.waveforms[i].as_ref();
+                                    for i in 0..NUM_PADS {
+                                        let is_selected = state.selected_pad == Some(i);
+                                        let pad = &snap.pads[i];
+                                        let wf = snap.waveforms[i].as_ref();
 
-                                let row_action = pad_row::draw_collapsed_from_snapshot(
-                                    ui, i, pad.has_sample, &pad.name, pad.category,
-                                    pad.volume, wf, is_selected, state.brightness[i],
-                                    pad.locked,
-                                );
+                                        let row_action = pad_row::draw_collapsed_from_snapshot(
+                                            ui, i, pad.has_sample, &pad.name, pad.category,
+                                            pad.volume, wf, is_selected, state.brightness[i],
+                                            pad.locked,
+                                        );
 
-                                match row_action {
-                                    PadRowAction::ToggleExpand => {
-                                        state.selected_pad =
-                                            if is_selected { None } else { Some(i) };
-                                    }
-                                    PadRowAction::DicePad => {
-                                        if snap.has_library {
-                                            pending_action = Some(GuiAction::DicePad(i));
+                                        match row_action {
+                                            PadRowAction::ToggleExpand => {
+                                                state.selected_pad =
+                                                    if is_selected { None } else { Some(i) };
+                                            }
+                                            PadRowAction::DicePad => {
+                                                if snap.has_library {
+                                                    pending_action = Some(GuiAction::DicePad(i));
+                                                }
+                                            }
+                                            PadRowAction::PlayPad => {
+                                                gui_triggers[i].store(1, Ordering::Relaxed);
+                                            }
+                                            PadRowAction::ToggleLock => {
+                                                pending_action = Some(GuiAction::ToggleLock(i));
+                                            }
+                                            _ => {}
                                         }
-                                    }
-                                    PadRowAction::PlayPad => {
-                                        gui_triggers[i].store(1, Ordering::Relaxed);
-                                    }
-                                    PadRowAction::ToggleLock => {
-                                        pending_action = Some(GuiAction::ToggleLock(i));
-                                    }
-                                    _ => {}
-                                }
 
-                                // Expanded detail (knobs + dice category)
-                                if is_selected {
-                                    let detail_action = pad_row::draw_expanded_from_snapshot(
-                                        ui, i, pad.category, pad.volume, pad.pan,
-                                        pad.pitch, pad.decay,
-                                    );
+                                        // Expanded detail (knobs + dice category)
+                                        if is_selected {
+                                            let detail_action = pad_row::draw_expanded_from_snapshot(
+                                                ui, i, pad.category, pad.volume, pad.pan,
+                                                pad.pitch, pad.decay,
+                                            );
 
-                                    match detail_action {
-                                        PadRowAction::SetVolume(v) => {
-                                            pending_action = Some(GuiAction::SetPadVolume(i, v));
-                                        }
-                                        PadRowAction::SetPan(v) => {
-                                            pending_action = Some(GuiAction::SetPadPan(i, v));
-                                        }
-                                        PadRowAction::SetPitch(v) => {
-                                            pending_action = Some(GuiAction::SetPadPitch(i, v));
-                                        }
-                                        PadRowAction::SetDecay(v) => {
-                                            pending_action = Some(GuiAction::SetPadDecay(i, v));
-                                        }
-                                        PadRowAction::DiceCategory => {
-                                            if snap.has_library {
-                                                pending_action =
-                                                    Some(GuiAction::DiceCategory(i, pad.category));
+                                            match detail_action {
+                                                PadRowAction::SetVolume(v) => {
+                                                    pending_action = Some(GuiAction::SetPadVolume(i, v));
+                                                }
+                                                PadRowAction::SetPan(v) => {
+                                                    pending_action = Some(GuiAction::SetPadPan(i, v));
+                                                }
+                                                PadRowAction::SetPitch(v) => {
+                                                    pending_action = Some(GuiAction::SetPadPitch(i, v));
+                                                }
+                                                PadRowAction::SetDecay(v) => {
+                                                    pending_action = Some(GuiAction::SetPadDecay(i, v));
+                                                }
+                                                PadRowAction::DiceCategory => {
+                                                    if snap.has_library {
+                                                        pending_action =
+                                                            Some(GuiAction::DiceCategory(i, pad.category));
+                                                    }
+                                                }
+                                                _ => {}
                                             }
                                         }
-                                        _ => {}
                                     }
+                                });
+                        }
+                        ViewMode::SampleMap => {
+                            // Build map points lazily on first view
+                            if !state.map_built && snap.has_library {
+                                let shared = shared.lock();
+                                if let Some(ref lib) = shared.library {
+                                    state.map_points = sample_map::build_map_points(lib);
+                                    state.map_built = true;
                                 }
                             }
-                        });
+
+                            // Collect kit sample names from snapshot for highlighting
+                            let kit_paths: Vec<Option<String>> = snap.pads.iter().map(|p| {
+                                if p.has_sample { Some(p.name.clone()) } else { None }
+                            }).collect();
+
+                            let map_action = sample_map::draw_map(
+                                ui,
+                                &state.map_points,
+                                &mut state.map_view,
+                                &kit_paths,
+                                &mut state.map_hovered,
+                            );
+
+                            match map_action {
+                                sample_map::MapAction::ClickedDot { point_index } => {
+                                    // Preview + popup handled in later tasks
+                                    let _ = point_index;
+                                }
+                                sample_map::MapAction::None => {}
+                            }
+                        }
+                    }
                 });
 
             // --- Save preset dialog ---
