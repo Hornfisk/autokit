@@ -85,6 +85,7 @@ const PAD_KEYS: [egui::Key; NUM_PADS] = [
 pub enum ViewMode {
     PadStrip,
     SampleMap,
+    Sequencer,
 }
 
 /// GUI-only state (not shared with audio thread).
@@ -123,6 +124,8 @@ pub struct EditorState {
     pub map_popup: sample_map::PopupState,
     /// Which pad is in shortcut-assign mode (click dot = assign to this pad).
     pub map_shortcut_pad: Option<usize>,
+    /// Sequencer view state.
+    pub seq_view: crate::ui::sequencer_ui::SeqViewState,
 }
 
 impl Default for EditorState {
@@ -145,6 +148,7 @@ impl Default for EditorState {
             map_hovered: None,
             map_popup: sample_map::PopupState::default(),
             map_shortcut_pad: None,
+            seq_view: Default::default(),
         }
     }
 }
@@ -283,8 +287,12 @@ pub fn create(
                         ToolbarAction::ToggleView => {
                             state.view_mode = match state.view_mode {
                                 ViewMode::PadStrip => ViewMode::SampleMap,
-                                ViewMode::SampleMap => ViewMode::PadStrip,
+                                ViewMode::SampleMap => ViewMode::Sequencer,
+                                ViewMode::Sequencer => ViewMode::PadStrip,
                             };
+                        }
+                        ToolbarAction::SetView(mode) => {
+                            state.view_mode = mode;
                         }
                         ToolbarAction::None => {}
                     }
@@ -428,6 +436,69 @@ pub fn create(
                                     state.map_popup.active_point = None;
                                 }
                             });
+                        }
+                        ViewMode::Sequencer => {
+                            // Build SeqDisplay from SharedState + atomics
+                            let seq_display = {
+                                let shared = shared.lock();
+                                let bank = &shared.pattern_bank;
+                                let active = seq_active_pattern.load(Ordering::Relaxed);
+                                let active = active.min(bank.patterns.len().saturating_sub(1));
+                                let pat = &bank.patterns[active];
+
+                                crate::ui::sequencer_ui::SeqDisplay {
+                                    current_step: seq_current_step.load(Ordering::Relaxed),
+                                    playing: seq_playing.load(Ordering::Relaxed),
+                                    active_pattern: active,
+                                    queued_pattern: bank.queued,
+                                    fill_active: seq_fill_active.load(Ordering::Relaxed),
+                                    pattern_has_data: core::array::from_fn(|i| bank.patterns[i].has_data()),
+                                    lanes: pat.lanes.iter().enumerate().map(|(i, lane)| {
+                                        crate::ui::sequencer_ui::LaneDisplay {
+                                            pad_name: snap.pads[i].name.clone(),
+                                            category: snap.pads[i].category,
+                                            muted: lane.muted,
+                                            locked: snap.pads[i].locked,
+                                            steps: core::array::from_fn(|j| crate::ui::sequencer_ui::StepDisplay {
+                                                enabled: lane.steps[j].enabled,
+                                                velocity: lane.steps[j].velocity,
+                                                probability: lane.steps[j].probability,
+                                                pan: lane.steps[j].pan,
+                                                pitch: lane.steps[j].pitch,
+                                                condition: lane.steps[j].condition,
+                                            }),
+                                        }
+                                    }).collect(),
+                                    swing: pat.swing,
+                                }
+                            };
+
+                            if let Some(seq_action) = crate::ui::sequencer_ui::draw_sequencer_view(
+                                ui, &seq_display, &mut state.seq_view,
+                            ) {
+                                use crate::ui::sequencer_ui::SeqAction;
+                                pending_action = Some(match seq_action {
+                                    SeqAction::ToggleStep { lane, step } => GuiAction::SeqToggleStep { lane, step },
+                                    SeqAction::SelectStep { .. } => {
+                                        // Selection already handled in draw_sequencer_view
+                                        GuiAction::None
+                                    }
+                                    SeqAction::SetStepVelocity { lane, step, value } => GuiAction::SeqSetStepVelocity { lane, step, value },
+                                    SeqAction::SetStepPan { lane, step, value } => GuiAction::SeqSetStepPan { lane, step, value },
+                                    SeqAction::SetStepPitch { lane, step, value } => GuiAction::SeqSetStepPitch { lane, step, value },
+                                    SeqAction::SetStepProbability { lane, step, value } => GuiAction::SeqSetStepProbability { lane, step, value },
+                                    SeqAction::SetStepCondition { lane, step, condition } => GuiAction::SeqSetStepCondition { lane, step, condition },
+                                    SeqAction::ToggleLaneMute { lane } => GuiAction::SeqToggleLaneMute { lane },
+                                    SeqAction::ToggleLaneLock { lane } => GuiAction::SeqToggleLaneLock { lane },
+                                    SeqAction::SelectPattern { index } => GuiAction::SeqSelectPattern { index },
+                                    SeqAction::SetSwing { value } => GuiAction::SeqSetSwing { value },
+                                    SeqAction::CopyPattern => GuiAction::SeqCopyPattern,
+                                    SeqAction::PastePattern => GuiAction::SeqPastePattern,
+                                    SeqAction::ClearPattern => GuiAction::SeqClearPattern,
+                                    SeqAction::DicePattern => GuiAction::SeqDicePattern,
+                                    SeqAction::SetFillActive { active } => GuiAction::SeqSetFillActive { active },
+                                });
+                            }
                         }
                     }
                 });
@@ -756,6 +827,114 @@ pub fn create(
                             shared.preview_sample = Some(data);
                         }
                     }
+                    GuiAction::None => {}
+                    // Sequencer actions
+                    GuiAction::SeqToggleStep { lane, step } => {
+                        let pat = shared.pattern_bank.active_pattern_mut();
+                        let s = &mut pat.lanes[lane].steps[step];
+                        s.enabled = !s.enabled;
+                        if s.enabled {
+                            s.velocity = 0.8;
+                            s.probability = 1.0;
+                            s.pan = None;
+                            s.pitch = None;
+                            s.condition = crate::engine::sequencer::ConditionTrig::Always;
+                        }
+                    }
+                    GuiAction::SeqSetStepVelocity { lane, step, value } => {
+                        shared.pattern_bank.active_pattern_mut().lanes[lane].steps[step].velocity = value;
+                    }
+                    GuiAction::SeqSetStepPan { lane, step, value } => {
+                        shared.pattern_bank.active_pattern_mut().lanes[lane].steps[step].pan = value;
+                    }
+                    GuiAction::SeqSetStepPitch { lane, step, value } => {
+                        shared.pattern_bank.active_pattern_mut().lanes[lane].steps[step].pitch = value;
+                    }
+                    GuiAction::SeqSetStepProbability { lane, step, value } => {
+                        shared.pattern_bank.active_pattern_mut().lanes[lane].steps[step].probability = value;
+                    }
+                    GuiAction::SeqSetStepCondition { lane, step, condition } => {
+                        shared.pattern_bank.active_pattern_mut().lanes[lane].steps[step].condition = condition;
+                    }
+                    GuiAction::SeqToggleLaneMute { lane } => {
+                        let pat = shared.pattern_bank.active_pattern_mut();
+                        pat.lanes[lane].muted = !pat.lanes[lane].muted;
+                    }
+                    GuiAction::SeqToggleLaneLock { lane } => {
+                        shared.kit.toggle_lock(lane);
+                    }
+                    GuiAction::SeqSelectPattern { index } => {
+                        shared.pattern_bank.queued = Some(index);
+                    }
+                    GuiAction::SeqSetSwing { value } => {
+                        shared.pattern_bank.active_pattern_mut().swing = value;
+                    }
+                    GuiAction::SeqCopyPattern => {
+                        let pat = shared.pattern_bank.active_pattern().clone();
+                        shared.pattern_clipboard = Some(pat);
+                    }
+                    GuiAction::SeqPastePattern => {
+                        if let Some(clip) = shared.pattern_clipboard.clone() {
+                            let snap = HistorySnapshot {
+                                pads: shared.kit.snapshot(),
+                                sequencer: shared.pattern_bank.snapshot(),
+                            };
+                            shared.history.push(snap);
+                            *shared.pattern_bank.active_pattern_mut() = clip;
+                        }
+                    }
+                    GuiAction::SeqClearPattern => {
+                        let snap = HistorySnapshot {
+                            pads: shared.kit.snapshot(),
+                            sequencer: shared.pattern_bank.snapshot(),
+                        };
+                        shared.history.push(snap);
+                        let pat = shared.pattern_bank.active_pattern_mut();
+                        for lane in &mut pat.lanes {
+                            for step in &mut lane.steps {
+                                *step = crate::engine::sequencer::Step::default();
+                            }
+                            lane.muted = false;
+                        }
+                        pat.swing = 0.0;
+                    }
+                    GuiAction::SeqDicePattern => {
+                        use rand::Rng;
+                        use rand::seq::SliceRandom;
+                        let snap = HistorySnapshot {
+                            pads: shared.kit.snapshot(),
+                            sequencer: shared.pattern_bank.snapshot(),
+                        };
+                        shared.history.push(snap);
+                        let locked: Vec<bool> = shared.kit.pads.iter().map(|p| p.locked).collect();
+                        let mut rng = rand::rng();
+                        let pat = shared.pattern_bank.active_pattern_mut();
+                        for (i, lane) in pat.lanes.iter_mut().enumerate() {
+                            if locked[i] { continue; }
+                            for step in &mut lane.steps {
+                                *step = crate::engine::sequencer::Step::default();
+                            }
+                            let num_steps: usize = rng.random_range(2..=6);
+                            let mut positions: Vec<usize> = (0..16).collect();
+                            positions.shuffle(&mut rng);
+                            for &pos in &positions[..num_steps] {
+                                lane.steps[pos].enabled = true;
+                                lane.steps[pos].velocity = rng.random_range(0.5..=1.0);
+                                lane.steps[pos].probability = rng.random_range(0.7..=1.0);
+                                if rng.random_bool(0.15) {
+                                    let conds = &[
+                                        crate::engine::sequencer::ConditionTrig::Every(2),
+                                        crate::engine::sequencer::ConditionTrig::Every(4),
+                                        crate::engine::sequencer::ConditionTrig::Fill,
+                                    ];
+                                    lane.steps[pos].condition = conds[rng.random_range(0..conds.len())];
+                                }
+                            }
+                        }
+                    }
+                    GuiAction::SeqSetFillActive { active } => {
+                        seq_fill_active.store(active, Ordering::Relaxed);
+                    }
                 }
                 // Lock drops here — held only for the mutation.
             }
@@ -765,6 +944,7 @@ pub fn create(
 
 /// Actions that the GUI can trigger, applied in a brief second lock.
 enum GuiAction {
+    None,
     Undo,
     Redo,
     DiceAll,
@@ -780,4 +960,20 @@ enum GuiAction {
     LoadPreset(PathBuf),
     PreviewSample(usize),
     AssignFromMap { pad_index: usize, library_index: usize },
+    // Sequencer actions
+    SeqToggleStep { lane: usize, step: usize },
+    SeqSetStepVelocity { lane: usize, step: usize, value: f32 },
+    SeqSetStepPan { lane: usize, step: usize, value: Option<f32> },
+    SeqSetStepPitch { lane: usize, step: usize, value: Option<f32> },
+    SeqSetStepProbability { lane: usize, step: usize, value: f32 },
+    SeqSetStepCondition { lane: usize, step: usize, condition: crate::engine::sequencer::ConditionTrig },
+    SeqToggleLaneMute { lane: usize },
+    SeqToggleLaneLock { lane: usize },
+    SeqSelectPattern { index: usize },
+    SeqSetSwing { value: f32 },
+    SeqCopyPattern,
+    SeqPastePattern,
+    SeqClearPattern,
+    SeqDicePattern,
+    SeqSetFillActive { active: bool },
 }

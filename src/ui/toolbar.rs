@@ -17,6 +17,7 @@ pub enum ToolbarAction {
     OpenSaveDialog,
     OpenLoadDialog,
     ToggleView,
+    SetView(ViewMode),
 }
 
 /// Draw the toolbar from snapshot data (no mutex held).
@@ -55,59 +56,29 @@ pub fn draw_toolbar_snapshot(
                         .color(theme::TEXT_DISABLED),
                 );
 
-                // View toggle: MAP / PADS
+                // View toggle: PADS / MAP / SEQ
                 {
-                    let map_color = if matches!(view_mode, ViewMode::SampleMap) {
-                        theme::ACCENT
-                    } else {
-                        theme::TEXT_DIM
-                    };
-                    let pads_color = if matches!(view_mode, ViewMode::PadStrip) {
-                        theme::ACCENT
-                    } else {
-                        theme::TEXT_DIM
-                    };
-                    let map_bg = if matches!(view_mode, ViewMode::SampleMap) {
-                        theme::ACCENT_DIM
-                    } else {
-                        theme::BG_ROW
-                    };
-                    let pads_bg = if matches!(view_mode, ViewMode::PadStrip) {
-                        theme::ACCENT_DIM
-                    } else {
-                        theme::BG_ROW
+                    let tab = |label: &str, mode: ViewMode| -> egui::Button {
+                        let is_active = view_mode == mode;
+                        let color = if is_active { theme::ACCENT } else { theme::TEXT_DIM };
+                        let bg = if is_active { theme::ACCENT_DIM } else { theme::BG_ROW };
+                        egui::Button::new(
+                            egui::RichText::new(label)
+                                .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                .color(color),
+                        )
+                        .fill(bg)
+                        .min_size(egui::vec2(36.0, 22.0))
                     };
 
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new("MAP")
-                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                                    .color(map_color),
-                            )
-                            .fill(map_bg)
-                            .min_size(egui::vec2(36.0, 22.0)),
-                        )
-                        .clicked()
-                        && !matches!(view_mode, ViewMode::SampleMap)
-                    {
-                        action = ToolbarAction::ToggleView;
+                    if ui.add(tab("PADS", ViewMode::PadStrip)).clicked() && view_mode != ViewMode::PadStrip {
+                        action = ToolbarAction::SetView(ViewMode::PadStrip);
                     }
-
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new("PADS")
-                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                                    .color(pads_color),
-                            )
-                            .fill(pads_bg)
-                            .min_size(egui::vec2(36.0, 22.0)),
-                        )
-                        .clicked()
-                        && !matches!(view_mode, ViewMode::PadStrip)
-                    {
-                        action = ToolbarAction::ToggleView;
+                    if ui.add(tab("MAP", ViewMode::SampleMap)).clicked() && view_mode != ViewMode::SampleMap {
+                        action = ToolbarAction::SetView(ViewMode::SampleMap);
+                    }
+                    if ui.add(tab("SEQ", ViewMode::Sequencer)).clicked() && view_mode != ViewMode::Sequencer {
+                        action = ToolbarAction::SetView(ViewMode::Sequencer);
                     }
                 }
 
