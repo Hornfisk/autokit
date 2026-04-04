@@ -37,11 +37,18 @@ pub struct LaneSnapshot {
     pub muted: bool,
 }
 
-/// Snapshot of the full sequencer state.
+/// Snapshot of one pattern.
 #[derive(Clone)]
-pub struct SequencerSnapshot {
+pub struct PatternSnapshot {
     pub lanes: [LaneSnapshot; NUM_PADS],
     pub swing: f32,
+}
+
+/// Snapshot of the full sequencer state (all 16 patterns).
+#[derive(Clone)]
+pub struct SequencerSnapshot {
+    pub patterns: Vec<PatternSnapshot>,
+    pub active_pattern: usize,
 }
 
 /// Combined snapshot for one undo entry.
@@ -117,21 +124,24 @@ mod tests {
             })
             .collect();
 
-        let lanes: [LaneSnapshot; NUM_PADS] = core::array::from_fn(|_| LaneSnapshot {
-            steps: [StepSnapshot {
-                enabled: false,
-                velocity: 0.8,
-                probability: 1.0,
-                pan: None,
-                pitch: None,
-                condition: crate::engine::sequencer::ConditionTrig::Always,
-            }; 16],
-            muted: false,
-        });
+        let patterns: Vec<PatternSnapshot> = (0..16).map(|_| {
+            let lanes: [LaneSnapshot; NUM_PADS] = core::array::from_fn(|_| LaneSnapshot {
+                steps: [StepSnapshot {
+                    enabled: false,
+                    velocity: 0.8,
+                    probability: 1.0,
+                    pan: None,
+                    pitch: None,
+                    condition: crate::engine::sequencer::ConditionTrig::Always,
+                }; 16],
+                muted: false,
+            });
+            PatternSnapshot { lanes, swing: 0.0 }
+        }).collect();
 
         HistorySnapshot {
             pads,
-            sequencer: SequencerSnapshot { lanes, swing: 0.0 },
+            sequencer: SequencerSnapshot { patterns, active_pattern: 0 },
         }
     }
 
