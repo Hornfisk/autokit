@@ -5,7 +5,7 @@ use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use crossbeam_channel::Receiver;
 use crate::engine::kit::NUM_PADS;
@@ -116,6 +116,14 @@ pub struct Autokit {
     pub gui_triggers: Arc<[AtomicU8; NUM_PADS]>,
     /// Lightweight preview voice for sample map auditioning.
     preview_voice: PreviewVoice,
+    /// Current step position — written by audio thread, read by GUI.
+    pub seq_current_step: Arc<AtomicUsize>,
+    /// Whether sequencer is playing — written by audio thread, read by GUI.
+    pub seq_playing: Arc<AtomicBool>,
+    /// Active pattern index — written by audio thread, read by GUI.
+    pub seq_active_pattern: Arc<AtomicUsize>,
+    /// Fill mode — written by GUI, read by audio thread.
+    pub seq_fill_active: Arc<AtomicBool>,
     /// Debug: counts process() calls to log periodic status.
     #[cfg(debug_assertions)]
     process_count: u64,
@@ -133,6 +141,10 @@ impl Default for Autokit {
             trigger_flags: Arc::new(core::array::from_fn(|_| AtomicU8::new(0))),
             gui_triggers: Arc::new(core::array::from_fn(|_| AtomicU8::new(0))),
             preview_voice: PreviewVoice::new(),
+            seq_current_step: Arc::new(AtomicUsize::new(0)),
+            seq_playing: Arc::new(AtomicBool::new(false)),
+            seq_active_pattern: Arc::new(AtomicUsize::new(0)),
+            seq_fill_active: Arc::new(AtomicBool::new(false)),
             #[cfg(debug_assertions)]
             process_count: 0,
         }
@@ -210,19 +222,16 @@ impl Plugin for Autokit {
         let shared = Arc::clone(&self.shared);
         let params = Arc::clone(&self.params);
 
-        // Create a snapshot function that captures sequencer state.
-        // The sequencer lives on the audio thread; we snapshot it via a closure.
-        let seq = self.sequencer.snapshot();
-        let seq_snapshot: Arc<dyn Fn() -> crate::util::history::SequencerSnapshot + Send + Sync> =
-            Arc::new(move || seq.clone());
-
         let result = crate::ui::editor::create(
             self.params.editor_state.clone(),
             shared,
             params,
-            seq_snapshot,
             Arc::clone(&self.trigger_flags),
             Arc::clone(&self.gui_triggers),
+            Arc::clone(&self.seq_current_step),
+            Arc::clone(&self.seq_playing),
+            Arc::clone(&self.seq_active_pattern),
+            Arc::clone(&self.seq_fill_active),
         );
         tracing::info!("editor() result: {}", if result.is_some() { "Some" } else { "None" });
         result
@@ -366,9 +375,12 @@ impl Plugin for Autokit {
                 self.preview_voice.start(preview_data);
             }
 
-            // Run sequencer — triggers voices at step boundaries
+            // Sync sequencer fill state from GUI
+            self.sequencer.fill_active = self.seq_fill_active.load(Ordering::Relaxed);
+
+            // Run sequencer with pattern data from SharedState
             let transport = context.transport();
-            self.sequencer.process_buffer(
+            self.sequencer.process_buffer_with_patterns(
                 num_samples,
                 transport.playing,
                 transport.tempo,
@@ -376,8 +388,14 @@ impl Plugin for Autokit {
                 self.sample_rate,
                 voices,
                 &shared.kit,
+                &shared.pattern_bank,
                 &self.trigger_flags,
             );
+
+            // Write playback state for GUI
+            self.seq_current_step.store(self.sequencer.current_step(), Ordering::Relaxed);
+            self.seq_playing.store(self.sequencer.is_playing(), Ordering::Relaxed);
+            self.seq_active_pattern.store(shared.pattern_bank.active, Ordering::Relaxed);
 
             let channels = buffer.as_slice();
             if channels.len() >= 2 {

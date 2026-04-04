@@ -143,6 +143,48 @@ impl PatternBank {
     pub fn active_pattern_mut(&mut self) -> &mut Pattern {
         &mut self.patterns[self.active]
     }
+
+    pub fn snapshot(&self) -> crate::util::history::SequencerSnapshot {
+        crate::util::history::SequencerSnapshot {
+            patterns: self.patterns.iter().map(|pat| {
+                crate::util::history::PatternSnapshot {
+                    lanes: core::array::from_fn(|i| {
+                        crate::util::history::LaneSnapshot {
+                            steps: core::array::from_fn(|j| crate::util::history::StepSnapshot {
+                                enabled: pat.lanes[i].steps[j].enabled,
+                                velocity: pat.lanes[i].steps[j].velocity,
+                                probability: pat.lanes[i].steps[j].probability,
+                                pan: pat.lanes[i].steps[j].pan,
+                                pitch: pat.lanes[i].steps[j].pitch,
+                                condition: pat.lanes[i].steps[j].condition,
+                            }),
+                            muted: pat.lanes[i].muted,
+                        }
+                    }),
+                    swing: pat.swing,
+                }
+            }).collect(),
+            active_pattern: self.active,
+        }
+    }
+
+    pub fn restore(&mut self, snapshot: &crate::util::history::SequencerSnapshot) {
+        for (pat, snap_pat) in self.patterns.iter_mut().zip(snapshot.patterns.iter()) {
+            for (lane, snap_lane) in pat.lanes.iter_mut().zip(snap_pat.lanes.iter()) {
+                for (step, snap_step) in lane.steps.iter_mut().zip(snap_lane.steps.iter()) {
+                    step.enabled = snap_step.enabled;
+                    step.velocity = snap_step.velocity;
+                    step.probability = snap_step.probability;
+                    step.pan = snap_step.pan;
+                    step.pitch = snap_step.pitch;
+                    step.condition = snap_step.condition;
+                }
+                lane.muted = snap_lane.muted;
+            }
+            pat.swing = snap_pat.swing;
+        }
+        self.active = snapshot.active_pattern;
+    }
 }
 
 /// The sequencer — owns playback state; pattern data lives in PatternBank.

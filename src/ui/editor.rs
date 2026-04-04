@@ -154,9 +154,12 @@ pub fn create(
     egui_state: Arc<EguiState>,
     shared: Arc<Mutex<SharedState>>,
     params: Arc<AutokitParams>,
-    sequencer_snapshot_fn: Arc<dyn Fn() -> crate::util::history::SequencerSnapshot + Send + Sync>,
     trigger_flags: Arc<[AtomicU8; NUM_PADS]>,
     gui_triggers: Arc<[AtomicU8; NUM_PADS]>,
+    seq_current_step: Arc<std::sync::atomic::AtomicUsize>,
+    seq_playing: Arc<std::sync::atomic::AtomicBool>,
+    seq_active_pattern: Arc<std::sync::atomic::AtomicUsize>,
+    seq_fill_active: Arc<std::sync::atomic::AtomicBool>,
 ) -> Option<Box<dyn Editor>> {
     create_egui_editor(
         egui_state,
@@ -597,36 +600,37 @@ pub fn create(
             // --- Phase 2: Brief lock to apply any mutation ---
             if let Some(action) = pending_action {
                 let mut shared = shared.lock();
-                let seq_snap = &sequencer_snapshot_fn;
                 match action {
                     GuiAction::Undo => {
                         let current = HistorySnapshot {
                             pads: shared.kit.snapshot(),
-                            sequencer: seq_snap(),
+                            sequencer: shared.pattern_bank.snapshot(),
                         };
                         if let Some(restored) = shared.history.undo(current) {
                             shared.kit.restore(&restored.pads);
+                            shared.pattern_bank.restore(&restored.sequencer);
                             shared.update_all_waveforms(WAVEFORM_POINTS);
                         }
                     }
                     GuiAction::Redo => {
                         let current = HistorySnapshot {
                             pads: shared.kit.snapshot(),
-                            sequencer: seq_snap(),
+                            sequencer: shared.pattern_bank.snapshot(),
                         };
                         if let Some(restored) = shared.history.redo(current) {
                             shared.kit.restore(&restored.pads);
+                            shared.pattern_bank.restore(&restored.sequencer);
                             shared.update_all_waveforms(WAVEFORM_POINTS);
                         }
                     }
                     GuiAction::DiceAll => {
                         if shared.library.is_some() {
                             {
-                                let SharedState { ref library, ref mut kit, ref mut history, .. } = *shared;
+                                let SharedState { ref library, ref mut kit, ref mut history, ref pattern_bank, .. } = *shared;
                                 let lib = library.as_ref().unwrap();
                                 history.push(HistorySnapshot {
                                     pads: kit.snapshot(),
-                                    sequencer: seq_snap(),
+                                    sequencer: pattern_bank.snapshot(),
                                 });
                                 kit.dice_all(lib);
                             }
@@ -636,11 +640,11 @@ pub fn create(
                     GuiAction::DicePad(i) => {
                         if shared.library.is_some() {
                             {
-                                let SharedState { ref library, ref mut kit, ref mut history, .. } = *shared;
+                                let SharedState { ref library, ref mut kit, ref mut history, ref pattern_bank, .. } = *shared;
                                 let lib = library.as_ref().unwrap();
                                 history.push(HistorySnapshot {
                                     pads: kit.snapshot(),
-                                    sequencer: seq_snap(),
+                                    sequencer: pattern_bank.snapshot(),
                                 });
                                 kit.dice_pad(i, lib);
                             }
@@ -650,11 +654,11 @@ pub fn create(
                     GuiAction::DiceCategory(_i, cat) => {
                         if shared.library.is_some() {
                             {
-                                let SharedState { ref library, ref mut kit, ref mut history, .. } = *shared;
+                                let SharedState { ref library, ref mut kit, ref mut history, ref pattern_bank, .. } = *shared;
                                 let lib = library.as_ref().unwrap();
                                 history.push(HistorySnapshot {
                                     pads: kit.snapshot(),
-                                    sequencer: seq_snap(),
+                                    sequencer: pattern_bank.snapshot(),
                                 });
                                 kit.dice_category(cat, lib);
                             }
@@ -703,7 +707,7 @@ pub fn create(
                                 // Push history snapshot before applying
                                 let snap = HistorySnapshot {
                                     pads: shared.kit.snapshot(),
-                                    sequencer: seq_snap(),
+                                    sequencer: shared.pattern_bank.snapshot(),
                                 };
                                 shared.history.push(snap);
                                 preset::apply_to_kit(&p, &mut shared.kit);
@@ -740,7 +744,7 @@ pub fn create(
                         if let Some((data, path, filename, category)) = sample_info {
                             let snap = HistorySnapshot {
                                 pads: shared.kit.snapshot(),
-                                sequencer: seq_snap(),
+                                sequencer: shared.pattern_bank.snapshot(),
                             };
                             shared.history.push(snap);
                             let pad = &mut shared.kit.pads[pad_index];

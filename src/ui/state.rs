@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::analysis::library::SampleLibrary;
 use crate::engine::kit::{DrumKit, NUM_PADS};
+use crate::engine::sequencer::PatternBank;
 use crate::util::history::History;
 
 /// Scan progress for the toolbar display.
@@ -60,6 +61,10 @@ pub struct SharedState {
     pub waveforms: [Option<WaveformSummary>; NUM_PADS],
     /// Sample data to preview (set by GUI, consumed by audio thread).
     pub preview_sample: Option<Arc<Vec<f32>>>,
+    /// Sequencer pattern data — edited by GUI, read by audio thread.
+    pub pattern_bank: PatternBank,
+    /// Pattern clipboard for copy/paste.
+    pub pattern_clipboard: Option<crate::engine::sequencer::Pattern>,
 }
 
 impl SharedState {
@@ -71,6 +76,8 @@ impl SharedState {
             scan_status: ScanStatus::Scanning,
             waveforms: Default::default(),
             preview_sample: None,
+            pattern_bank: PatternBank::new(),
+            pattern_clipboard: None,
         }
     }
 
