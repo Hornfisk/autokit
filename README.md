@@ -131,6 +131,8 @@ Rescan plugins in your DAW after installing.
 
 > **Note:** Audio Unit (AU) is not supported. macOS DAWs that require AU (e.g. Logic Pro) will not see Autokit. Most other macOS DAWs (Ableton, Bitwig, REAPER, Renoise) support VST3 or CLAP.
 
+> **macOS Gatekeeper:** The binaries are not codesigned or notarized. On first launch macOS will block the app. To bypass: right-click the binary > **Open**, or run `xattr -dr com.apple.quarantine autokit-standalone libautokit.dylib` in the extracted folder before installing.
+
 Rescan plugins in your DAW (Renoise: Preferences → VST/CLAP paths → Rescan). Autokit should appear as **REXIST / Autokit**.
 
 ## Sample library
