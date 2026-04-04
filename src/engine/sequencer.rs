@@ -245,7 +245,7 @@ impl Sequencer {
         }
     }
 
-    fn evaluate_condition(&self, cond: ConditionTrig) -> bool {
+    pub(crate) fn evaluate_condition(&self, cond: ConditionTrig) -> bool {
         match cond {
             ConditionTrig::Always => true,
             ConditionTrig::Every(n) => self.loop_count % n as u64 == 0,
@@ -880,6 +880,51 @@ mod tests {
             &mut voices, &kit, &flags,
         );
         assert_eq!(triggers, 0, "negative pos_beats should not trigger");
+    }
+
+    #[test]
+    fn condition_every_2_fires_on_even_loops() {
+        let mut seq = Sequencer::new();
+        seq.loop_count = 0;
+        assert!(seq.evaluate_condition(ConditionTrig::Every(2)));
+        seq.loop_count = 1;
+        assert!(!seq.evaluate_condition(ConditionTrig::Every(2)));
+        seq.loop_count = 2;
+        assert!(seq.evaluate_condition(ConditionTrig::Every(2)));
+    }
+
+    #[test]
+    fn condition_fill_respects_fill_active() {
+        let mut seq = Sequencer::new();
+        seq.fill_active = false;
+        assert!(!seq.evaluate_condition(ConditionTrig::Fill));
+        seq.fill_active = true;
+        assert!(seq.evaluate_condition(ConditionTrig::Fill));
+        assert!(!seq.evaluate_condition(ConditionTrig::NotFill));
+    }
+
+    #[test]
+    fn condition_always_fires() {
+        let seq = Sequencer::new();
+        assert!(seq.evaluate_condition(ConditionTrig::Always));
+    }
+
+    #[test]
+    fn pattern_queued_switches_at_bar_boundary() {
+        let mut bank = PatternBank::new();
+        bank.patterns[0].lanes[0].steps[0].enabled = true;
+        bank.patterns[1].lanes[1].steps[0].enabled = true;
+        bank.queued = Some(1);
+
+        assert_eq!(bank.active, 0);
+        assert!(bank.active_pattern().lanes[0].steps[0].enabled);
+
+        // Simulate bar boundary switch
+        if let Some(queued) = bank.queued.take() {
+            bank.active = queued;
+        }
+        assert_eq!(bank.active, 1);
+        assert!(bank.active_pattern().lanes[1].steps[0].enabled);
     }
 
     #[test]
