@@ -241,6 +241,7 @@ pub fn create(
                 .show(ctx, |ui| {
                     // Toolbar (uses snapshot data, no mutex held)
                     let all_locked = snap.pads.iter().all(|p| p.locked);
+                    let shortcut_info = state.map_shortcut_pad.map(|i| (i + 1, snap.pads[i].category.label()));
                     let toolbar_action = toolbar::draw_toolbar_snapshot(
                         ui,
                         &snap.scan_status,
@@ -251,6 +252,7 @@ pub fn create(
                         setter,
                         state.scale,
                         state.view_mode,
+                        shortcut_info,
                     );
 
                     match toolbar_action {
@@ -372,12 +374,15 @@ pub fn create(
                                 if p.has_sample { Some(p.name.clone()) } else { None }
                             }).collect();
 
+                            let shortcut_category = state.map_shortcut_pad.map(|i| snap.pads[i].category);
                             let map_action = sample_map::draw_map(
                                 ui,
                                 &state.map_points,
                                 &mut state.map_view,
                                 &kit_paths,
                                 &mut state.map_hovered,
+                                state.map_shortcut_pad,
+                                shortcut_category,
                             );
 
                             match map_action {

@@ -136,6 +136,8 @@ pub fn draw_map(
     view: &mut MapViewState,
     kit_paths: &[Option<String>],
     hovered_index: &mut Option<usize>,
+    shortcut_pad: Option<usize>,
+    shortcut_category: Option<SampleCategory>,
 ) -> MapAction {
     let mut action = MapAction::None;
     let available = ui.available_size();
@@ -144,6 +146,12 @@ pub fn draw_map(
 
     // Background
     painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(0x08, 0x08, 0x1a));
+
+    // Border tint when shortcut mode is active
+    if let Some(cat) = shortcut_category {
+        let border_color = theme::category_color(cat);
+        painter.rect_stroke(rect, 0.0, egui::Stroke::new(2.0, border_color.to_egui_alpha(0x44)), egui::StrokeKind::Inside);
+    }
 
     // Axis labels
     let label_color = egui::Color32::from_rgba_premultiplied(0x63, 0x6e, 0x72, 0x4c);
@@ -212,7 +220,13 @@ pub fn draw_map(
         }
 
         let is_hovered = *hovered_index == Some(i);
-        let (radius, alpha) = if is_hovered { (5.0, 0.7) } else { (3.0, 0.25) };
+        let (radius, alpha) = if is_hovered {
+            (5.0, 0.7)
+        } else if let Some(cat) = shortcut_category {
+            if p.category == cat { (4.0, 0.5) } else { (3.0, 0.12) }
+        } else {
+            (3.0, 0.25)
+        };
         painter.circle_filled(screen, radius, color.to_egui_alpha((alpha * 255.0) as u8));
     }
 

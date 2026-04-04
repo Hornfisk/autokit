@@ -30,6 +30,7 @@ pub fn draw_toolbar_snapshot(
     setter: &ParamSetter,
     current_scale: f32,
     view_mode: ViewMode,
+    shortcut_info: Option<(usize, &str)>,
 ) -> ToolbarAction {
     let mut action = ToolbarAction::None;
 
@@ -125,6 +126,12 @@ pub fn draw_toolbar_snapshot(
                                 .color(theme::ACCENT),
                         );
                     }
+                }
+
+                if let Some((pad_num, cat_label)) = shortcut_info {
+                    ui.label(egui::RichText::new(format!("\u{2192} pad {}: {}", pad_num, cat_label))
+                        .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                        .color(theme::ACCENT));
                 }
 
                 // Reserve space for right-aligned toolbar items.
