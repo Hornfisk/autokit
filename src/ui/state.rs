@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::analysis::library::SampleLibrary;
 use crate::engine::kit::{DrumKit, NUM_PADS};
 use crate::util::history::History;
@@ -56,6 +58,8 @@ pub struct SharedState {
     pub scan_status: ScanStatus,
     /// Pre-computed waveform summaries, one per pad. Recomputed on sample change.
     pub waveforms: [Option<WaveformSummary>; NUM_PADS],
+    /// Sample data to preview (set by GUI, consumed by audio thread).
+    pub preview_sample: Option<Arc<Vec<f32>>>,
 }
 
 impl SharedState {
@@ -66,6 +70,7 @@ impl SharedState {
             history: History::new(),
             scan_status: ScanStatus::Scanning,
             waveforms: Default::default(),
+            preview_sample: None,
         }
     }
 

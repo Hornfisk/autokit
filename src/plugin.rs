@@ -59,6 +59,47 @@ enum BgMessage {
     LibraryReady(SampleLibrary),
 }
 
+/// Lightweight preview voice — separate from VoicePool.
+struct PreviewVoice {
+    data: Option<Arc<Vec<f32>>>,
+    position: usize,
+}
+
+impl PreviewVoice {
+    fn new() -> Self {
+        Self { data: None, position: 0 }
+    }
+
+    /// Start a new preview. Replaces any currently playing preview.
+    fn start(&mut self, sample: Arc<Vec<f32>>) {
+        permit_alloc(|| {
+            self.data = Some(sample);
+        });
+        self.position = 0;
+    }
+
+    /// Render into stereo buffers (center pan, unity gain). Adds to existing content.
+    fn process(&mut self, output_left: &mut [f32], output_right: &mut [f32]) {
+        let data = match &self.data {
+            Some(d) => d,
+            None => return,
+        };
+
+        for (l, r) in output_left.iter_mut().zip(output_right.iter_mut()) {
+            if self.position >= data.len() {
+                permit_alloc(|| {
+                    self.data = None;
+                });
+                return;
+            }
+            let s = data[self.position] * 0.7071; // center pan (sqrt(0.5))
+            *l += s;
+            *r += s;
+            self.position += 1;
+        }
+    }
+}
+
 pub struct Autokit {
     params: Arc<AutokitParams>,
     sample_rate: f32,
@@ -73,6 +114,8 @@ pub struct Autokit {
     pub trigger_flags: Arc<[AtomicU8; NUM_PADS]>,
     /// GUI-to-audio trigger requests — GUI sets to 1, audio thread reads and clears.
     pub gui_triggers: Arc<[AtomicU8; NUM_PADS]>,
+    /// Lightweight preview voice for sample map auditioning.
+    preview_voice: PreviewVoice,
     /// Debug: counts process() calls to log periodic status.
     #[cfg(debug_assertions)]
     process_count: u64,
@@ -89,6 +132,7 @@ impl Default for Autokit {
             sequencer: Sequencer::new(),
             trigger_flags: Arc::new(core::array::from_fn(|_| AtomicU8::new(0))),
             gui_triggers: Arc::new(core::array::from_fn(|_| AtomicU8::new(0))),
+            preview_voice: PreviewVoice::new(),
             #[cfg(debug_assertions)]
             process_count: 0,
         }
@@ -294,7 +338,7 @@ impl Plugin for Autokit {
         // permit_alloc: parking_lot may allocate during contended unlock_slow(),
         // which would otherwise trigger assert_no_alloc panic.
         let got_lock = permit_alloc(|| self.shared.try_lock());
-        if let Some(shared) = got_lock {
+        if let Some(mut shared) = got_lock {
             // Drain MIDI events and trigger voices
             while let Some(event) = context.next_event() {
                 match event {
@@ -315,6 +359,11 @@ impl Plugin for Autokit {
                     voices.trigger(i, 0.8, &shared.kit, 0);
                     self.trigger_flags[i].fetch_add(1, Ordering::Relaxed);
                 }
+            }
+
+            // Check for preview sample request
+            if let Some(preview_data) = shared.preview_sample.take() {
+                self.preview_voice.start(preview_data);
             }
 
             // Run sequencer — triggers voices at step boundaries
@@ -338,6 +387,8 @@ impl Plugin for Autokit {
                 output_left.fill(0.0);
                 output_right.fill(0.0);
                 voices.process(output_left, output_right, &shared.kit);
+                // Mix preview voice
+                self.preview_voice.process(output_left, output_right);
             }
             // permit_alloc for drop: parking_lot unlock_slow() may allocate.
             permit_alloc(|| drop(shared));
@@ -348,6 +399,11 @@ impl Plugin for Autokit {
                 let (left_channels, right_channels) = channels.split_at_mut(1);
                 left_channels[0][..num_samples].fill(0.0);
                 right_channels[0][..num_samples].fill(0.0);
+                // Preview voice can still play even without shared state lock
+                self.preview_voice.process(
+                    &mut left_channels[0][..num_samples],
+                    &mut right_channels[0][..num_samples],
+                );
             }
         }
 
