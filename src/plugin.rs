@@ -35,7 +35,7 @@ pub struct AutokitParams {
 impl Default for AutokitParams {
     fn default() -> Self {
         Self {
-            editor_state: EguiState::from_size(900, 365),
+            editor_state: EguiState::from_size(960, 540),
             master_volume: FloatParam::new(
                 "Master Volume",
                 util::db_to_gain(0.0),
@@ -45,7 +45,7 @@ impl Default for AutokitParams {
                     factor: FloatRange::gain_skew_factor(-60.0, 6.0),
                 },
             )
-            .with_smoother(SmoothingStyle::Logarithmic(50.0))
+            .with_smoother(SmoothingStyle::Logarithmic(10.0))
             .with_unit(" dB")
             .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
@@ -124,6 +124,11 @@ pub struct Autokit {
     pub seq_active_pattern: Arc<AtomicUsize>,
     /// Fill mode — written by GUI, read by audio thread.
     pub seq_fill_active: Arc<AtomicBool>,
+    /// Internal play toggle — written by GUI, read by audio thread.
+    /// When true, sequencer runs even without host transport (free-running at current tempo).
+    pub seq_internal_play: Arc<AtomicBool>,
+    /// Internal beat counter for free-running mode (samples elapsed).
+    seq_internal_samples: u64,
     /// Debug: counts process() calls to log periodic status.
     #[cfg(debug_assertions)]
     process_count: u64,
@@ -145,6 +150,8 @@ impl Default for Autokit {
             seq_playing: Arc::new(AtomicBool::new(false)),
             seq_active_pattern: Arc::new(AtomicUsize::new(0)),
             seq_fill_active: Arc::new(AtomicBool::new(false)),
+            seq_internal_play: Arc::new(AtomicBool::new(false)),
+            seq_internal_samples: 0,
             #[cfg(debug_assertions)]
             process_count: 0,
         }
@@ -232,6 +239,7 @@ impl Plugin for Autokit {
             Arc::clone(&self.seq_playing),
             Arc::clone(&self.seq_active_pattern),
             Arc::clone(&self.seq_fill_active),
+            Arc::clone(&self.seq_internal_play),
         );
         tracing::info!("editor() result: {}", if result.is_some() { "Some" } else { "None" });
         result
@@ -378,13 +386,28 @@ impl Plugin for Autokit {
             // Sync sequencer fill state from GUI
             self.sequencer.fill_active = self.seq_fill_active.load(Ordering::Relaxed);
 
-            // Run sequencer with pattern data from SharedState
+            // Determine play state: host transport OR internal play
             let transport = context.transport();
+            let internal_play = self.seq_internal_play.load(Ordering::Relaxed);
+            let (playing, tempo, pos_beats) = if transport.playing {
+                (true, transport.tempo, transport.pos_beats())
+            } else if internal_play {
+                // Free-running mode at 120 BPM (or host tempo if available)
+                let t = transport.tempo.unwrap_or(120.0);
+                let beats = self.seq_internal_samples as f64 / self.sample_rate as f64 * (t / 60.0);
+                self.seq_internal_samples += num_samples as u64;
+                (true, Some(t), Some(beats))
+            } else {
+                self.seq_internal_samples = 0;
+                (false, transport.tempo, transport.pos_beats())
+            };
+
+            // Run sequencer with pattern data from SharedState
             self.sequencer.process_buffer_with_patterns(
                 num_samples,
-                transport.playing,
-                transport.tempo,
-                transport.pos_beats(),
+                playing,
+                tempo,
+                pos_beats,
                 self.sample_rate,
                 voices,
                 &shared.kit,
@@ -425,15 +448,13 @@ impl Plugin for Autokit {
             }
         }
 
-        // Apply master volume after lock is released
-        let master_gain = self.params.master_volume.smoothed.next();
+        // Apply master volume per-sample for smooth transitions
         let channels = buffer.as_slice();
         if channels.len() >= 2 {
-            for s in channels[0][..num_samples].iter_mut() {
-                *s *= master_gain;
-            }
-            for s in channels[1][..num_samples].iter_mut() {
-                *s *= master_gain;
+            for i in 0..num_samples {
+                let gain = self.params.master_volume.smoothed.next();
+                channels[0][i] *= gain;
+                channels[1][i] *= gain;
             }
         }
 

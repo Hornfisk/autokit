@@ -10,6 +10,12 @@ use crate::ui::knob;
 pub struct SeqViewState {
     /// Currently selected step (lane, step) for parameter editing.
     pub selected: Option<(usize, usize)>,
+    /// Drag-paint state: enable or disable mode.
+    pub drag_paint: Option<bool>,
+    /// Set of (lane, step) already painted during current drag.
+    pub drag_visited: std::collections::HashSet<(usize, usize)>,
+    /// Cell rects from last frame, for hit-testing during drag.
+    pub cell_rects: Vec<(usize, usize, Rect)>,
 }
 
 /// Display data for sequencer -- captured from SharedState + atomics.
@@ -45,6 +51,7 @@ pub struct StepDisplay {
 /// Actions the sequencer UI wants to perform.
 pub enum SeqAction {
     ToggleStep { lane: usize, step: usize },
+    SetStepEnabled { lane: usize, step: usize, enabled: bool },
     SelectStep { lane: usize, step: usize },
     SetStepVelocity { lane: usize, step: usize, value: f32 },
     SetStepPan { lane: usize, step: usize, value: Option<f32> },
@@ -60,27 +67,26 @@ pub enum SeqAction {
     ClearPattern,
     DicePattern,
     SetFillActive { active: bool },
+    ToggleInternalPlay,
 }
 
-/// Draw the complete sequencer view. Returns an optional action.
+/// Draw the complete sequencer view. Returns a list of actions.
 pub fn draw_sequencer_view(
     ui: &mut egui::Ui,
     display: &SeqDisplay,
     view_state: &mut SeqViewState,
-) -> Option<SeqAction> {
-    let mut action: Option<SeqAction> = None;
+) -> Vec<SeqAction> {
+    let mut actions: Vec<SeqAction> = Vec::new();
 
     // Pattern selector bar
     if let Some(a) = draw_pattern_bar(ui, display) {
-        action = Some(a);
+        actions.push(a);
     }
 
     ui.add_space(2.0);
 
-    // Step grid
-    if let Some(a) = draw_grid(ui, display, view_state) {
-        action = Some(a);
-    }
+    // Step grid (may return multiple actions from drag-paint)
+    actions.extend(draw_grid(ui, display, view_state));
 
     ui.add_space(2.0);
 
@@ -90,17 +96,17 @@ pub fn draw_sequencer_view(
             let step = &display.lanes[lane_idx].steps[step_idx];
             let cat = display.lanes[lane_idx].category;
             if let Some(a) = draw_param_bar(ui, lane_idx, step_idx, step, cat) {
-                action = Some(a);
+                actions.push(a);
             }
         }
     }
 
     // Bottom bar
     if let Some(a) = draw_bottom_bar(ui, display) {
-        action = Some(a);
+        actions.push(a);
     }
 
-    action
+    actions
 }
 
 fn draw_pattern_bar(ui: &mut egui::Ui, display: &SeqDisplay) -> Option<SeqAction> {
@@ -194,8 +200,8 @@ fn draw_grid(
     ui: &mut egui::Ui,
     display: &SeqDisplay,
     view_state: &mut SeqViewState,
-) -> Option<SeqAction> {
-    let mut action = None;
+) -> Vec<SeqAction> {
+    let mut actions: Vec<SeqAction> = Vec::new();
 
     let label_width = 56.0;
     let controls_width = 30.0;
@@ -203,6 +209,13 @@ fn draw_grid(
     let available = ui.clip_rect().width() - label_width - controls_width - 24.0;
     let cell_size = ((available - cell_spacing * 15.0) / 16.0).floor().max(20.0);
     let row_height = cell_size.min(30.0);
+
+    // Clear drag state when mouse released
+    if !ui.input(|i| i.pointer.any_pressed() || i.pointer.any_down()) {
+        view_state.drag_paint = None;
+        view_state.drag_visited.clear();
+    }
+    view_state.cell_rects.clear();
 
     // Step numbers header
     ui.horizontal(|ui| {
@@ -253,7 +266,7 @@ fn draw_grid(
                 .min_size(Vec2::new(13.0, 13.0))
                 .corner_radius(2.0);
             if ui.add(mute_btn).clicked() {
-                action = Some(SeqAction::ToggleLaneMute { lane: lane_idx });
+                actions.push(SeqAction::ToggleLaneMute { lane: lane_idx });
             }
 
             // Lock button
@@ -263,7 +276,7 @@ fn draw_grid(
                 .min_size(Vec2::new(13.0, 13.0))
                 .corner_radius(2.0);
             if ui.add(lock_btn).clicked() {
-                action = Some(SeqAction::ToggleLaneLock { lane: lane_idx });
+                actions.push(SeqAction::ToggleLaneLock { lane: lane_idx });
             }
 
             // Step cells
@@ -277,6 +290,9 @@ fn draw_grid(
                     Vec2::new(cell_size, row_height),
                     egui::Sense::click(),
                 );
+
+                // Store rect for pointer hit-testing in drag pass
+                view_state.cell_rects.push((lane_idx, step_idx, rect));
 
                 // Background
                 let bg = if is_beat { theme::STEP_BG_BEAT } else { theme::STEP_BG };
@@ -323,6 +339,10 @@ fn draw_grid(
                     );
                 }
 
+                // Hover highlight
+                let pointer_pos = ui.input(|i| i.pointer.hover_pos());
+                let is_hovered = pointer_pos.map_or(false, |p| rect.contains(p));
+
                 // Selection border
                 if is_selected {
                     ui.painter().rect_stroke(
@@ -332,7 +352,7 @@ fn draw_grid(
                         egui::StrokeKind::Inside,
                     );
                 } else {
-                    let border_color = if response.hovered() { theme::STEP_HOVER } else { theme::STEP_BORDER };
+                    let border_color = if is_hovered { theme::STEP_HOVER } else { theme::STEP_BORDER };
                     ui.painter().rect_stroke(
                         rect,
                         3.0,
@@ -341,23 +361,53 @@ fn draw_grid(
                     );
                 }
 
-                // Click handling
-                if response.clicked() {
-                    let shift = ui.input(|i| i.modifiers.shift);
-                    if shift {
-                        action = Some(SeqAction::ToggleStep { lane: lane_idx, step: step_idx });
-                    } else if !step.enabled {
-                        action = Some(SeqAction::ToggleStep { lane: lane_idx, step: step_idx });
-                    } else if is_selected {
-                        action = Some(SeqAction::ToggleStep { lane: lane_idx, step: step_idx });
-                        view_state.selected = None;
-                    } else {
-                        action = Some(SeqAction::SelectStep { lane: lane_idx, step: step_idx });
+                // Right-click: select step for param editing
+                if response.secondary_clicked() {
+                    if step.enabled {
                         view_state.selected = Some((lane_idx, step_idx));
                     }
                 }
+
+                // Single click (no drag active): toggle + start drag paint
+                if response.clicked() && view_state.drag_paint.is_none() {
+                    let new_state = !step.enabled;
+                    view_state.drag_paint = Some(new_state);
+                    view_state.drag_visited.insert((lane_idx, step_idx));
+                    actions.push(SeqAction::SetStepEnabled { lane: lane_idx, step: step_idx, enabled: new_state });
+                }
             }
         });
+    }
+
+    // Drag-paint pass: check pointer against all cell rects
+    let pointer_down = ui.input(|i| i.pointer.primary_down());
+    if pointer_down {
+        if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+            // If no drag started yet but pointer is down over a cell, start drag
+            if view_state.drag_paint.is_none() {
+                for &(lane_idx, step_idx, rect) in &view_state.cell_rects {
+                    if rect.contains(pos) {
+                        let step_enabled = display.lanes.get(lane_idx)
+                            .map(|l| l.steps[step_idx].enabled)
+                            .unwrap_or(false);
+                        let new_state = !step_enabled;
+                        view_state.drag_paint = Some(new_state);
+                        view_state.drag_visited.insert((lane_idx, step_idx));
+                        actions.push(SeqAction::SetStepEnabled { lane: lane_idx, step: step_idx, enabled: new_state });
+                        break;
+                    }
+                }
+            }
+            // Continue painting: any cell the pointer passes over
+            if let Some(enable) = view_state.drag_paint {
+                for &(lane_idx, step_idx, rect) in &view_state.cell_rects {
+                    if rect.contains(pos) && !view_state.drag_visited.contains(&(lane_idx, step_idx)) {
+                        view_state.drag_visited.insert((lane_idx, step_idx));
+                        actions.push(SeqAction::SetStepEnabled { lane: lane_idx, step: step_idx, enabled: enable });
+                    }
+                }
+            }
+        }
     }
 
     // Request repaint when playing (for playhead animation)
@@ -365,7 +415,7 @@ fn draw_grid(
         ui.ctx().request_repaint();
     }
 
-    action
+    actions
 }
 
 fn draw_param_bar(
@@ -474,23 +524,32 @@ fn draw_param_bar(
             action = Some(SeqAction::SetStepProbability { lane: lane_idx, step: step_idx, value: 1.0 });
         }
 
-        // COND selector
-        let cond_text = step.condition.label();
-        let cond_color = if step.condition != ConditionTrig::Always { theme::COND_TEXT } else { theme::TEXT_DIM };
-        let cond_btn = egui::Button::new(
-            egui::RichText::new(cond_text)
-                .font(FontId::monospace(9.0))
-                .color(cond_color),
-        )
-        .fill(theme::STEP_BG)
-        .min_size(Vec2::new(36.0, 22.0))
-        .corner_radius(3.0);
-
+        // COND selector — dropdown showing all options
         ui.vertical(|ui| {
-            if ui.add(cond_btn).clicked() {
-                let next = step.condition.next();
-                action = Some(SeqAction::SetStepCondition { lane: lane_idx, step: step_idx, condition: next });
-            }
+            let cond_text = step.condition.label();
+            let cond_color = if step.condition != ConditionTrig::Always { theme::COND_TEXT } else { theme::TEXT_DIM };
+            egui::ComboBox::from_id_salt(("seq_cond", lane_idx, step_idx))
+                .selected_text(
+                    egui::RichText::new(cond_text)
+                        .font(FontId::monospace(9.0))
+                        .color(cond_color),
+                )
+                .width(56.0)
+                .show_ui(ui, |ui| {
+                    for &cond in ConditionTrig::CYCLE {
+                        let is_active = step.condition == cond;
+                        let label_color = if is_active { theme::ACCENT } else { theme::TEXT_DIM };
+                        let resp = ui.selectable_label(
+                            is_active,
+                            egui::RichText::new(cond.label())
+                                .font(FontId::monospace(9.0))
+                                .color(label_color),
+                        );
+                        if resp.clicked() && !is_active {
+                            action = Some(SeqAction::SetStepCondition { lane: lane_idx, step: step_idx, condition: cond });
+                        }
+                    }
+                });
             ui.label(
                 egui::RichText::new("COND")
                     .font(FontId::monospace(8.0))
@@ -508,19 +567,20 @@ fn draw_bottom_bar(ui: &mut egui::Ui, display: &SeqDisplay) -> Option<SeqAction>
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
 
-        // Play indicator (read-only, reflects host transport)
-        let play_text = if display.playing { "PLAY" } else { "STOP" };
-        let play_color = if display.playing { Color32::BLACK } else { theme::TEXT_DIM };
+        // Play/Stop toggle button
+        let play_label = if display.playing { "\u{25A0} STOP" } else { "\u{25B6} PLAY" };
+        let play_color = if display.playing { Color32::BLACK } else { theme::ACCENT };
         let play_bg = if display.playing { theme::ACCENT } else { theme::STEP_BG };
-        ui.add(
+        if ui.add(
             egui::Button::new(
-                egui::RichText::new(play_text).font(FontId::monospace(10.0)).color(play_color),
+                egui::RichText::new(play_label).font(FontId::monospace(10.0)).color(play_color).strong(),
             )
             .fill(play_bg)
             .min_size(Vec2::new(60.0, 22.0))
-            .corner_radius(3.0)
-            .sense(egui::Sense::hover()),
-        );
+            .corner_radius(3.0),
+        ).clicked() {
+            action = Some(SeqAction::ToggleInternalPlay);
+        }
 
         ui.separator();
 

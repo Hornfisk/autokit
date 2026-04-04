@@ -370,10 +370,14 @@ impl Sequencer {
             let drift = (beats - expected_beats).abs();
 
             if !self.playing || drift > 0.01 {
+                // Sync: snap to host position. Fire the current step
+                // so it's not missed when playback starts mid-step.
+                let was_playing = self.playing;
                 self.current_step = host_step;
                 let step_dur = self.step_duration_with_swing(host_step, tempo, sample_rate, bank.active_pattern().swing);
                 self.tick_accumulator = frac * step_dur;
-                if frac < 0.001 {
+                if !was_playing {
+                    // Fresh start — fire the step we land on
                     fire_immediately = true;
                 }
             }

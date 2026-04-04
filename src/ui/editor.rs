@@ -92,10 +92,8 @@ pub enum ViewMode {
 pub struct EditorState {
     /// Which pad is expanded (None = all collapsed).
     pub selected_pad: Option<usize>,
-    /// Current UI scale factor.
+    /// Current UI scale factor (75%-150%).
     pub scale: f32,
-    /// Whether fonts/style have been initialized.
-    pub initialized: bool,
     /// Last-seen trigger counter values — used to detect new triggers.
     pub last_trigger: [u8; NUM_PADS],
     /// Per-pad flash brightness for play animation (0.0 = dark, 1.0 = full flash).
@@ -133,7 +131,6 @@ impl Default for EditorState {
         Self {
             selected_pad: None,
             scale: 1.0,
-            initialized: false,
             last_trigger: [0u8; NUM_PADS],
             brightness: [0.0f32; NUM_PADS],
             show_save_dialog: false,
@@ -164,6 +161,7 @@ pub fn create(
     seq_playing: Arc<std::sync::atomic::AtomicBool>,
     seq_active_pattern: Arc<std::sync::atomic::AtomicUsize>,
     seq_fill_active: Arc<std::sync::atomic::AtomicBool>,
+    seq_internal_play: Arc<std::sync::atomic::AtomicBool>,
 ) -> Option<Box<dyn Editor>> {
     create_egui_editor(
         egui_state,
@@ -175,11 +173,6 @@ pub fn create(
         },
         // Update (called every frame)
         move |ctx, setter, state| {
-            if !state.initialized {
-                ctx.set_pixels_per_point(state.scale);
-                state.initialized = true;
-            }
-
             // --- Phase 1: Brief lock to snapshot display state ---
             let snap = {
                 let shared = shared.lock();
@@ -240,8 +233,14 @@ pub fn create(
                 }
             });
 
+            // Space bar toggles internal sequencer play/stop
+            if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+                let current = seq_internal_play.load(Ordering::Relaxed);
+                seq_internal_play.store(!current, Ordering::Relaxed);
+            }
+
             // Collect any actions triggered during rendering.
-            let mut pending_action: Option<GuiAction> = None;
+            let mut pending_actions: Vec<GuiAction> = Vec::new();
 
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(theme::BG_MAIN))
@@ -263,14 +262,14 @@ pub fn create(
                     );
 
                     match toolbar_action {
-                        ToolbarAction::Undo => pending_action = Some(GuiAction::Undo),
-                        ToolbarAction::Redo => pending_action = Some(GuiAction::Redo),
+                        ToolbarAction::Undo => pending_actions.push(GuiAction::Undo),
+                        ToolbarAction::Redo => pending_actions.push(GuiAction::Redo),
                         ToolbarAction::DiceAll => {
                             if snap.has_library {
-                                pending_action = Some(GuiAction::DiceAll);
+                                pending_actions.push(GuiAction::DiceAll);
                             }
                         }
-                        ToolbarAction::LockAll => pending_action = Some(GuiAction::LockAll),
+                        ToolbarAction::LockAll => pending_actions.push(GuiAction::LockAll),
                         ToolbarAction::SetScale(s) => {
                             state.scale = s;
                             ctx.set_pixels_per_point(s);
@@ -326,14 +325,14 @@ pub fn create(
                                             }
                                             PadRowAction::DicePad => {
                                                 if snap.has_library {
-                                                    pending_action = Some(GuiAction::DicePad(i));
+                                                    pending_actions.push(GuiAction::DicePad(i));
                                                 }
                                             }
                                             PadRowAction::PlayPad => {
                                                 gui_triggers[i].store(1, Ordering::Relaxed);
                                             }
                                             PadRowAction::ToggleLock => {
-                                                pending_action = Some(GuiAction::ToggleLock(i));
+                                                pending_actions.push(GuiAction::ToggleLock(i));
                                             }
                                             _ => {}
                                         }
@@ -347,21 +346,21 @@ pub fn create(
 
                                             match detail_action {
                                                 PadRowAction::SetVolume(v) => {
-                                                    pending_action = Some(GuiAction::SetPadVolume(i, v));
+                                                    pending_actions.push(GuiAction::SetPadVolume(i, v));
                                                 }
                                                 PadRowAction::SetPan(v) => {
-                                                    pending_action = Some(GuiAction::SetPadPan(i, v));
+                                                    pending_actions.push(GuiAction::SetPadPan(i, v));
                                                 }
                                                 PadRowAction::SetPitch(v) => {
-                                                    pending_action = Some(GuiAction::SetPadPitch(i, v));
+                                                    pending_actions.push(GuiAction::SetPadPitch(i, v));
                                                 }
                                                 PadRowAction::SetDecay(v) => {
-                                                    pending_action = Some(GuiAction::SetPadDecay(i, v));
+                                                    pending_actions.push(GuiAction::SetPadDecay(i, v));
                                                 }
                                                 PadRowAction::DiceCategory => {
                                                     if snap.has_library {
-                                                        pending_action =
-                                                            Some(GuiAction::DiceCategory(i, pad.category));
+                                                        pending_actions.push(
+                                                            GuiAction::DiceCategory(i, pad.category));
                                                     }
                                                 }
                                                 _ => {}
@@ -401,10 +400,10 @@ pub fn create(
                                     let lib_index = state.map_points[point_index].library_index;
                                     if let Some(pad) = state.map_shortcut_pad {
                                         // Shortcut mode: assign directly + preview
-                                        pending_action = Some(GuiAction::AssignFromMap { pad_index: pad, library_index: lib_index });
+                                        pending_actions.push(GuiAction::AssignFromMap { pad_index: pad, library_index: lib_index });
                                     } else {
                                         // Normal mode: preview + popup
-                                        pending_action = Some(GuiAction::PreviewSample(lib_index));
+                                        pending_actions.push(GuiAction::PreviewSample(lib_index));
                                         state.map_popup.active_point = Some(point_index);
                                         if let Some(cursor) = ui.input(|i| i.pointer.interact_pos()) {
                                             state.map_popup.anchor_pos = cursor;
@@ -448,7 +447,7 @@ pub fn create(
 
                                 crate::ui::sequencer_ui::SeqDisplay {
                                     current_step: seq_current_step.load(Ordering::Relaxed),
-                                    playing: seq_playing.load(Ordering::Relaxed),
+                                    playing: seq_playing.load(Ordering::Relaxed) || seq_internal_play.load(Ordering::Relaxed),
                                     active_pattern: active,
                                     queued_pattern: bank.queued,
                                     fill_active: seq_fill_active.load(Ordering::Relaxed),
@@ -473,31 +472,32 @@ pub fn create(
                                 }
                             };
 
-                            if let Some(seq_action) = crate::ui::sequencer_ui::draw_sequencer_view(
-                                ui, &seq_display, &mut state.seq_view,
-                            ) {
+                            {
                                 use crate::ui::sequencer_ui::SeqAction;
-                                pending_action = Some(match seq_action {
-                                    SeqAction::ToggleStep { lane, step } => GuiAction::SeqToggleStep { lane, step },
-                                    SeqAction::SelectStep { .. } => {
-                                        // Selection already handled in draw_sequencer_view
-                                        GuiAction::None
-                                    }
-                                    SeqAction::SetStepVelocity { lane, step, value } => GuiAction::SeqSetStepVelocity { lane, step, value },
-                                    SeqAction::SetStepPan { lane, step, value } => GuiAction::SeqSetStepPan { lane, step, value },
-                                    SeqAction::SetStepPitch { lane, step, value } => GuiAction::SeqSetStepPitch { lane, step, value },
-                                    SeqAction::SetStepProbability { lane, step, value } => GuiAction::SeqSetStepProbability { lane, step, value },
-                                    SeqAction::SetStepCondition { lane, step, condition } => GuiAction::SeqSetStepCondition { lane, step, condition },
-                                    SeqAction::ToggleLaneMute { lane } => GuiAction::SeqToggleLaneMute { lane },
-                                    SeqAction::ToggleLaneLock { lane } => GuiAction::SeqToggleLaneLock { lane },
-                                    SeqAction::SelectPattern { index } => GuiAction::SeqSelectPattern { index },
-                                    SeqAction::SetSwing { value } => GuiAction::SeqSetSwing { value },
-                                    SeqAction::CopyPattern => GuiAction::SeqCopyPattern,
-                                    SeqAction::PastePattern => GuiAction::SeqPastePattern,
-                                    SeqAction::ClearPattern => GuiAction::SeqClearPattern,
-                                    SeqAction::DicePattern => GuiAction::SeqDicePattern,
-                                    SeqAction::SetFillActive { active } => GuiAction::SeqSetFillActive { active },
-                                });
+                                for seq_action in crate::ui::sequencer_ui::draw_sequencer_view(
+                                    ui, &seq_display, &mut state.seq_view,
+                                ) {
+                                    pending_actions.push(match seq_action {
+                                        SeqAction::ToggleStep { lane, step } => GuiAction::SeqToggleStep { lane, step },
+                                        SeqAction::SetStepEnabled { lane, step, enabled } => GuiAction::SeqSetStepEnabled { lane, step, enabled },
+                                        SeqAction::SelectStep { .. } => GuiAction::None,
+                                        SeqAction::SetStepVelocity { lane, step, value } => GuiAction::SeqSetStepVelocity { lane, step, value },
+                                        SeqAction::SetStepPan { lane, step, value } => GuiAction::SeqSetStepPan { lane, step, value },
+                                        SeqAction::SetStepPitch { lane, step, value } => GuiAction::SeqSetStepPitch { lane, step, value },
+                                        SeqAction::SetStepProbability { lane, step, value } => GuiAction::SeqSetStepProbability { lane, step, value },
+                                        SeqAction::SetStepCondition { lane, step, condition } => GuiAction::SeqSetStepCondition { lane, step, condition },
+                                        SeqAction::ToggleLaneMute { lane } => GuiAction::SeqToggleLaneMute { lane },
+                                        SeqAction::ToggleLaneLock { lane } => GuiAction::SeqToggleLaneLock { lane },
+                                        SeqAction::SelectPattern { index } => GuiAction::SeqSelectPattern { index },
+                                        SeqAction::SetSwing { value } => GuiAction::SeqSetSwing { value },
+                                        SeqAction::CopyPattern => GuiAction::SeqCopyPattern,
+                                        SeqAction::PastePattern => GuiAction::SeqPastePattern,
+                                        SeqAction::ClearPattern => GuiAction::SeqClearPattern,
+                                        SeqAction::DicePattern => GuiAction::SeqDicePattern,
+                                        SeqAction::SetFillActive { active } => GuiAction::SeqSetFillActive { active },
+                                        SeqAction::ToggleInternalPlay => GuiAction::SeqToggleInternalPlay,
+                                    });
+                                }
                             }
                         }
                     }
@@ -506,12 +506,12 @@ pub fn create(
             // --- Sample map assignment popup ---
             if state.view_mode == ViewMode::SampleMap && state.map_popup.active_point.is_some() {
                 let pad_categories: [SampleCategory; NUM_PADS] = core::array::from_fn(|i| snap.pads[i].category);
-                let map_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 365.0));
+                let map_rect = ctx.screen_rect();
                 let popup_action = sample_map::draw_popup(ctx, &mut state.map_popup, &state.map_points, &pad_categories, map_rect);
                 match popup_action {
                     sample_map::MapAction::AssignToPad { point_index, pad_index } => {
                         let lib_index = state.map_points[point_index].library_index;
-                        pending_action = Some(GuiAction::AssignFromMap { pad_index, library_index: lib_index });
+                        pending_actions.push(GuiAction::AssignFromMap { pad_index, library_index: lib_index });
                     }
                     _ => {}
                 }
@@ -574,8 +574,8 @@ pub fn create(
                                 .clicked()
                                 || (enter_pressed && save_enabled)
                             {
-                                pending_action =
-                                    Some(GuiAction::SavePreset(state.save_name.trim().to_string()));
+                                pending_actions.push(
+                                    GuiAction::SavePreset(state.save_name.trim().to_string()));
                                 state.show_save_dialog = false;
                             }
 
@@ -639,8 +639,8 @@ pub fn create(
                                             )
                                             .clicked()
                                         {
-                                            pending_action =
-                                                Some(GuiAction::LoadPreset(path.clone()));
+                                            pending_actions.push(
+                                                GuiAction::LoadPreset(path.clone()));
                                             state.show_load_dialog = false;
                                         }
                                     }
@@ -669,8 +669,11 @@ pub fn create(
             }
 
             // --- Phase 2: Brief lock to apply any mutation ---
-            if let Some(action) = pending_action {
+            if !pending_actions.is_empty() {
+                let mut needs_waveform_update = false;
+                {
                 let mut shared = shared.lock();
+                for action in pending_actions {
                 match action {
                     GuiAction::Undo => {
                         let current = HistorySnapshot {
@@ -680,7 +683,7 @@ pub fn create(
                         if let Some(restored) = shared.history.undo(current) {
                             shared.kit.restore(&restored.pads);
                             shared.pattern_bank.restore(&restored.sequencer);
-                            shared.update_all_waveforms(WAVEFORM_POINTS);
+                            needs_waveform_update = true;
                         }
                     }
                     GuiAction::Redo => {
@@ -691,7 +694,7 @@ pub fn create(
                         if let Some(restored) = shared.history.redo(current) {
                             shared.kit.restore(&restored.pads);
                             shared.pattern_bank.restore(&restored.sequencer);
-                            shared.update_all_waveforms(WAVEFORM_POINTS);
+                            needs_waveform_update = true;
                         }
                     }
                     GuiAction::DiceAll => {
@@ -705,7 +708,7 @@ pub fn create(
                                 });
                                 kit.dice_all(lib);
                             }
-                            shared.update_all_waveforms(WAVEFORM_POINTS);
+                            needs_waveform_update = true;
                         }
                     }
                     GuiAction::DicePad(i) => {
@@ -733,7 +736,7 @@ pub fn create(
                                 });
                                 kit.dice_category(cat, lib);
                             }
-                            shared.update_all_waveforms(WAVEFORM_POINTS);
+                            needs_waveform_update = true;
                         }
                     }
                     GuiAction::LockAll => {
@@ -782,7 +785,7 @@ pub fn create(
                                 };
                                 shared.history.push(snap);
                                 preset::apply_to_kit(&p, &mut shared.kit);
-                                shared.update_all_waveforms(WAVEFORM_POINTS);
+                                needs_waveform_update = true;
                                 tracing::info!("Loaded preset: {}", p.name);
                                 state.status_message =
                                     Some(format!("Loaded: {}", p.name));
@@ -839,6 +842,15 @@ pub fn create(
                             s.pan = None;
                             s.pitch = None;
                             s.condition = crate::engine::sequencer::ConditionTrig::Always;
+                        }
+                    }
+                    GuiAction::SeqSetStepEnabled { lane, step, enabled } => {
+                        let pat = shared.pattern_bank.active_pattern_mut();
+                        let s = &mut pat.lanes[lane].steps[step];
+                        s.enabled = enabled;
+                        if enabled && s.velocity == 0.0 {
+                            s.velocity = 0.8;
+                            s.probability = 1.0;
                         }
                     }
                     GuiAction::SeqSetStepVelocity { lane, step, value } => {
@@ -935,8 +947,18 @@ pub fn create(
                     GuiAction::SeqSetFillActive { active } => {
                         seq_fill_active.store(active, Ordering::Relaxed);
                     }
+                    GuiAction::SeqToggleInternalPlay => {
+                        let current = seq_internal_play.load(Ordering::Relaxed);
+                        seq_internal_play.store(!current, Ordering::Relaxed);
+                    }
                 }
-                // Lock drops here — held only for the mutation.
+                } // end for action in pending_actions
+                } // Lock drops here — held only for the mutation.
+                // Update waveforms OUTSIDE the lock to avoid blocking audio
+                if needs_waveform_update {
+                    let mut shared = shared.lock();
+                    shared.update_all_waveforms(WAVEFORM_POINTS);
+                }
             }
         },
     )
@@ -962,6 +984,7 @@ enum GuiAction {
     AssignFromMap { pad_index: usize, library_index: usize },
     // Sequencer actions
     SeqToggleStep { lane: usize, step: usize },
+    SeqSetStepEnabled { lane: usize, step: usize, enabled: bool },
     SeqSetStepVelocity { lane: usize, step: usize, value: f32 },
     SeqSetStepPan { lane: usize, step: usize, value: Option<f32> },
     SeqSetStepPitch { lane: usize, step: usize, value: Option<f32> },
@@ -976,4 +999,5 @@ enum GuiAction {
     SeqClearPattern,
     SeqDicePattern,
     SeqSetFillActive { active: bool },
+    SeqToggleInternalPlay,
 }

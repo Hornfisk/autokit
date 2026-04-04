@@ -108,7 +108,7 @@ pub fn draw_toolbar_snapshot(
                 // Reserve space for right-aligned toolbar items.
                 // Underestimating this constant clips right-side items;
                 // overestimating wastes space but is harmless.
-                const RIGHT_SIDE_BUDGET: f32 = 680.0;
+                const RIGHT_SIDE_BUDGET: f32 = 580.0;
                 let spacer = (ui.available_width() - RIGHT_SIDE_BUDGET).max(0.0);
                 ui.add_space(spacer);
 
@@ -249,7 +249,7 @@ pub fn draw_toolbar_snapshot(
                         .color(theme::ACCENT),
                 );
 
-                ui.add_space(8.0);
+                ui.add_space(4.0);
 
                 // Scale selector
                 let scale_label = format!("{}%", (current_scale * 100.0) as u32);
@@ -261,7 +261,7 @@ pub fn draw_toolbar_snapshot(
                     )
                     .width(50.0)
                     .show_ui(ui, |ui| {
-                        for &s in &[1.0f32, 1.25, 1.5] {
+                        for &s in &[0.75f32, 1.0, 1.25, 1.5] {
                             let label = format!("{}%", (s * 100.0) as u32);
                             if ui
                                 .selectable_label((current_scale - s).abs() < 0.01, &label)
