@@ -20,6 +20,7 @@ mod ui {
     pub mod editor;
     pub mod knob;
     pub mod pad_row;
+    pub mod sample_map;
     pub mod state;
     pub mod theme;
     pub mod toolbar;
