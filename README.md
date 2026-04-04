@@ -6,6 +6,10 @@ A sample-based drum machine plugin that scans your library, classifies oneshots 
 **Platforms:** Linux, macOS, Windows
 **License:** GPL-3.0-or-later
 
+![Sequencer view](assets/screenshot-sequencer.png)
+![Sample map](assets/screenshot-map.png)
+![Pads view](assets/screenshot-pads.png)
+
 ## Quick start
 
 Download the latest build for your platform from the [Releases](https://github.com/Hornfisk/autokit/releases/latest) page, extract, and run the installer:
