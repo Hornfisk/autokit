@@ -119,6 +119,8 @@ pub struct EditorState {
     pub map_view: sample_map::MapViewState,
     /// Index of the hovered dot in the map view.
     pub map_hovered: Option<usize>,
+    /// Assignment popup state for the sample map.
+    pub map_popup: sample_map::PopupState,
 }
 
 impl Default for EditorState {
@@ -139,6 +141,7 @@ impl Default for EditorState {
             map_built: false,
             map_view: sample_map::MapViewState::default(),
             map_hovered: None,
+            map_popup: sample_map::PopupState::default(),
         }
     }
 }
@@ -376,14 +379,40 @@ pub fn create(
 
                             match map_action {
                                 sample_map::MapAction::ClickedDot { point_index } => {
-                                    // Preview + popup handled in later tasks
-                                    let _ = point_index;
+                                    let lib_index = state.map_points[point_index].library_index;
+                                    pending_action = Some(GuiAction::PreviewSample(lib_index));
+                                    state.map_popup.active_point = Some(point_index);
+                                    if let Some(cursor) = ui.input(|i| i.pointer.interact_pos()) {
+                                        state.map_popup.anchor_pos = cursor;
+                                    }
                                 }
+                                sample_map::MapAction::AssignToPad { .. } => {}
                                 sample_map::MapAction::None => {}
                             }
                         }
                     }
                 });
+
+            // --- Sample map assignment popup ---
+            if state.view_mode == ViewMode::SampleMap && state.map_popup.active_point.is_some() {
+                let pad_categories: [SampleCategory; NUM_PADS] = core::array::from_fn(|i| snap.pads[i].category);
+                let map_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 365.0));
+                let popup_action = sample_map::draw_popup(ctx, &mut state.map_popup, &state.map_points, &pad_categories, map_rect);
+                match popup_action {
+                    sample_map::MapAction::AssignToPad { point_index, pad_index } => {
+                        let lib_index = state.map_points[point_index].library_index;
+                        pending_action = Some(GuiAction::AssignFromMap { pad_index, library_index: lib_index });
+                    }
+                    _ => {}
+                }
+            }
+
+            // Dismiss popup on click outside
+            if state.view_mode == ViewMode::SampleMap && state.map_popup.active_point.is_some()
+                && ctx.input(|i| i.pointer.any_click()) && state.map_hovered.is_none()
+            {
+                state.map_popup.active_point = None;
+            }
 
             // --- Save preset dialog ---
             if state.show_save_dialog {
@@ -654,6 +683,39 @@ pub fn create(
                             }
                         }
                     }
+                    GuiAction::PreviewSample(lib_index) => {
+                        let data = shared.library.as_ref().and_then(|lib| {
+                            lib.sample_by_flat_index(lib_index).map(|s| Arc::clone(&s.data))
+                        });
+                        if let Some(data) = data {
+                            shared.preview_sample = Some(data);
+                        }
+                    }
+                    GuiAction::AssignFromMap { pad_index, library_index } => {
+                        // Extract sample info before mutating shared state
+                        let sample_info = shared.library.as_ref().and_then(|lib| {
+                            lib.sample_by_flat_index(library_index).map(|s| {
+                                (Arc::clone(&s.data),
+                                 s.entry.path.to_string_lossy().to_string(),
+                                 s.entry.filename.clone(),
+                                 s.entry.category)
+                            })
+                        });
+                        if let Some((data, path, filename, category)) = sample_info {
+                            let snap = HistorySnapshot {
+                                pads: shared.kit.snapshot(),
+                                sequencer: seq_snap(),
+                            };
+                            shared.history.push(snap);
+                            let pad = &mut shared.kit.pads[pad_index];
+                            pad.sample = Some(Arc::clone(&data));
+                            pad.sample_path = Some(path);
+                            pad.name = filename;
+                            pad.category = category;
+                            shared.update_waveform(pad_index, WAVEFORM_POINTS);
+                            shared.preview_sample = Some(data);
+                        }
+                    }
                 }
                 // Lock drops here — held only for the mutation.
             }
@@ -676,4 +738,6 @@ enum GuiAction {
     SetPadDecay(usize, f32),
     SavePreset(String),
     LoadPreset(PathBuf),
+    PreviewSample(usize),
+    AssignFromMap { pad_index: usize, library_index: usize },
 }

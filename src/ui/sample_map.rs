@@ -35,6 +35,7 @@ fn normalize_decay(secs: f32) -> f32 {
 
 use nih_plug_egui::egui;
 use crate::analysis::library::SampleLibrary;
+use crate::engine::kit::NUM_PADS;
 use crate::ui::theme;
 
 /// Build map points from the full sample library.
@@ -116,6 +117,16 @@ pub fn hit_test(
 pub enum MapAction {
     None,
     ClickedDot { point_index: usize },
+    AssignToPad { point_index: usize, pad_index: usize },
+}
+
+/// State for the assignment popup.
+pub struct PopupState {
+    pub active_point: Option<usize>,
+    pub anchor_pos: egui::Pos2,
+}
+impl Default for PopupState {
+    fn default() -> Self { Self { active_point: None, anchor_pos: egui::Pos2::ZERO } }
 }
 
 /// Draw the scatter plot. Returns any action triggered.
@@ -276,6 +287,92 @@ pub fn draw_map(
             }
         }
     }
+
+    action
+}
+
+/// Draw the assignment popup near a clicked dot.
+pub fn draw_popup(
+    ctx: &egui::Context,
+    popup: &mut PopupState,
+    points: &[MapPoint],
+    pad_categories: &[SampleCategory; NUM_PADS],
+    map_rect: egui::Rect,
+) -> MapAction {
+    let point_index = match popup.active_point {
+        Some(i) if i < points.len() => i,
+        _ => return MapAction::None,
+    };
+
+    let p = &points[point_index];
+    let color = theme::category_color(p.category);
+
+    // Position popup near anchor, flip if near edges
+    let popup_width = 140.0;
+    let popup_height = 80.0;
+    let mut pos = egui::pos2(popup.anchor_pos.x + 15.0, popup.anchor_pos.y - popup_height - 10.0);
+    if pos.x + popup_width > map_rect.right() { pos.x = popup.anchor_pos.x - popup_width - 15.0; }
+    if pos.y < map_rect.top() { pos.y = popup.anchor_pos.y + 15.0; }
+
+    let mut action = MapAction::None;
+
+    egui::Area::new(egui::Id::new("map_popup"))
+        .fixed_pos(pos)
+        .constrain(false)
+        .show(ctx, |ui| {
+            egui::Frame::NONE
+                .fill(egui::Color32::from_rgb(0x11, 0x11, 0x26))
+                .stroke(egui::Stroke::new(1.0, color.to_egui_alpha(0x77)))
+                .corner_radius(egui::CornerRadius::same(5))
+                .inner_margin(egui::Margin::same(6))
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new(&p.name)
+                        .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                        .color(color.to_egui()).strong());
+                    ui.label(egui::RichText::new(format!("{} \u{00b7} {:.0}Hz \u{00b7} {:.2}s", p.category.label(), p.centroid_hz, p.decay_secs))
+                        .font(egui::FontId::new(8.0, egui::FontFamily::Monospace))
+                        .color(theme::TEXT_DIM));
+                    ui.add_space(3.0);
+                    ui.label(egui::RichText::new("ASSIGN TO PAD:")
+                        .font(egui::FontId::new(7.0, egui::FontFamily::Monospace))
+                        .color(theme::TEXT_DIM));
+                    ui.add_space(2.0);
+                    egui::Grid::new("popup_pads").spacing(egui::vec2(2.0, 2.0)).show(ui, |ui| {
+                        for i in 0..NUM_PADS {
+                            let pad_color = theme::category_color(pad_categories[i]);
+                            let is_match = pad_categories[i] == p.category;
+                            let bg = if is_match { pad_color.to_egui_alpha(0x44) } else { pad_color.to_egui_alpha(0x22) };
+                            if ui.add(egui::Button::new(
+                                egui::RichText::new(format!("{}", i + 1))
+                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                    .color(pad_color.to_egui()))
+                                .fill(bg).min_size(egui::vec2(24.0, 18.0)))
+                                .clicked()
+                            {
+                                action = MapAction::AssignToPad { point_index, pad_index: i };
+                                popup.active_point = None;
+                            }
+                            if i == 3 { ui.end_row(); }
+                        }
+                    });
+                });
+        });
+
+    // Keyboard: 1-8 assign, Escape closes
+    ctx.input(|input| {
+        for i in 0..NUM_PADS {
+            let key = match i {
+                0 => egui::Key::Num1, 1 => egui::Key::Num2, 2 => egui::Key::Num3, 3 => egui::Key::Num4,
+                4 => egui::Key::Num5, 5 => egui::Key::Num6, 6 => egui::Key::Num7, 7 => egui::Key::Num8,
+                _ => continue,
+            };
+            if input.key_pressed(key) {
+                action = MapAction::AssignToPad { point_index, pad_index: i };
+                popup.active_point = None;
+            }
+        }
+        if input.key_pressed(egui::Key::Escape) { popup.active_point = None; }
+    });
 
     action
 }
