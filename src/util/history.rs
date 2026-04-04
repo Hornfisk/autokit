@@ -25,6 +25,9 @@ pub struct StepSnapshot {
     pub enabled: bool,
     pub velocity: f32,
     pub probability: f32,
+    pub pan: Option<f32>,
+    pub pitch: Option<f32>,
+    pub condition: crate::engine::sequencer::ConditionTrig,
 }
 
 /// Snapshot of one sequencer lane.
@@ -119,6 +122,9 @@ mod tests {
                 enabled: false,
                 velocity: 0.8,
                 probability: 1.0,
+                pan: None,
+                pitch: None,
+                condition: crate::engine::sequencer::ConditionTrig::Always,
             }; 16],
             muted: false,
         });

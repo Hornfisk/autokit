@@ -6,12 +6,63 @@ use crate::engine::kit::{DrumKit, NUM_PADS};
 use crate::engine::sampler::VoicePool;
 use crate::util::history::{StepSnapshot, LaneSnapshot, SequencerSnapshot};
 
+/// Conditional trig types — Elektron-style step conditions.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ConditionTrig {
+    Always,        // Default — fires every loop
+    Every(u8),     // 1:N — fires every Nth loop (N = 2, 4, 8)
+    NotEvery(u8),  // !1:N — fires on all loops EXCEPT every Nth
+    Fill,          // Fires only when FILL mode is active
+    NotFill,       // Fires only when FILL mode is NOT active
+}
+
+impl Default for ConditionTrig {
+    fn default() -> Self {
+        Self::Always
+    }
+}
+
+impl ConditionTrig {
+    /// All conditions in cycle order for the GUI selector.
+    pub const CYCLE: &'static [ConditionTrig] = &[
+        Self::Always,
+        Self::Every(2), Self::Every(4), Self::Every(8),
+        Self::NotEvery(2), Self::NotEvery(4), Self::NotEvery(8),
+        Self::Fill, Self::NotFill,
+    ];
+
+    /// Short display label for grid cells and selector button.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Always => "——",
+            Self::Every(2) => "1:2",
+            Self::Every(4) => "1:4",
+            Self::Every(8) => "1:8",
+            Self::NotEvery(2) => "!1:2",
+            Self::NotEvery(4) => "!1:4",
+            Self::NotEvery(8) => "!1:8",
+            Self::Fill => "FIL",
+            Self::NotFill => "!FIL",
+            _ => "??",
+        }
+    }
+
+    /// Next condition in cycle (for click-to-cycle UI).
+    pub fn next(&self) -> ConditionTrig {
+        let idx = Self::CYCLE.iter().position(|c| c == self).unwrap_or(0);
+        Self::CYCLE[(idx + 1) % Self::CYCLE.len()]
+    }
+}
+
 /// A single step in the sequencer.
 #[derive(Clone, Copy)]
 pub struct Step {
     pub enabled: bool,
     pub velocity: f32,
     pub probability: f32,
+    pub pan: Option<f32>,        // None = inherit pad default, Some = p-lock
+    pub pitch: Option<f32>,      // None = inherit pad default, Some = p-lock (semitones)
+    pub condition: ConditionTrig,
 }
 
 impl Default for Step {
@@ -20,6 +71,9 @@ impl Default for Step {
             enabled: false,
             velocity: 0.8,
             probability: 1.0,
+            pan: None,
+            pitch: None,
+            condition: ConditionTrig::Always,
         }
     }
 }
@@ -163,6 +217,9 @@ impl Sequencer {
                 enabled: self.lanes[i].steps[j].enabled,
                 velocity: self.lanes[i].steps[j].velocity,
                 probability: self.lanes[i].steps[j].probability,
+                pan: self.lanes[i].steps[j].pan,
+                pitch: self.lanes[i].steps[j].pitch,
+                condition: self.lanes[i].steps[j].condition,
             });
             LaneSnapshot {
                 steps,
@@ -182,6 +239,9 @@ impl Sequencer {
                 step.enabled = snap_step.enabled;
                 step.velocity = snap_step.velocity;
                 step.probability = snap_step.probability;
+                step.pan = snap_step.pan;
+                step.pitch = snap_step.pitch;
+                step.condition = snap_step.condition;
             }
             lane.muted = snap_lane.muted;
         }
@@ -460,6 +520,37 @@ mod tests {
             &mut voices, &kit, &flags,
         );
         assert!(triggers2 > 0, "should fire step 0 after rewind to beat 0.0");
+    }
+
+    #[test]
+    fn step_default_has_no_plocks_and_always_condition() {
+        let step = Step::default();
+        assert!(!step.enabled);
+        assert!((step.velocity - 0.8).abs() < 0.001);
+        assert!((step.probability - 1.0).abs() < 0.001);
+        assert!(step.pan.is_none());
+        assert!(step.pitch.is_none());
+        assert_eq!(step.condition, ConditionTrig::Always);
+    }
+
+    #[test]
+    fn condition_trig_default_is_always() {
+        assert_eq!(ConditionTrig::default(), ConditionTrig::Always);
+    }
+
+    #[test]
+    fn step_with_plocks() {
+        let step = Step {
+            enabled: true,
+            velocity: 0.6,
+            probability: 1.0,
+            pan: Some(-0.5),
+            pitch: Some(7.0),
+            condition: ConditionTrig::Fill,
+        };
+        assert_eq!(step.pan, Some(-0.5));
+        assert_eq!(step.pitch, Some(7.0));
+        assert_eq!(step.condition, ConditionTrig::Fill);
     }
 
     #[test]
