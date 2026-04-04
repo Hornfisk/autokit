@@ -10,6 +10,7 @@ mod engine {
 }
 
 mod analysis {
+    pub mod cache;
     pub mod features;
     pub mod library;
     pub mod scanner;
@@ -28,6 +29,7 @@ mod ui {
 mod util {
     pub mod audio_file;
     pub mod history;
+    pub mod preset;
 }
 
 nih_export_vst3!(plugin::Autokit);

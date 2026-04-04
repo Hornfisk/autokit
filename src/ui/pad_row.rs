@@ -13,9 +13,21 @@ pub enum PadRowAction {
     DicePad,
     DiceCategory,
     ToggleLock,
+    PlayPad,
     SetVolume(f32),
     SetPan(f32),
     SetPitch(f32),
+    SetDecay(f32),
+}
+
+/// Truncate a string to `max_chars`, appending "…" if truncated.
+fn truncate_name(name: &str, max_chars: usize) -> String {
+    if name.chars().count() <= max_chars {
+        name.to_string()
+    } else {
+        let truncated: String = name.chars().take(max_chars.saturating_sub(1)).collect();
+        format!("{truncated}…")
+    }
 }
 
 /// Draw a collapsed pad row from snapshot data (no mutex held).
@@ -28,6 +40,8 @@ pub fn draw_collapsed_from_snapshot(
     volume: f32,
     waveform_summary: Option<&WaveformSummary>,
     is_selected: bool,
+    play_brightness: f32,
+    locked: bool,
 ) -> PadRowAction {
     let mut action = PadRowAction::None;
     let cat_color = category_color(category);
@@ -40,7 +54,12 @@ pub fn draw_collapsed_from_snapshot(
         theme::BG_ROW
     };
 
-    egui::Frame::NONE
+    // Fixed widths for right-side buttons — guarantees they're always visible.
+    const DICE_BTN_W: f32 = 46.0;
+    const LOCK_BTN_W: f32 = 46.0;
+    const BTN_H: f32 = 22.0;
+
+    let frame_response = egui::Frame::NONE
         .fill(bg)
         .corner_radius(egui::CornerRadius {
             nw: 0,
@@ -51,98 +70,176 @@ pub fn draw_collapsed_from_snapshot(
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.set_height(34.0);
+                // Use clip_rect width rather than available_width() — if any
+                // earlier widget (e.g. the toolbar) overflows, egui expands
+                // max_rect beyond the viewport, making available_width() too
+                // large.  clip_rect is always bounded by the actual viewport.
+                let total_w = ui.clip_rect().width();
                 ui.spacing_mut().item_spacing.x = 0.0;
 
-                // Color strip (3px)
+                // Color strip (3px) — brightened on trigger
                 let (strip_rect, _) =
                     ui.allocate_exact_size(egui::vec2(3.0, 34.0), egui::Sense::hover());
+                let strip_color = if play_brightness > 0.0 {
+                    let [r, g, b, a] = cat_egui.to_array();
+                    let t = play_brightness;
+                    egui::Color32::from_rgba_unmultiplied(
+                        (r as f32 + (255.0 - r as f32) * t) as u8,
+                        (g as f32 + (255.0 - g as f32) * t) as u8,
+                        (b as f32 + (255.0 - b as f32) * t) as u8,
+                        a,
+                    )
+                } else {
+                    cat_egui
+                };
                 ui.painter()
-                    .rect_filled(strip_rect, egui::CornerRadius::ZERO, cat_egui);
+                    .rect_filled(strip_rect, egui::CornerRadius::ZERO, strip_color);
 
-                ui.add_space(10.0);
+                ui.add_space(8.0);
+                ui.spacing_mut().item_spacing.x = 6.0;
 
-                let content_response = ui
-                    .horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 10.0;
+                // Category tag
+                let tag_size = egui::vec2(46.0, 16.0);
+                let (tag_rect, _) =
+                    ui.allocate_exact_size(tag_size, egui::Sense::hover());
+                if ui.is_rect_visible(tag_rect) {
+                    let painter = ui.painter_at(tag_rect);
+                    painter.rect_filled(tag_rect, 2, cat_egui);
+                    painter.text(
+                        tag_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        category.label(),
+                        egui::FontId::new(8.0, egui::FontFamily::Monospace),
+                        theme::BG_MAIN,
+                    );
+                }
 
-                        // Category tag
-                        let tag_size = egui::vec2(46.0, 16.0);
-                        let (tag_rect, _) =
-                            ui.allocate_exact_size(tag_size, egui::Sense::hover());
-                        if ui.is_rect_visible(tag_rect) {
-                            let painter = ui.painter_at(tag_rect);
-                            painter.rect_filled(tag_rect, 2, cat_egui);
-                            painter.text(
-                                tag_rect.center(),
-                                egui::Align2::CENTER_CENTER,
-                                category.label(),
-                                egui::FontId::new(8.0, egui::FontFamily::Monospace),
-                                theme::BG_MAIN,
-                            );
-                        }
+                // Play button (▶)
+                let play_response = ui.add(
+                    egui::Button::new(
+                        egui::RichText::new("▶")
+                            .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
+                            .color(theme::ACCENT),
+                    )
+                    .fill(egui::Color32::TRANSPARENT)
+                    .min_size(egui::vec2(18.0, 34.0)),
+                );
+                if play_response.clicked() {
+                    action = PadRowAction::PlayPad;
+                }
 
-                        // Sample name
-                        let display_name = if has_sample { name } else { "—" };
-                        ui.add_sized(
-                            egui::vec2(170.0, ui.available_height()),
-                            egui::Label::new(
-                                egui::RichText::new(display_name)
-                                    .font(egui::FontId::new(11.0, egui::FontFamily::Monospace))
-                                    .color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)),
-                            )
-                            .truncate(),
-                        );
-
-                        // Waveform
-                        let waveform_width = (ui.available_width() - 100.0).max(80.0);
-                        let wf_color = cat_color.to_egui_alpha((waveform_opacity * 255.0) as u8);
-                        waveform::paint_waveform(
-                            ui,
-                            waveform_summary,
-                            wf_color,
-                            egui::vec2(waveform_width, 26.0),
-                        );
-
-                        // Volume bar
-                        let vol_size = egui::vec2(50.0, 3.0);
-                        let (vol_rect, _) =
-                            ui.allocate_exact_size(vol_size, egui::Sense::hover());
-                        if ui.is_rect_visible(vol_rect) {
-                            let painter = ui.painter_at(vol_rect);
-                            painter.rect_filled(vol_rect, 2, theme::BG_MAIN);
-                            let fill_width = vol_rect.width() * volume;
-                            let fill_rect = egui::Rect::from_min_size(
-                                vol_rect.min,
-                                egui::vec2(fill_width, vol_rect.height()),
-                            );
-                            let fill_color = cat_color.to_egui_alpha(0x66);
-                            let glow_rect = fill_rect.expand2(egui::vec2(0.0, 1.5));
-                            painter.rect_filled(glow_rect, 2, cat_color.to_egui_alpha(0x18));
-                            painter.rect_filled(fill_rect, 2, fill_color);
-                        }
-                    })
-                    .response;
-
-                if content_response.interact(egui::Sense::click()).clicked() {
+                // Sample name
+                let display_name = if has_sample {
+                    truncate_name(name, 20)
+                } else {
+                    "—".to_string()
+                };
+                let name_response = ui.add_sized(
+                    egui::vec2(140.0, ui.available_height()),
+                    egui::Label::new(
+                        egui::RichText::new(&display_name)
+                            .font(egui::FontId::new(11.0, egui::FontFamily::Monospace))
+                            .color(egui::Color32::from_rgb(0xaa, 0xaa, 0xaa)),
+                    )
+                    .truncate()
+                    .sense(egui::Sense::click()),
+                );
+                if has_sample && name.chars().count() > 20 {
+                    name_response.clone().on_hover_text(name);
+                }
+                if name_response.clicked() {
                     action = PadRowAction::ToggleExpand;
                 }
 
-                // Dice button
-                ui.add_space(2.0);
+                // Waveform — compute from total width minus all fixed elements.
+                // Fixed: strip(3) + space(8) + tag(46) + spacing(6) + play(18+6)
+                //        + name(140+6) + vol(40+6) + dice(46+6) + lock(46) + margin(8)
+                const FIXED_W: f32 = 3.0 + 8.0 + 46.0 + 6.0 + 24.0 + 146.0 + 46.0 + 6.0 + 52.0 + 52.0;
+                let waveform_width = (total_w - FIXED_W).max(40.0);
+                let wf_color = cat_color.to_egui_alpha((waveform_opacity * 255.0) as u8);
+                waveform::paint_waveform(
+                    ui,
+                    waveform_summary,
+                    wf_color,
+                    egui::vec2(waveform_width, 26.0),
+                );
+
+                // Volume bar
+                let vol_size = egui::vec2(40.0, 3.0);
+                let (vol_rect, _) =
+                    ui.allocate_exact_size(vol_size, egui::Sense::hover());
+                if ui.is_rect_visible(vol_rect) {
+                    let painter = ui.painter_at(vol_rect);
+                    painter.rect_filled(vol_rect, 2, theme::BG_MAIN);
+                    let fill_width = vol_rect.width() * volume;
+                    let fill_rect = egui::Rect::from_min_size(
+                        vol_rect.min,
+                        egui::vec2(fill_width, vol_rect.height()),
+                    );
+                    let fill_color = cat_color.to_egui_alpha(0x66);
+                    let glow_rect = fill_rect.expand2(egui::vec2(0.0, 1.5));
+                    painter.rect_filled(glow_rect, 2, cat_color.to_egui_alpha(0x18));
+                    painter.rect_filled(fill_rect, 2, fill_color);
+                }
+
+                ui.add_space(6.0);
+
+                // DICE button — boxed text
                 let dice_response = ui.add(
                     egui::Button::new(
-                        egui::RichText::new("⚄")
-                            .font(egui::FontId::new(13.0, egui::FontFamily::Monospace))
-                            .color(theme::ACCENT.linear_multiply(0.4)),
+                        egui::RichText::new("DICE")
+                            .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                            .color(theme::ACCENT)
+                            .strong(),
                     )
-                    .fill(egui::Color32::TRANSPARENT)
-                    .min_size(egui::vec2(28.0, 34.0)),
+                    .fill(theme::ACCENT_DIM)
+                    .stroke(egui::Stroke::new(1.0, theme::ACCENT.linear_multiply(0.4)))
+                    .corner_radius(3)
+                    .min_size(egui::vec2(DICE_BTN_W, BTN_H)),
                 );
                 if dice_response.clicked() {
                     action = PadRowAction::DicePad;
                 }
+                dice_response.on_hover_text("Randomize pad");
+
+                // LOCK button — boxed text, inverted when locked
+                let lock_label = if locked { "LOCK" } else { "LOCK" };
+                let lock_fg = if locked { theme::BG_MAIN } else { theme::TEXT_DIM };
+                let lock_bg = if locked { theme::ACCENT } else { theme::BG_DETAIL };
+                let lock_stroke = if locked {
+                    egui::Stroke::new(1.0, theme::ACCENT)
+                } else {
+                    egui::Stroke::new(1.0, theme::TEXT_DIM.linear_multiply(0.5))
+                };
+                let lock_response = ui.add(
+                    egui::Button::new(
+                        egui::RichText::new(lock_label)
+                            .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                            .color(lock_fg)
+                            .strong(),
+                    )
+                    .fill(lock_bg)
+                    .stroke(lock_stroke)
+                    .corner_radius(3)
+                    .min_size(egui::vec2(LOCK_BTN_W, BTN_H)),
+                );
+                if lock_response.clicked() {
+                    action = PadRowAction::ToggleLock;
+                }
+                lock_response.on_hover_text(if locked { "Unlock pad" } else { "Lock pad" });
             });
         });
+
+    // Glow overlay on trigger
+    if play_brightness > 0.0 {
+        let glow_alpha = (play_brightness * 0.18 * 255.0) as u8;
+        let glow_color = cat_color.to_egui_alpha(glow_alpha);
+        ui.painter().rect_filled(
+            frame_response.response.rect,
+            egui::CornerRadius { nw: 0, ne: 3, se: 3, sw: 0 },
+            glow_color,
+        );
+    }
 
     action
 }
@@ -155,7 +252,7 @@ pub fn draw_expanded_from_snapshot(
     volume: f32,
     pan: f32,
     pitch: f32,
-    locked: bool,
+    decay: f32,
 ) -> PadRowAction {
     let mut action = PadRowAction::None;
     let cat_color = category_color(category);
@@ -241,39 +338,23 @@ pub fn draw_expanded_from_snapshot(
                         action = PadRowAction::SetPitch(pt);
                     }
 
+                    // Decay knob
+                    let mut dc = decay;
+                    let decay_result = knob::knob(
+                        ui,
+                        egui::Id::new(("decay", index)),
+                        &mut dc,
+                        0.01, 1.0, 1.0,
+                        "DECAY",
+                        |v| format!("{}%", (v * 100.0) as u32),
+                        cat_color.to_egui_alpha(0x88),
+                        34.0,
+                    );
+                    if decay_result.changed {
+                        action = PadRowAction::SetDecay(dc);
+                    }
+
                     ui.add(egui::Separator::default().vertical().spacing(8.0));
-
-                    // Lock button
-                    let lock_color = if locked { theme::ACCENT } else { theme::TEXT_DISABLED };
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new(if locked { "LOCKED" } else { "LOCK" })
-                                    .font(egui::FontId::new(8.0, egui::FontFamily::Monospace))
-                                    .color(lock_color),
-                            )
-                            .fill(egui::Color32::TRANSPARENT),
-                        )
-                        .clicked()
-                    {
-                        action = PadRowAction::ToggleLock;
-                    }
-
-                    // Dice pad button
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new("DICE PAD")
-                                    .font(egui::FontId::new(8.0, egui::FontFamily::Monospace))
-                                    .color(theme::ACCENT),
-                            )
-                            .fill(theme::ACCENT_DIM)
-                            .corner_radius(3),
-                        )
-                        .clicked()
-                    {
-                        action = PadRowAction::DicePad;
-                    }
 
                     // Dice category button
                     let cat_label = format!("DICE {}S", category.label());

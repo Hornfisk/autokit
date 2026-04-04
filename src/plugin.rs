@@ -2,10 +2,13 @@ use nih_plug::prelude::*;
 use nih_plug::util::permit_alloc;
 use nih_plug_egui::EguiState;
 use parking_lot::Mutex;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use crossbeam_channel::Receiver;
+use crate::engine::kit::NUM_PADS;
 
 use crate::analysis::library::SampleLibrary;
 use crate::engine::sampler::VoicePool;
@@ -32,7 +35,7 @@ pub struct AutokitParams {
 impl Default for AutokitParams {
     fn default() -> Self {
         Self {
-            editor_state: EguiState::from_size(900, 700),
+            editor_state: EguiState::from_size(900, 365),
             master_volume: FloatParam::new(
                 "Master Volume",
                 util::db_to_gain(0.0),
@@ -65,6 +68,11 @@ pub struct Autokit {
     /// Receive messages from background thread (checked in process()).
     bg_rx: Option<Receiver<BgMessage>>,
     sequencer: Sequencer,
+    /// Lockfree trigger counters — incremented each time a pad fires.
+    /// Shared with the GUI thread which reads them each frame for activity animation.
+    pub trigger_flags: Arc<[AtomicU8; NUM_PADS]>,
+    /// GUI-to-audio trigger requests — GUI sets to 1, audio thread reads and clears.
+    pub gui_triggers: Arc<[AtomicU8; NUM_PADS]>,
     /// Debug: counts process() calls to log periodic status.
     #[cfg(debug_assertions)]
     process_count: u64,
@@ -79,6 +87,8 @@ impl Default for Autokit {
             voices: None,
             bg_rx: None,
             sequencer: Sequencer::new(),
+            trigger_flags: Arc::new(core::array::from_fn(|_| AtomicU8::new(0))),
+            gui_triggers: Arc::new(core::array::from_fn(|_| AtomicU8::new(0))),
             #[cfg(debug_assertions)]
             process_count: 0,
         }
@@ -86,9 +96,19 @@ impl Default for Autokit {
 }
 
 /// Populate the kit from the library using the default layout, then update waveforms.
+/// Ensures each pad receives a unique sample (best-effort when category has fewer samples than pads).
 fn populate_kit_from_library(shared: &mut SharedState) {
     let layout = shared.library.as_ref().expect("library must be set before populate").generate_kit();
     let mut assigned = 0u32;
+
+    // Seed exclusion set with paths from locked pads so we don't duplicate those either
+    let mut used: HashSet<String> = shared
+        .kit
+        .pads
+        .iter()
+        .filter(|p| p.locked)
+        .filter_map(|p| p.sample_path.clone())
+        .collect();
 
     for (pad_idx, category) in layout {
         if pad_idx >= shared.kit.pads.len() {
@@ -100,9 +120,11 @@ fn populate_kit_from_library(shared: &mut SharedState) {
             continue;
         }
 
-        if let Some(sample) = shared.library.as_ref().unwrap().random_from(category) {
+        if let Some(sample) = shared.library.as_ref().unwrap().random_from_excluding(category, &used) {
+            let path = sample.entry.path.to_string_lossy().to_string();
+            used.insert(path.clone());
             shared.kit.pads[pad_idx].sample = Some(Arc::clone(&sample.data));
-            shared.kit.pads[pad_idx].sample_path = Some(sample.entry.path.to_string_lossy().to_string());
+            shared.kit.pads[pad_idx].sample_path = Some(path);
             shared.kit.pads[pad_idx].name = sample.entry.filename.clone();
             shared.kit.pads[pad_idx].category = sample.entry.category;
             assigned += 1;
@@ -155,6 +177,8 @@ impl Plugin for Autokit {
             shared,
             params,
             seq_snapshot,
+            Arc::clone(&self.trigger_flags),
+            Arc::clone(&self.gui_triggers),
         );
         tracing::info!("editor() result: {}", if result.is_some() { "Some" } else { "None" });
         result
@@ -267,17 +291,29 @@ impl Plugin for Autokit {
 
         // Try to lock shared state — if the GUI holds it, skip MIDI/sequencer
         // this buffer (a few ms) rather than blocking the audio thread.
-        if let Some(shared) = self.shared.try_lock() {
+        // permit_alloc: parking_lot may allocate during contended unlock_slow(),
+        // which would otherwise trigger assert_no_alloc panic.
+        let got_lock = permit_alloc(|| self.shared.try_lock());
+        if let Some(shared) = got_lock {
             // Drain MIDI events and trigger voices
             while let Some(event) = context.next_event() {
                 match event {
                     NoteEvent::NoteOn { note, velocity, .. } => {
                         if let Some(pad_idx) = shared.kit.pad_for_note(note) {
                             voices.trigger(pad_idx, velocity, &shared.kit, 0);
+                            self.trigger_flags[pad_idx].fetch_add(1, Ordering::Relaxed);
                         }
                     }
                     NoteEvent::NoteOff { .. } => {}
                     _ => {}
+                }
+            }
+
+            // Check GUI trigger requests (keyboard/click-to-play)
+            for i in 0..NUM_PADS {
+                if self.gui_triggers[i].swap(0, Ordering::Relaxed) != 0 {
+                    voices.trigger(i, 0.8, &shared.kit, 0);
+                    self.trigger_flags[i].fetch_add(1, Ordering::Relaxed);
                 }
             }
 
@@ -291,6 +327,7 @@ impl Plugin for Autokit {
                 self.sample_rate,
                 voices,
                 &shared.kit,
+                &self.trigger_flags,
             );
 
             let channels = buffer.as_slice();
@@ -302,7 +339,8 @@ impl Plugin for Autokit {
                 output_right.fill(0.0);
                 voices.process(output_left, output_right, &shared.kit);
             }
-            drop(shared);
+            // permit_alloc for drop: parking_lot unlock_slow() may allocate.
+            permit_alloc(|| drop(shared));
         } else {
             // GUI holds the lock — output silence this buffer.
             let channels = buffer.as_slice();

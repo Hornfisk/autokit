@@ -13,6 +13,8 @@ pub enum ToolbarAction {
     DiceAll,
     LockAll,
     SetScale(f32),
+    OpenSaveDialog,
+    OpenLoadDialog,
 }
 
 /// Draw the toolbar from snapshot data (no mutex held).
@@ -30,7 +32,7 @@ pub fn draw_toolbar_snapshot(
 
     egui::Frame::NONE
         .fill(theme::BG_TOOLBAR)
-        .inner_margin(egui::Margin::symmetric(16, 8))
+        .inner_margin(egui::Margin { left: 16, right: 20, top: 8, bottom: 8 })
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.set_height(28.0);
@@ -66,7 +68,12 @@ pub fn draw_toolbar_snapshot(
                     }
                 }
 
-                ui.add_space(ui.available_width() - 380.0);
+                // Reserve space for right-aligned toolbar items.
+                // Underestimating this constant clips right-side items;
+                // overestimating wastes space but is harmless.
+                const RIGHT_SIDE_BUDGET: f32 = 680.0;
+                let spacer = (ui.available_width() - RIGHT_SIDE_BUDGET).max(0.0);
+                ui.add_space(spacer);
 
                 // Undo
                 let undo_color = if can_undo { theme::TEXT_DIM } else { theme::TEXT_DISABLED };
@@ -142,6 +149,46 @@ pub fn draw_toolbar_snapshot(
 
                 ui.add(egui::Separator::default().vertical().spacing(4.0));
 
+                // Save preset
+                let save_color = egui::Color32::from_rgb(0x74, 0xb9, 0xff); // blue
+                let save_dim = egui::Color32::from_rgba_premultiplied(0x1c, 0x2e, 0x44, 0x44);
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new("SAVE")
+                                .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                .color(save_color)
+                                .strong(),
+                        )
+                        .fill(save_dim)
+                        .min_size(egui::vec2(44.0, 22.0)),
+                    )
+                    .clicked()
+                {
+                    action = ToolbarAction::OpenSaveDialog;
+                }
+
+                // Load preset
+                let load_color = egui::Color32::from_rgb(0xff, 0x9f, 0x43); // orange
+                let load_dim = egui::Color32::from_rgba_premultiplied(0x44, 0x28, 0x10, 0x44);
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new("LOAD")
+                                .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                .color(load_color)
+                                .strong(),
+                        )
+                        .fill(load_dim)
+                        .min_size(egui::vec2(44.0, 22.0)),
+                    )
+                    .clicked()
+                {
+                    action = ToolbarAction::OpenLoadDialog;
+                }
+
+                ui.add(egui::Separator::default().vertical().spacing(4.0));
+
                 // Master volume
                 ui.label(
                     egui::RichText::new("MASTER")
@@ -164,6 +211,8 @@ pub fn draw_toolbar_snapshot(
                         .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
                         .color(theme::ACCENT),
                 );
+
+                ui.add_space(8.0);
 
                 // Scale selector
                 let scale_label = format!("{}%", (current_scale * 100.0) as u32);

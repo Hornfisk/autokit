@@ -1,6 +1,7 @@
 use crate::analysis::library::SampleLibrary;
 use crate::util::history::PadSnapshot;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Sample categories for classification and color coding.
@@ -50,6 +51,9 @@ impl SampleCategory {
     }
 }
 
+/// Number of pads in the kit.
+pub const NUM_PADS: usize = 8;
+
 /// A single drum pad in the kit.
 pub struct DrumPad {
     /// Audio sample data (mono, f32, at host sample rate)
@@ -70,6 +74,8 @@ pub struct DrumPad {
     pub pan: f32,
     /// Pitch adjustment in semitones
     pub pitch: f32,
+    /// Decay / sample length (0.0 = very short, 1.0 = full sample). Default 1.0.
+    pub decay: f32,
 }
 
 impl DrumPad {
@@ -84,11 +90,12 @@ impl DrumPad {
             volume: 1.0,
             pan: 0.0,
             pitch: 0.0,
+            decay: 1.0,
         }
     }
 }
 
-/// The 16-pad drum kit.
+/// The drum kit.
 pub struct DrumKit {
     pub pads: Vec<DrumPad>,
 }
@@ -96,7 +103,7 @@ pub struct DrumKit {
 impl DrumKit {
     pub fn new() -> Self {
         Self {
-            pads: (0..16).map(DrumPad::new).collect(),
+            pads: (0..NUM_PADS).map(DrumPad::new).collect(),
         }
     }
 
@@ -117,6 +124,7 @@ impl DrumKit {
                 volume: p.volume,
                 pan: p.pan,
                 pitch: p.pitch,
+                decay: p.decay,
             })
             .collect()
     }
@@ -139,19 +147,30 @@ impl DrumKit {
             pad.volume = snap.volume;
             pad.pan = snap.pan;
             pad.pitch = snap.pitch;
+            pad.decay = snap.decay;
         }
     }
 
     /// Re-roll all unlocked pads from their current category.
-    /// Preserves volume, pan, pitch.
+    /// Preserves volume, pan, pitch. Avoids assigning the same sample to multiple pads.
     pub fn dice_all(&mut self, library: &SampleLibrary) {
+        // Seed exclusion set with paths from locked pads
+        let mut used: HashSet<String> = self
+            .pads
+            .iter()
+            .filter(|p| p.locked)
+            .filter_map(|p| p.sample_path.clone())
+            .collect();
+
         for pad in &mut self.pads {
             if pad.locked {
                 continue;
             }
-            if let Some(sample) = library.random_from(pad.category) {
+            if let Some(sample) = library.random_from_excluding(pad.category, &used) {
+                let path = sample.entry.path.to_string_lossy().to_string();
+                used.insert(path.clone());
                 pad.sample = Some(Arc::clone(&sample.data));
-                pad.sample_path = Some(sample.entry.path.to_string_lossy().to_string());
+                pad.sample_path = Some(path);
                 pad.name = sample.entry.filename.clone();
                 pad.category = sample.entry.category;
             }
@@ -159,33 +178,55 @@ impl DrumKit {
     }
 
     /// Re-roll one specific pad. No-op if locked or out of range.
-    /// Preserves volume, pan, pitch.
+    /// Preserves volume, pan, pitch. Avoids paths already used by other pads.
     pub fn dice_pad(&mut self, index: usize, library: &SampleLibrary) {
         if index >= self.pads.len() {
             return;
         }
-        let pad = &mut self.pads[index];
-        if pad.locked {
+        if self.pads[index].locked {
             return;
         }
-        if let Some(sample) = library.random_from(pad.category) {
+        // Collect paths used by all OTHER pads
+        let used: HashSet<String> = self
+            .pads
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != index)
+            .filter_map(|(_, p)| p.sample_path.clone())
+            .collect();
+
+        let category = self.pads[index].category;
+        if let Some(sample) = library.random_from_excluding(category, &used) {
+            let path = sample.entry.path.to_string_lossy().to_string();
+            let pad = &mut self.pads[index];
             pad.sample = Some(Arc::clone(&sample.data));
-            pad.sample_path = Some(sample.entry.path.to_string_lossy().to_string());
+            pad.sample_path = Some(path);
             pad.name = sample.entry.filename.clone();
             pad.category = sample.entry.category;
         }
     }
 
     /// Re-roll all unlocked pads of a given category.
-    /// Preserves volume, pan, pitch.
+    /// Preserves volume, pan, pitch. Avoids assigning the same sample to multiple pads.
     pub fn dice_category(&mut self, category: SampleCategory, library: &SampleLibrary) {
+        // Seed exclusion set with paths from pads NOT being re-rolled
+        // (locked pads of this category, or pads of a different category)
+        let mut used: HashSet<String> = self
+            .pads
+            .iter()
+            .filter(|p| p.locked || p.category != category)
+            .filter_map(|p| p.sample_path.clone())
+            .collect();
+
         for pad in &mut self.pads {
             if pad.locked || pad.category != category {
                 continue;
             }
-            if let Some(sample) = library.random_from(category) {
+            if let Some(sample) = library.random_from_excluding(category, &used) {
+                let path = sample.entry.path.to_string_lossy().to_string();
+                used.insert(path.clone());
                 pad.sample = Some(Arc::clone(&sample.data));
-                pad.sample_path = Some(sample.entry.path.to_string_lossy().to_string());
+                pad.sample_path = Some(path);
                 pad.name = sample.entry.filename.clone();
                 pad.category = sample.entry.category;
             }
@@ -209,7 +250,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    /// Build a minimal SampleLibrary with known samples for testing.
+    /// Build a minimal SampleLibrary with one sample per category.
     fn test_library() -> SampleLibrary {
         let mut by_category: HashMap<SampleCategory, Vec<AnalyzedSample>> = HashMap::new();
 
@@ -245,6 +286,46 @@ mod tests {
         }
     }
 
+    /// Build a library with N unique samples per category.
+    fn test_library_multi(samples_per_cat: usize) -> SampleLibrary {
+        let mut by_category: HashMap<SampleCategory, Vec<AnalyzedSample>> = HashMap::new();
+        let mut total = 0;
+
+        for cat in SampleCategory::all() {
+            for i in 0..samples_per_cat {
+                let entry = SampleEntry {
+                    path: PathBuf::from(format!("/test/{}-{}.wav", cat.label(), i)),
+                    filename: format!("test-{}-{}", cat.label(), i),
+                    category: *cat,
+                    folder_hint: None,
+                    duration_ms: 100,
+                    is_percussive: true,
+                };
+                let sample = AnalyzedSample {
+                    entry,
+                    features: AudioFeatures {
+                        attack_time: 0.001,
+                        decay_time: 0.05,
+                        spectral_centroid: 1000.0,
+                        spectral_flatness: 0.5,
+                        peak: 1.0,
+                        duration: 0.1,
+                        is_percussive: true,
+                    },
+                    data: Arc::new(vec![0.5 * i as f32 / samples_per_cat as f32; 4410]),
+                };
+                by_category.entry(*cat).or_default().push(sample);
+                total += 1;
+            }
+        }
+
+        SampleLibrary {
+            total,
+            by_category,
+            sample_rate: 44100.0,
+        }
+    }
+
     #[test]
     fn snapshot_captures_pad_state() {
         let mut kit = DrumKit::new();
@@ -257,7 +338,7 @@ mod tests {
         kit.pads[0].locked = true;
 
         let snap = kit.snapshot();
-        assert_eq!(snap.len(), 16);
+        assert_eq!(snap.len(), NUM_PADS);
         assert_eq!(snap[0].name, "MyKick");
         assert!((snap[0].volume - 0.75).abs() < 0.001);
         assert!((snap[0].pan - -0.5).abs() < 0.001);
@@ -272,7 +353,7 @@ mod tests {
         kit.pads[0].locked = true;
         kit.pads[0].midi_note = 42;
 
-        let snap: Vec<PadSnapshot> = (0..16)
+        let snap: Vec<PadSnapshot> = (0..NUM_PADS)
             .map(|i| PadSnapshot {
                 sample: None,
                 sample_path: Some(format!("/path/{i}.wav")),
@@ -281,6 +362,7 @@ mod tests {
                 volume: 0.5,
                 pan: 0.3,
                 pitch: -1.0,
+                decay: 1.0,
             })
             .collect();
 
@@ -401,5 +483,80 @@ mod tests {
         assert_eq!(kit.pads[1].name, "kick-1");
         // Pad 2 (snare) should NOT change
         assert_eq!(kit.pads[2].name, "snare-2");
+    }
+
+    #[test]
+    fn dice_all_no_duplicate_samples() {
+        // Library with enough unique samples per category to fill the kit without repeats
+        let lib = test_library_multi(4);
+        let mut kit = DrumKit::new();
+
+        // Assign categories matching the default 8-pad layout
+        let layout = [
+            SampleCategory::Kick,
+            SampleCategory::Snare,
+            SampleCategory::Hihat,
+            SampleCategory::Clap,
+            SampleCategory::Perc,
+            SampleCategory::Tom,
+            SampleCategory::Cymbal,
+            SampleCategory::Synth,
+        ];
+        for (pad, cat) in kit.pads.iter_mut().zip(layout.iter()) {
+            pad.category = *cat;
+        }
+
+        kit.dice_all(&lib);
+
+        // Collect all assigned paths
+        let paths: Vec<String> = kit
+            .pads
+            .iter()
+            .filter_map(|p| p.sample_path.clone())
+            .collect();
+
+        // All pads should have a sample
+        assert_eq!(paths.len(), NUM_PADS, "all pads should have a sample");
+
+        // No two pads should share the same path
+        let unique: std::collections::HashSet<&String> = paths.iter().collect();
+        assert_eq!(unique.len(), paths.len(), "duplicate samples found across pads");
+    }
+
+    #[test]
+    fn dice_category_no_duplicate_samples() {
+        // 3 unique kick samples, 2 kick pads — should be different
+        let lib = test_library_multi(3);
+        let mut kit = DrumKit::new();
+
+        kit.pads[0].category = SampleCategory::Kick;
+        kit.pads[1].category = SampleCategory::Kick;
+
+        kit.dice_category(SampleCategory::Kick, &lib);
+
+        let path0 = kit.pads[0].sample_path.as_deref().unwrap_or("");
+        let path1 = kit.pads[1].sample_path.as_deref().unwrap_or("");
+
+        assert!(!path0.is_empty(), "pad 0 should have a sample");
+        assert!(!path1.is_empty(), "pad 1 should have a sample");
+        assert_ne!(path0, path1, "pad 0 and pad 1 should not share a sample");
+    }
+
+    #[test]
+    fn dice_pad_no_duplicate_with_other_pads() {
+        // Set pad 0 and pad 1 to the same kick, then dice pad 1 — should pick a different one
+        let lib = test_library_multi(2);
+        let mut kit = DrumKit::new();
+
+        kit.pads[0].category = SampleCategory::Kick;
+        kit.pads[0].sample_path = Some("/test/KICK-0.wav".to_string());
+        kit.pads[1].category = SampleCategory::Kick;
+        kit.pads[1].sample_path = Some("/test/KICK-0.wav".to_string());
+
+        kit.dice_pad(1, &lib);
+
+        let path0 = kit.pads[0].sample_path.as_deref().unwrap_or("");
+        let path1 = kit.pads[1].sample_path.as_deref().unwrap_or("");
+        assert_ne!(path0, path1, "dice_pad should not reuse pad 0's sample");
     }
 }

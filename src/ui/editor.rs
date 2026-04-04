@@ -3,14 +3,18 @@ use nih_plug_egui::egui;
 use nih_plug_egui::{create_egui_editor, EguiState};
 use parking_lot::Mutex;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
-use crate::engine::kit::SampleCategory;
+use std::path::PathBuf;
+
+use crate::engine::kit::{SampleCategory, NUM_PADS};
 use crate::plugin::AutokitParams;
 use crate::ui::pad_row::{self, PadRowAction};
 use crate::ui::state::{ScanStatus, SharedState, WaveformSummary};
 use crate::ui::theme;
 use crate::ui::toolbar::{self, ToolbarAction};
 use crate::util::history::HistorySnapshot;
+use crate::util::preset;
 
 /// Number of points in waveform summaries.
 const WAVEFORM_POINTS: usize = 200;
@@ -24,12 +28,13 @@ struct PadDisplay {
     volume: f32,
     pan: f32,
     pitch: f32,
+    decay: f32,
 }
 
 /// Everything the GUI needs to render one frame, captured in a brief lock.
 struct DisplaySnapshot {
-    pads: [PadDisplay; 16],
-    waveforms: [Option<WaveformSummary>; 16],
+    pads: [PadDisplay; NUM_PADS],
+    waveforms: [Option<WaveformSummary>; NUM_PADS],
     scan_status: ScanStatus,
     can_undo: bool,
     can_redo: bool,
@@ -48,6 +53,7 @@ impl DisplaySnapshot {
                 volume: pad.volume,
                 pan: pad.pan,
                 pitch: pad.pitch,
+                decay: pad.decay,
             }
         });
         Self {
@@ -61,6 +67,18 @@ impl DisplaySnapshot {
     }
 }
 
+/// Keyboard keys mapped to pads (ISO keyboard bottom row: z x c v b n m ,)
+const PAD_KEYS: [egui::Key; NUM_PADS] = [
+    egui::Key::Z,
+    egui::Key::X,
+    egui::Key::C,
+    egui::Key::V,
+    egui::Key::B,
+    egui::Key::N,
+    egui::Key::M,
+    egui::Key::Comma,
+];
+
 /// GUI-only state (not shared with audio thread).
 pub struct EditorState {
     /// Which pad is expanded (None = all collapsed).
@@ -69,6 +87,20 @@ pub struct EditorState {
     pub scale: f32,
     /// Whether fonts/style have been initialized.
     pub initialized: bool,
+    /// Last-seen trigger counter values — used to detect new triggers.
+    pub last_trigger: [u8; NUM_PADS],
+    /// Per-pad flash brightness for play animation (0.0 = dark, 1.0 = full flash).
+    pub brightness: [f32; NUM_PADS],
+    /// Whether the save-preset dialog is open.
+    pub show_save_dialog: bool,
+    /// Text input for preset name in save dialog.
+    pub save_name: String,
+    /// Whether the load-preset dialog is open.
+    pub show_load_dialog: bool,
+    /// Cached list of available presets (refreshed when load dialog opens).
+    pub preset_list: Vec<(String, PathBuf)>,
+    /// Status message shown briefly after save/load.
+    pub status_message: Option<String>,
 }
 
 impl Default for EditorState {
@@ -77,6 +109,13 @@ impl Default for EditorState {
             selected_pad: None,
             scale: 1.0,
             initialized: false,
+            last_trigger: [0u8; NUM_PADS],
+            brightness: [0.0f32; NUM_PADS],
+            show_save_dialog: false,
+            save_name: String::new(),
+            show_load_dialog: false,
+            preset_list: Vec::new(),
+            status_message: None,
         }
     }
 }
@@ -87,6 +126,8 @@ pub fn create(
     shared: Arc<Mutex<SharedState>>,
     params: Arc<AutokitParams>,
     sequencer_snapshot_fn: Arc<dyn Fn() -> crate::util::history::SequencerSnapshot + Send + Sync>,
+    trigger_flags: Arc<[AtomicU8; NUM_PADS]>,
+    gui_triggers: Arc<[AtomicU8; NUM_PADS]>,
 ) -> Option<Box<dyn Editor>> {
     create_egui_editor(
         egui_state,
@@ -109,6 +150,59 @@ pub fn create(
                 DisplaySnapshot::from_shared(&shared)
             };
             // Lock is now released — audio thread can proceed freely.
+
+            // --- Pad activity animation ---
+            // Read lockfree trigger counters; decay brightness each frame.
+            {
+                let dt = ctx.input(|i| i.predicted_dt);
+                let mut any_active = false;
+                for i in 0..NUM_PADS {
+                    let current = trigger_flags[i].load(Ordering::Relaxed);
+                    if current != state.last_trigger[i] {
+                        state.brightness[i] = 1.0;
+                        state.last_trigger[i] = current;
+                    }
+                    state.brightness[i] = (state.brightness[i] - dt * 5.0).max(0.0);
+                    if state.brightness[i] > 0.0 {
+                        any_active = true;
+                    }
+                }
+                if any_active {
+                    ctx.request_repaint();
+                }
+            }
+
+            // --- Keyboard pad triggers ---
+            // Check keyboard keys mapped to pads; set GUI trigger requests.
+            // Use both Key enum matching AND raw text events to handle
+            // different keyboard layouts (ISO-NOR reports ',' or ';' for
+            // the physical key right of M depending on shift state).
+            ctx.input(|input| {
+                for (i, &key) in PAD_KEYS.iter().enumerate() {
+                    if input.key_pressed(key) {
+                        gui_triggers[i].store(1, Ordering::Relaxed);
+                    }
+                }
+                // Fallback: check raw text/key events for the last pad
+                if input.key_pressed(egui::Key::Semicolon) {
+                    gui_triggers[NUM_PADS - 1].store(1, Ordering::Relaxed);
+                }
+                if input.key_pressed(egui::Key::Period) {
+                    gui_triggers[NUM_PADS - 1].store(1, Ordering::Relaxed);
+                }
+                // Also check text events — catches any layout where the
+                // physical key produces a character rather than a named key.
+                for event in &input.events {
+                    if let egui::Event::Text(text) = event {
+                        match text.as_str() {
+                            "," | ";" => {
+                                gui_triggers[NUM_PADS - 1].store(1, Ordering::Relaxed);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            });
 
             // Collect any actions triggered during rendering.
             let mut pending_action: Option<GuiAction> = None;
@@ -142,6 +236,15 @@ pub fn create(
                             state.scale = s;
                             ctx.set_pixels_per_point(s);
                         }
+                        ToolbarAction::OpenSaveDialog => {
+                            state.show_save_dialog = true;
+                            state.show_load_dialog = false;
+                        }
+                        ToolbarAction::OpenLoadDialog => {
+                            state.preset_list = preset::list_presets();
+                            state.show_load_dialog = true;
+                            state.show_save_dialog = false;
+                        }
                         ToolbarAction::None => {}
                     }
 
@@ -154,14 +257,15 @@ pub fn create(
                         .show(ui, |ui| {
                             ui.spacing_mut().item_spacing.y = 2.0;
 
-                            for i in 0..16 {
+                            for i in 0..NUM_PADS {
                                 let is_selected = state.selected_pad == Some(i);
                                 let pad = &snap.pads[i];
                                 let wf = snap.waveforms[i].as_ref();
 
                                 let row_action = pad_row::draw_collapsed_from_snapshot(
                                     ui, i, pad.has_sample, &pad.name, pad.category,
-                                    pad.volume, wf, is_selected,
+                                    pad.volume, wf, is_selected, state.brightness[i],
+                                    pad.locked,
                                 );
 
                                 match row_action {
@@ -174,14 +278,20 @@ pub fn create(
                                             pending_action = Some(GuiAction::DicePad(i));
                                         }
                                     }
+                                    PadRowAction::PlayPad => {
+                                        gui_triggers[i].store(1, Ordering::Relaxed);
+                                    }
+                                    PadRowAction::ToggleLock => {
+                                        pending_action = Some(GuiAction::ToggleLock(i));
+                                    }
                                     _ => {}
                                 }
 
-                                // Expanded detail
+                                // Expanded detail (knobs + dice category)
                                 if is_selected {
                                     let detail_action = pad_row::draw_expanded_from_snapshot(
                                         ui, i, pad.category, pad.volume, pad.pan,
-                                        pad.pitch, pad.locked,
+                                        pad.pitch, pad.decay,
                                     );
 
                                     match detail_action {
@@ -194,13 +304,8 @@ pub fn create(
                                         PadRowAction::SetPitch(v) => {
                                             pending_action = Some(GuiAction::SetPadPitch(i, v));
                                         }
-                                        PadRowAction::ToggleLock => {
-                                            pending_action = Some(GuiAction::ToggleLock(i));
-                                        }
-                                        PadRowAction::DicePad => {
-                                            if snap.has_library {
-                                                pending_action = Some(GuiAction::DicePad(i));
-                                            }
+                                        PadRowAction::SetDecay(v) => {
+                                            pending_action = Some(GuiAction::SetPadDecay(i, v));
                                         }
                                         PadRowAction::DiceCategory => {
                                             if snap.has_library {
@@ -214,6 +319,150 @@ pub fn create(
                             }
                         });
                 });
+
+            // --- Save preset dialog ---
+            if state.show_save_dialog {
+                let mut open = true;
+                egui::Window::new("Save Preset")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .fixed_size([240.0, 0.0])
+                    .open(&mut open)
+                    .show(ctx, |ui| {
+                        ui.label(
+                            egui::RichText::new("Preset name:")
+                                .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
+                                .color(theme::TEXT_DIM),
+                        );
+                        let response = ui.add(
+                            egui::TextEdit::singleline(&mut state.save_name)
+                                .font(egui::FontId::new(11.0, egui::FontFamily::Monospace))
+                                .desired_width(220.0),
+                        );
+                        // Auto-focus the text input
+                        if response.gained_focus() || state.save_name.is_empty() {
+                            response.request_focus();
+                        }
+
+                        ui.add_space(6.0);
+
+                        let name_valid = !state.save_name.trim().is_empty();
+                        let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+                        ui.horizontal(|ui| {
+                            let save_enabled = name_valid;
+                            if ui
+                                .add_enabled(
+                                    save_enabled,
+                                    egui::Button::new(
+                                        egui::RichText::new("SAVE")
+                                            .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
+                                            .color(if save_enabled {
+                                                egui::Color32::from_rgb(0x74, 0xb9, 0xff)
+                                            } else {
+                                                theme::TEXT_DISABLED
+                                            }),
+                                    )
+                                    .fill(theme::BG_ROW)
+                                    .min_size(egui::vec2(60.0, 22.0)),
+                                )
+                                .clicked()
+                                || (enter_pressed && save_enabled)
+                            {
+                                pending_action =
+                                    Some(GuiAction::SavePreset(state.save_name.trim().to_string()));
+                                state.show_save_dialog = false;
+                            }
+
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new("CANCEL")
+                                            .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
+                                            .color(theme::TEXT_DIM),
+                                    )
+                                    .fill(theme::BG_ROW)
+                                    .min_size(egui::vec2(60.0, 22.0)),
+                                )
+                                .clicked()
+                            {
+                                state.show_save_dialog = false;
+                            }
+                        });
+                    });
+                if !open {
+                    state.show_save_dialog = false;
+                }
+            }
+
+            // --- Load preset dialog ---
+            if state.show_load_dialog {
+                let mut open = true;
+                egui::Window::new("Load Preset")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .fixed_size([280.0, 300.0])
+                    .open(&mut open)
+                    .show(ctx, |ui| {
+                        if state.preset_list.is_empty() {
+                            ui.label(
+                                egui::RichText::new("No presets found.")
+                                    .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
+                                    .color(theme::TEXT_DIM),
+                            );
+                        } else {
+                            egui::ScrollArea::vertical()
+                                .max_height(260.0)
+                                .show(ui, |ui| {
+                                    // Clone the list to avoid borrow conflict with state
+                                    let list: Vec<(String, PathBuf)> =
+                                        state.preset_list.clone();
+                                    for (name, path) in &list {
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new(name)
+                                                        .font(egui::FontId::new(
+                                                            11.0,
+                                                            egui::FontFamily::Monospace,
+                                                        ))
+                                                        .color(theme::ACCENT),
+                                                )
+                                                .fill(theme::BG_ROW)
+                                                .min_size(egui::vec2(260.0, 24.0)),
+                                            )
+                                            .clicked()
+                                        {
+                                            pending_action =
+                                                Some(GuiAction::LoadPreset(path.clone()));
+                                            state.show_load_dialog = false;
+                                        }
+                                    }
+                                });
+                        }
+
+                        ui.add_space(4.0);
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("CANCEL")
+                                        .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
+                                        .color(theme::TEXT_DIM),
+                                )
+                                .fill(theme::BG_ROW)
+                                .min_size(egui::vec2(60.0, 22.0)),
+                            )
+                            .clicked()
+                        {
+                            state.show_load_dialog = false;
+                        }
+                    });
+                if !open {
+                    state.show_load_dialog = false;
+                }
+            }
 
             // --- Phase 2: Brief lock to apply any mutation ---
             if let Some(action) = pending_action {
@@ -241,34 +490,46 @@ pub fn create(
                         }
                     }
                     GuiAction::DiceAll => {
-                        let snapshot = HistorySnapshot {
-                            pads: shared.kit.snapshot(),
-                            sequencer: seq_snap(),
-                        };
-                        shared.history.push(snapshot);
-                        let lib = shared.library.as_ref().unwrap().clone_for_dice();
-                        shared.kit.dice_all(&lib);
-                        shared.update_all_waveforms(WAVEFORM_POINTS);
+                        if shared.library.is_some() {
+                            {
+                                let SharedState { ref library, ref mut kit, ref mut history, .. } = *shared;
+                                let lib = library.as_ref().unwrap();
+                                history.push(HistorySnapshot {
+                                    pads: kit.snapshot(),
+                                    sequencer: seq_snap(),
+                                });
+                                kit.dice_all(lib);
+                            }
+                            shared.update_all_waveforms(WAVEFORM_POINTS);
+                        }
                     }
                     GuiAction::DicePad(i) => {
-                        let snapshot = HistorySnapshot {
-                            pads: shared.kit.snapshot(),
-                            sequencer: seq_snap(),
-                        };
-                        shared.history.push(snapshot);
-                        let lib = shared.library.as_ref().unwrap().clone_for_dice();
-                        shared.kit.dice_pad(i, &lib);
-                        shared.update_waveform(i, WAVEFORM_POINTS);
+                        if shared.library.is_some() {
+                            {
+                                let SharedState { ref library, ref mut kit, ref mut history, .. } = *shared;
+                                let lib = library.as_ref().unwrap();
+                                history.push(HistorySnapshot {
+                                    pads: kit.snapshot(),
+                                    sequencer: seq_snap(),
+                                });
+                                kit.dice_pad(i, lib);
+                            }
+                            shared.update_waveform(i, WAVEFORM_POINTS);
+                        }
                     }
-                    GuiAction::DiceCategory(i, cat) => {
-                        let snapshot = HistorySnapshot {
-                            pads: shared.kit.snapshot(),
-                            sequencer: seq_snap(),
-                        };
-                        shared.history.push(snapshot);
-                        let lib = shared.library.as_ref().unwrap().clone_for_dice();
-                        shared.kit.dice_category(cat, &lib);
-                        shared.update_all_waveforms(WAVEFORM_POINTS);
+                    GuiAction::DiceCategory(_i, cat) => {
+                        if shared.library.is_some() {
+                            {
+                                let SharedState { ref library, ref mut kit, ref mut history, .. } = *shared;
+                                let lib = library.as_ref().unwrap();
+                                history.push(HistorySnapshot {
+                                    pads: kit.snapshot(),
+                                    sequencer: seq_snap(),
+                                });
+                                kit.dice_category(cat, lib);
+                            }
+                            shared.update_all_waveforms(WAVEFORM_POINTS);
+                        }
                     }
                     GuiAction::LockAll => {
                         let all_locked = shared.kit.pads.iter().all(|p| p.locked);
@@ -287,6 +548,46 @@ pub fn create(
                     }
                     GuiAction::SetPadPitch(i, v) => {
                         shared.kit.pads[i].pitch = v;
+                    }
+                    GuiAction::SetPadDecay(i, v) => {
+                        shared.kit.pads[i].decay = v;
+                    }
+                    GuiAction::SavePreset(name) => {
+                        let p = preset::from_kit(&name, &shared.kit);
+                        match preset::save_preset(&p) {
+                            Ok(path) => {
+                                tracing::info!("Saved preset to {}", path.display());
+                                state.status_message =
+                                    Some(format!("Saved: {name}"));
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to save preset: {e}");
+                                state.status_message =
+                                    Some(format!("Save failed: {e}"));
+                            }
+                        }
+                    }
+                    GuiAction::LoadPreset(path) => {
+                        match preset::load_preset(&path) {
+                            Ok(p) => {
+                                // Push history snapshot before applying
+                                let snap = HistorySnapshot {
+                                    pads: shared.kit.snapshot(),
+                                    sequencer: seq_snap(),
+                                };
+                                shared.history.push(snap);
+                                preset::apply_to_kit(&p, &mut shared.kit);
+                                shared.update_all_waveforms(WAVEFORM_POINTS);
+                                tracing::info!("Loaded preset: {}", p.name);
+                                state.status_message =
+                                    Some(format!("Loaded: {}", p.name));
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to load preset: {e}");
+                                state.status_message =
+                                    Some(format!("Load failed: {e}"));
+                            }
+                        }
                     }
                 }
                 // Lock drops here — held only for the mutation.
@@ -307,4 +608,7 @@ enum GuiAction {
     SetPadVolume(usize, f32),
     SetPadPan(usize, f32),
     SetPadPitch(usize, f32),
+    SetPadDecay(usize, f32),
+    SavePreset(String),
+    LoadPreset(PathBuf),
 }

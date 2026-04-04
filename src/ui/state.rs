@@ -1,5 +1,5 @@
 use crate::analysis::library::SampleLibrary;
-use crate::engine::kit::DrumKit;
+use crate::engine::kit::{DrumKit, NUM_PADS};
 use crate::util::history::History;
 
 /// Scan progress for the toolbar display.
@@ -55,7 +55,7 @@ pub struct SharedState {
     pub history: History,
     pub scan_status: ScanStatus,
     /// Pre-computed waveform summaries, one per pad. Recomputed on sample change.
-    pub waveforms: [Option<WaveformSummary>; 16],
+    pub waveforms: [Option<WaveformSummary>; NUM_PADS],
 }
 
 impl SharedState {
@@ -80,9 +80,9 @@ impl SharedState {
             .map(|s| WaveformSummary::from_samples(s, num_points));
     }
 
-    /// Recompute waveform summaries for all 16 pads.
+    /// Recompute waveform summaries for all pads.
     pub fn update_all_waveforms(&mut self, num_points: usize) {
-        for i in 0..16 {
+        for i in 0..NUM_PADS {
             self.update_waveform(i, num_points);
         }
     }

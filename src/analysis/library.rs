@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
 use rand::prelude::IndexedRandom;
 
+use crate::analysis::cache::{self, CacheEntry, LibraryCache};
 use crate::analysis::features;
 use crate::analysis::scanner::{self, SampleEntry};
 use crate::engine::kit::SampleCategory;
@@ -33,9 +34,13 @@ pub struct SampleLibrary {
 
 impl SampleLibrary {
     /// Scan a folder, load all samples, extract features, classify.
+    /// Uses a persistent cache to skip DSP analysis for unchanged files.
     /// This is expensive — run on a background thread.
     pub fn build(root: &Path, sample_rate: f32) -> Self {
         tracing::info!(root = %root.display(), "starting library scan");
+
+        // Load existing cache (if present, valid, and for the same root)
+        let mut scan_cache = LibraryCache::load(root).unwrap_or_else(|| LibraryCache::new(root));
 
         let entries = scanner::scan_folder(root);
         let max_samples = (MAX_DURATION_SECS * sample_rate) as usize;
@@ -43,6 +48,8 @@ impl SampleLibrary {
         let mut by_category: HashMap<SampleCategory, Vec<AnalyzedSample>> = HashMap::new();
         let mut loaded = 0u32;
         let mut skipped = 0u32;
+        let mut cache_hits = 0u32;
+        let mut cache_misses = 0u32;
 
         for entry in entries {
             let path_str = match entry.path.to_str() {
@@ -50,7 +57,7 @@ impl SampleLibrary {
                 None => continue,
             };
 
-            // Load audio
+            // Load audio — always required for playback regardless of cache
             let data = match audio_file::load_wav_mono(path_str) {
                 Ok(d) => d,
                 Err(e) => {
@@ -72,16 +79,46 @@ impl SampleLibrary {
                 continue;
             }
 
-            // Extract features
-            let feats = features::extract(&data, sample_rate);
+            // Check cache for this file's mtime+size
+            let (mtime, fsize) = cache::file_stamp(&entry.path);
+            let (feats, category, duration_ms, is_percussive) =
+                if let Some(cached) = scan_cache.get_if_valid(&entry.path, mtime, fsize) {
+                    // Cache hit: reuse classification and features, skip DSP
+                    cache_hits += 1;
+                    (
+                        cached.features.clone(),
+                        cached.category,
+                        cached.duration_ms,
+                        cached.is_percussive,
+                    )
+                } else {
+                    // Cache miss: run full DSP analysis
+                    cache_misses += 1;
+                    let f = features::extract(&data, sample_rate);
+                    let cat = features::classify(&f, entry.folder_hint);
+                    let dur_ms = (data.len() as f32 / sample_rate * 1000.0) as u32;
+                    let percussive = f.is_percussive;
 
-            // Classify
-            let category = features::classify(&feats, entry.folder_hint);
+                    // Update cache entry
+                    scan_cache.insert(
+                        &entry.path,
+                        CacheEntry {
+                            modified_secs: mtime,
+                            file_size: fsize,
+                            category: cat,
+                            duration_ms: dur_ms,
+                            is_percussive: percussive,
+                            features: f.clone(),
+                        },
+                    );
+
+                    (f, cat, dur_ms, percussive)
+                };
 
             let mut classified_entry = entry;
             classified_entry.category = category;
-            classified_entry.duration_ms = (data.len() as f32 / sample_rate * 1000.0) as u32;
-            classified_entry.is_percussive = feats.is_percussive;
+            classified_entry.duration_ms = duration_ms;
+            classified_entry.is_percussive = is_percussive;
 
             let analyzed = AnalyzedSample {
                 entry: classified_entry,
@@ -93,7 +130,13 @@ impl SampleLibrary {
             loaded += 1;
         }
 
-        // Log category distribution
+        // Purge stale cache entries for files no longer on disk
+        let removed = scan_cache.retain_existing();
+
+        // Persist updated cache
+        scan_cache.save();
+
+        // Log cache stats and category distribution
         let mut dist: Vec<(SampleCategory, usize)> = by_category
             .iter()
             .map(|(cat, samples)| (*cat, samples.len()))
@@ -103,6 +146,9 @@ impl SampleLibrary {
         tracing::info!(
             loaded,
             skipped,
+            cache_hits,
+            cache_misses,
+            cache_removed = removed,
             categories = ?dist,
             "library build complete"
         );
@@ -124,9 +170,28 @@ impl SampleLibrary {
         samples.choose(&mut rng)
     }
 
-    /// Generate a default techno kit layout:
-    /// 0-1: Kick, 2-3: Snare, 4-5: Hihat, 6: Clap, 7: Tom,
-    /// 8-9: Perc, 10: Cymbal, 11: Bass, 12-13: Synth, 14-15: Other/Perc
+    /// Pick a random sample from a category, excluding already-used paths.
+    /// Falls back to any sample in the category if all are excluded (best-effort dedup).
+    /// Returns None if the category is empty.
+    pub fn random_from_excluding<'a>(
+        &'a self,
+        category: SampleCategory,
+        exclude: &HashSet<String>,
+    ) -> Option<&'a AnalyzedSample> {
+        let samples = self.by_category.get(&category)?;
+        let candidates: Vec<&AnalyzedSample> = samples
+            .iter()
+            .filter(|s| !exclude.contains(&s.entry.path.to_string_lossy().to_string()))
+            .collect();
+        let mut rng = rand::rng();
+        if candidates.is_empty() {
+            // All samples in this category are already used — best-effort: pick any
+            samples.choose(&mut rng)
+        } else {
+            candidates.choose(&mut rng).copied()
+        }
+    }
+
     /// Create a reference-only clone for use in dice operations.
     /// The Arc'd sample data is shared, not copied.
     pub fn clone_for_dice(&self) -> SampleLibrary {
@@ -137,24 +202,17 @@ impl SampleLibrary {
         }
     }
 
+    /// Generate a default 8-pad techno kit layout.
     pub fn generate_kit(&self) -> Vec<(usize, SampleCategory)> {
         vec![
             (0, SampleCategory::Kick),
-            (1, SampleCategory::Kick),
-            (2, SampleCategory::Snare),
-            (3, SampleCategory::Snare),
-            (4, SampleCategory::Hihat),
-            (5, SampleCategory::Hihat),
-            (6, SampleCategory::Clap),
-            (7, SampleCategory::Tom),
-            (8, SampleCategory::Perc),
-            (9, SampleCategory::Perc),
-            (10, SampleCategory::Cymbal),
-            (11, SampleCategory::Bass),
-            (12, SampleCategory::Synth),
-            (13, SampleCategory::Synth),
-            (14, SampleCategory::Perc),
-            (15, SampleCategory::Other),
+            (1, SampleCategory::Snare),
+            (2, SampleCategory::Hihat),
+            (3, SampleCategory::Clap),
+            (4, SampleCategory::Perc),
+            (5, SampleCategory::Tom),
+            (6, SampleCategory::Cymbal),
+            (7, SampleCategory::Synth),
         ]
     }
 }

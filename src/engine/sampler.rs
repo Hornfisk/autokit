@@ -10,14 +10,19 @@ const MAX_VOICES: usize = 32;
 /// Fade-out duration in seconds when re-triggering the same pad.
 const RETRIGGER_FADE_SECS: f32 = 0.05; // 50ms
 
+/// Fade-out duration in seconds for decay envelope end.
+const DECAY_FADE_SECS: f32 = 0.01; // 10ms
+
 /// A single playback voice.
 struct Voice {
-    /// Which pad (0..15) this voice is playing, or None if inactive.
+    /// Which pad this voice is playing, or None if inactive.
     pad_index: Option<usize>,
     /// Sample data reference (shared with DrumPad).
     sample: Option<Arc<Vec<f32>>>,
-    /// Current playback position in samples.
-    position: usize,
+    /// Current playback position in source samples (fractional for pitch shifting).
+    position: f64,
+    /// Playback rate multiplier: 2^(pitch_semitones/12). 1.0 = original pitch.
+    rate: f64,
     /// Velocity gain (0.0–1.0).
     velocity: f32,
     /// Monotonic counter set at trigger time — used for oldest-voice stealing.
@@ -28,6 +33,10 @@ struct Voice {
     fade_length: usize,
     /// Samples to skip at buffer start (for sample-accurate sequencer triggers).
     start_offset: usize,
+    /// Maximum source samples to play (from decay param). usize::MAX = full sample.
+    max_samples: usize,
+    /// Output samples rendered so far (for decay cutoff tracking).
+    samples_rendered: usize,
 }
 
 impl Voice {
@@ -35,12 +44,15 @@ impl Voice {
         Self {
             pad_index: None,
             sample: None,
-            position: 0,
+            position: 0.0,
+            rate: 1.0,
             velocity: 0.0,
             age: 0,
             fade_remaining: 0,
             fade_length: 0,
             start_offset: 0,
+            max_samples: usize::MAX,
+            samples_rendered: 0,
         }
     }
 
@@ -78,13 +90,31 @@ impl Voice {
             }
         };
 
-        if self.position >= data.len() {
+        // Need at least one sample to read (pos_floor must be a valid index)
+        let pos_floor = self.position as usize;
+        if pos_floor >= data.len() {
             self.pad_index = None;
             return None;
         }
 
-        let mut s = data[self.position] * self.velocity;
-        self.position += 1;
+        // Decay cutoff: start fade-out when approaching max_samples
+        self.samples_rendered += 1;
+        if self.max_samples != usize::MAX
+            && self.samples_rendered >= self.max_samples
+            && self.fade_remaining == 0
+        {
+            // Trigger a short fade-out to avoid clicks
+            let fade_len = self.fade_length.min(self.max_samples / 10).max(1);
+            self.fade_remaining = fade_len;
+            self.fade_length = fade_len;
+        }
+
+        // Linear interpolation between adjacent samples
+        let frac = (self.position - pos_floor as f64) as f32;
+        let s0 = data[pos_floor];
+        let s1 = if pos_floor + 1 < data.len() { data[pos_floor + 1] } else { 0.0 };
+        let mut s = (s0 + (s1 - s0) * frac) * self.velocity;
+        self.position += self.rate;
 
         // Apply fade-out envelope if active
         if self.fade_remaining > 0 {
@@ -147,6 +177,7 @@ impl VoicePool {
         let slot = self.find_free_or_steal();
 
         self.trigger_counter += 1;
+        let rate = 2.0_f64.powf(pad.pitch as f64 / 12.0);
         let voice = &mut self.voices[slot];
         voice.pad_index = Some(pad_index);
         // Arc::clone does atomic refcount increment — wrap in permit_alloc
@@ -154,12 +185,21 @@ impl VoicePool {
         permit_alloc(|| {
             voice.sample = Some(Arc::clone(sample));
         });
-        voice.position = 0;
+        voice.position = 0.0;
+        voice.rate = rate;
         voice.velocity = velocity * pad.volume;
         voice.age = self.trigger_counter;
         voice.fade_remaining = 0;
-        voice.fade_length = 0;
+        voice.fade_length = self.fade_samples;
         voice.start_offset = start_offset;
+        voice.samples_rendered = 0;
+        // Decay: 1.0 = full sample, scale down proportionally
+        let sample_len = sample.len();
+        voice.max_samples = if pad.decay >= 1.0 {
+            usize::MAX
+        } else {
+            ((sample_len as f64 * pad.decay as f64) / rate).max(1.0) as usize
+        };
     }
 
     fn find_free_or_steal(&mut self) -> usize {
@@ -298,5 +338,43 @@ mod tests {
         pool.process(&mut left2, &mut right2, &kit);
         let expected = (0.25 * std::f32::consts::PI).cos();
         assert!((left2[0] - expected).abs() < 0.001, "second buffer: sample 0 should have audio (offset reset)");
+    }
+
+    #[test]
+    fn velocity_scales_output_amplitude() {
+        let kit = test_kit();
+        let pan_gain = (0.25 * std::f32::consts::PI).cos(); // ~0.7071 for center pan
+
+        // Full velocity
+        let mut pool = VoicePool::new(44100.0);
+        pool.trigger(0, 1.0, &kit, 0);
+        let mut left_full = vec![0.0f32; 4];
+        let mut right_full = vec![0.0f32; 4];
+        pool.process(&mut left_full, &mut right_full, &kit);
+
+        // Half velocity
+        let mut pool = VoicePool::new(44100.0);
+        pool.trigger(0, 0.5, &kit, 0);
+        let mut left_half = vec![0.0f32; 4];
+        let mut right_half = vec![0.0f32; 4];
+        pool.process(&mut left_half, &mut right_half, &kit);
+
+        // Zero velocity
+        let mut pool = VoicePool::new(44100.0);
+        pool.trigger(0, 0.0, &kit, 0);
+        let mut left_zero = vec![0.0f32; 4];
+        let mut right_zero = vec![0.0f32; 4];
+        pool.process(&mut left_zero, &mut right_zero, &kit);
+
+        // Full velocity should give pan_gain (sample=1.0 * vel=1.0 * pan)
+        assert!((left_full[0] - pan_gain).abs() < 0.001,
+            "full velocity: expected {pan_gain}, got {}", left_full[0]);
+
+        // Half velocity should give half of full
+        assert!((left_half[0] - pan_gain * 0.5).abs() < 0.001,
+            "half velocity: expected {}, got {}", pan_gain * 0.5, left_half[0]);
+
+        // Zero velocity should be silent
+        assert_eq!(left_zero[0], 0.0, "zero velocity should be silent");
     }
 }

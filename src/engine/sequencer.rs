@@ -1,7 +1,8 @@
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
+use std::sync::atomic::{AtomicU8, Ordering};
 
-use crate::engine::kit::DrumKit;
+use crate::engine::kit::{DrumKit, NUM_PADS};
 use crate::engine::sampler::VoicePool;
 use crate::util::history::{StepSnapshot, LaneSnapshot, SequencerSnapshot};
 
@@ -40,9 +41,9 @@ impl Lane {
     }
 }
 
-/// The 16-lane, 16-step sequencer.
+/// The sequencer — one lane per pad, 16 steps per lane.
 pub struct Sequencer {
-    pub lanes: [Lane; 16],
+    pub lanes: [Lane; NUM_PADS],
     pub swing: f32,
     playing: bool,
     current_step: usize,
@@ -53,7 +54,7 @@ pub struct Sequencer {
 
 impl Sequencer {
     pub fn new() -> Self {
-        let lanes: [Lane; 16] = core::array::from_fn(|i| Lane::new(i));
+        let lanes: [Lane; NUM_PADS] = core::array::from_fn(|i| Lane::new(i));
         Self {
             lanes,
             swing: 0.0,
@@ -88,6 +89,7 @@ impl Sequencer {
         sample_rate: f32,
         voices: &mut VoicePool,
         kit: &DrumKit,
+        trigger_flags: &[AtomicU8; NUM_PADS],
     ) -> usize {
         let tempo = match (host_playing, tempo) {
             (true, Some(t)) if t > 0.0 => t,
@@ -133,7 +135,7 @@ impl Sequencer {
 
         // Fire current step immediately if we just synced to a step boundary
         if fire_immediately {
-            triggered += self.fire_step(0, voices, kit);
+            triggered += self.fire_step(0, voices, kit, trigger_flags);
         }
 
         for sample_offset in 0..buffer_len {
@@ -143,7 +145,7 @@ impl Sequencer {
             if self.tick_accumulator >= step_dur {
                 self.tick_accumulator -= step_dur;
                 self.current_step = (self.current_step + 1) % 16;
-                triggered += self.fire_step(sample_offset, voices, kit);
+                triggered += self.fire_step(sample_offset, voices, kit, trigger_flags);
             }
         }
 
@@ -156,7 +158,7 @@ impl Sequencer {
     /// Capture the undoable sequencer state (steps, lanes, swing).
     /// Excludes playback state (playing, current_step, tick_accumulator, rng).
     pub fn snapshot(&self) -> SequencerSnapshot {
-        let lanes: [LaneSnapshot; 16] = core::array::from_fn(|i| {
+        let lanes: [LaneSnapshot; NUM_PADS] = core::array::from_fn(|i| {
             let steps: [StepSnapshot; 16] = core::array::from_fn(|j| StepSnapshot {
                 enabled: self.lanes[i].steps[j].enabled,
                 velocity: self.lanes[i].steps[j].velocity,
@@ -200,6 +202,7 @@ impl Sequencer {
         sample_offset: usize,
         voices: &mut VoicePool,
         kit: &DrumKit,
+        trigger_flags: &[AtomicU8; NUM_PADS],
     ) -> usize {
         let step_idx = self.current_step;
         let mut count = 0;
@@ -225,6 +228,9 @@ impl Sequencer {
             let velocity = step.velocity;
             let pad_index = self.lanes[i].pad_index;
             voices.trigger(pad_index, velocity, kit, sample_offset);
+            if pad_index < trigger_flags.len() {
+                trigger_flags[pad_index].fetch_add(1, Ordering::Relaxed);
+            }
             count += 1;
         }
 
@@ -238,6 +244,11 @@ mod tests {
     use crate::engine::kit::DrumKit;
     use crate::engine::sampler::VoicePool;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicU8;
+
+    fn dummy_flags() -> [AtomicU8; NUM_PADS] {
+        core::array::from_fn(|_| AtomicU8::new(0))
+    }
 
     /// Helper: create a kit with all 16 pads loaded (1.0 samples).
     fn test_kit() -> DrumKit {
@@ -250,9 +261,9 @@ mod tests {
     }
 
     #[test]
-    fn new_sequencer_has_16_lanes_with_16_steps_each() {
+    fn new_sequencer_has_correct_lane_count_with_16_steps_each() {
         let seq = Sequencer::new();
-        assert_eq!(seq.lanes.len(), 16);
+        assert_eq!(seq.lanes.len(), NUM_PADS);
         for (i, lane) in seq.lanes.iter().enumerate() {
             assert_eq!(lane.pad_index, i);
             assert_eq!(lane.steps.len(), 16);
@@ -305,6 +316,7 @@ mod tests {
 
         // Simulate: host at beat 0.0, playing, 120 BPM
         // Step 0 should fire immediately (at sample offset 0)
+        let flags = dummy_flags();
         let triggers = seq.process_buffer(
             512,       // buffer_len
             true,      // host playing
@@ -313,6 +325,7 @@ mod tests {
             44100.0,
             &mut voices,
             &kit,
+            &flags,
         );
 
         assert!(triggers > 0, "should have triggered at least one voice");
@@ -327,10 +340,11 @@ mod tests {
 
         let kit = test_kit();
         let mut voices = VoicePool::new(44100.0);
+        let flags = dummy_flags();
 
         let triggers = seq.process_buffer(
             512, true, Some(120.0), Some(0.0), 44100.0,
-            &mut voices, &kit,
+            &mut voices, &kit, &flags,
         );
 
         assert_eq!(triggers, 0, "muted lane should not trigger");
@@ -345,12 +359,13 @@ mod tests {
 
         let kit = test_kit();
         let mut voices = VoicePool::new(44100.0);
+        let flags = dummy_flags();
 
         // Run it several times — should never trigger
         for beat in 0..10 {
             let triggers = seq.process_buffer(
                 512, true, Some(120.0), Some(beat as f64 * 4.0), 44100.0,
-                &mut voices, &kit,
+                &mut voices, &kit, &flags,
             );
             if triggers > 0 {
                 panic!("probability 0.0 should never trigger (beat {beat})");
@@ -365,10 +380,11 @@ mod tests {
 
         let kit = test_kit();
         let mut voices = VoicePool::new(44100.0);
+        let flags = dummy_flags();
 
         let triggers = seq.process_buffer(
             512, false, Some(120.0), Some(0.0), 44100.0,
-            &mut voices, &kit,
+            &mut voices, &kit, &flags,
         );
 
         assert_eq!(triggers, 0, "should not trigger when host is stopped");
@@ -384,6 +400,7 @@ mod tests {
 
         let kit = test_kit();
         let mut voices = VoicePool::new(44100.0);
+        let flags = dummy_flags();
 
         // At 120 BPM, one full pattern (16 sixteenths = 4 beats) = 2 seconds = 88200 samples
         // Process in 512-sample blocks
@@ -396,7 +413,7 @@ mod tests {
             let beat_pos = (block * block_size) as f64 / 44100.0 * (120.0 / 60.0);
             let triggers = seq.process_buffer(
                 block_size, true, Some(120.0), Some(beat_pos), 44100.0,
-                &mut voices, &kit,
+                &mut voices, &kit, &flags,
             );
             total_triggers += triggers;
         }
@@ -428,18 +445,19 @@ mod tests {
 
         let kit = test_kit();
         let mut voices = VoicePool::new(44100.0);
+        let flags = dummy_flags();
 
         // Play forward to beat 2.0 (step 8)
         let triggers1 = seq.process_buffer(
             512, true, Some(120.0), Some(2.0), 44100.0,
-            &mut voices, &kit,
+            &mut voices, &kit, &flags,
         );
         assert!(triggers1 > 0, "should fire step 8 at beat 2.0");
 
         // Host rewinds to beat 0.0 — sequencer should resync and fire step 0
         let triggers2 = seq.process_buffer(
             512, true, Some(120.0), Some(0.0), 44100.0,
-            &mut voices, &kit,
+            &mut voices, &kit, &flags,
         );
         assert!(triggers2 > 0, "should fire step 0 after rewind to beat 0.0");
     }
@@ -483,10 +501,11 @@ mod tests {
 
         let kit = test_kit();
         let mut voices = VoicePool::new(44100.0);
+        let flags = dummy_flags();
 
         let triggers = seq.process_buffer(
             512, true, Some(120.0), Some(-1.0), 44100.0,
-            &mut voices, &kit,
+            &mut voices, &kit, &flags,
         );
         assert_eq!(triggers, 0, "negative pos_beats should not trigger");
     }

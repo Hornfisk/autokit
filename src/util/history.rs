@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use crate::engine::kit::SampleCategory;
+use crate::engine::kit::{SampleCategory, NUM_PADS};
 
 const MAX_HISTORY: usize = 64;
 
@@ -16,6 +16,7 @@ pub struct PadSnapshot {
     pub volume: f32,
     pub pan: f32,
     pub pitch: f32,
+    pub decay: f32,
 }
 
 /// Snapshot of one sequencer step.
@@ -36,7 +37,7 @@ pub struct LaneSnapshot {
 /// Snapshot of the full sequencer state.
 #[derive(Clone)]
 pub struct SequencerSnapshot {
-    pub lanes: [LaneSnapshot; 16],
+    pub lanes: [LaneSnapshot; NUM_PADS],
     pub swing: f32,
 }
 
@@ -100,7 +101,7 @@ mod tests {
 
     /// Create a minimal snapshot with identifiable pad names.
     fn make_snapshot(label: &str) -> HistorySnapshot {
-        let pads: Vec<PadSnapshot> = (0..16)
+        let pads: Vec<PadSnapshot> = (0..NUM_PADS)
             .map(|i| PadSnapshot {
                 sample: None,
                 sample_path: None,
@@ -109,10 +110,11 @@ mod tests {
                 volume: 1.0,
                 pan: 0.0,
                 pitch: 0.0,
+                decay: 1.0,
             })
             .collect();
 
-        let lanes: [LaneSnapshot; 16] = core::array::from_fn(|_| LaneSnapshot {
+        let lanes: [LaneSnapshot; NUM_PADS] = core::array::from_fn(|_| LaneSnapshot {
             steps: [StepSnapshot {
                 enabled: false,
                 velocity: 0.8,
