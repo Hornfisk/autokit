@@ -54,6 +54,28 @@ pub const TEXT_DIM: egui::Color32 = egui::Color32::from_rgb(0x63, 0x6e, 0x72);
 pub const TEXT_DISABLED: egui::Color32 =
     egui::Color32::from_rgba_premultiplied(0x32, 0x37, 0x39, 0x66);
 
+// Sequencer-specific colors
+pub const PLAYHEAD: egui::Color32 = egui::Color32::from_rgb(0, 212, 170);     // same as ACCENT
+pub const STEP_BG: egui::Color32 = egui::Color32::from_rgb(17, 17, 38);       // #111126
+pub const STEP_BG_BEAT: egui::Color32 = egui::Color32::from_rgb(19, 19, 48);  // #131330
+pub const STEP_BORDER: egui::Color32 = egui::Color32::from_rgb(26, 26, 53);   // #1a1a35
+pub const STEP_HOVER: egui::Color32 = egui::Color32::from_rgb(51, 51, 102);   // #333366
+pub const PLOCK_DOT: egui::Color32 = egui::Color32::from_rgb(0, 170, 255);    // #00aaff
+pub const COND_TEXT: egui::Color32 = egui::Color32::from_rgb(255, 204, 0);     // #ffcc00
+pub const MUTE_RED: egui::Color32 = egui::Color32::from_rgb(255, 68, 68);     // #ff4444
+pub const LOCK_ORANGE: egui::Color32 = egui::Color32::from_rgb(255, 159, 67); // #ff9f43
+pub const FILL_PURPLE: egui::Color32 = egui::Color32::from_rgb(153, 102, 255); // #9966ff
+pub const PAT_HAS_DATA: egui::Color32 = egui::Color32::from_rgb(136, 136, 136); // #888
+pub const PAT_EMPTY: egui::Color32 = egui::Color32::from_rgb(85, 85, 85);     // #555
+pub const PATTERN_BAR_BG: egui::Color32 = egui::Color32::from_rgb(12, 12, 30); // #0c0c1e
+pub const PARAM_BAR_BG: egui::Color32 = egui::Color32::from_rgb(12, 12, 30);  // #0c0c1e
+
+/// Get display color for a sample category as egui Color32.
+pub fn category_color32(cat: SampleCategory) -> egui::Color32 {
+    let c = category_color(cat);
+    c.to_egui()
+}
+
 // Font
 pub const FONT_NAME: &str = "JetBrains Mono";
 
