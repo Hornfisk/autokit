@@ -5,8 +5,36 @@ A drum machine plugin for Linux, inspired by XLN Audio XO and Algonaut Atlas 2.
 Autokit scans your sample library, classifies oneshots by type (kick, snare, hihat, etc.) using DSP analysis, and plots them on a 2D map. Click to preview, assign to pads, sequence with a Digitakt-style step sequencer, and randomize kits with dice.
 
 **Formats:** VST3, CLAP, Standalone  
-**Platform:** Linux (x86_64)  
+**Platforms:** Linux, macOS, Windows  
 **License:** GPL-3.0-or-later
+
+## Download
+
+Pre-built binaries are available on the [Releases](https://github.com/Hornfisk/autokit/releases/latest) page:
+
+| Platform | File | Contents |
+|----------|------|----------|
+| Linux x86_64 | `autokit-linux-x86_64.tar.gz` | `autokit-standalone` + `libautokit.so` (VST3/CLAP) |
+| macOS ARM (Apple Silicon) | `autokit-macos-arm64.tar.gz` | `autokit-standalone` + `libautokit.dylib` |
+| macOS x86_64 (Intel) | `autokit-macos-x86_64.tar.gz` | `autokit-standalone` + `libautokit.dylib` |
+| Windows x86_64 | `autokit-windows-x86_64.zip` | `autokit-standalone.exe` + `autokit.dll` |
+
+### Verify download
+
+Each release includes a `SHA256SUMS.txt` file. Verify your download:
+
+```bash
+# Linux / macOS
+sha256sum -c SHA256SUMS.txt
+
+# Windows (PowerShell)
+Get-Content SHA256SUMS.txt | ForEach-Object {
+  $hash, $file = $_ -split '\s+'; $actual = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+  if ($actual -eq $hash) { "$file OK" } else { "$file FAILED" }
+}
+```
+
+You can also upload the binary to [VirusTotal](https://www.virustotal.com/) to scan it before running.
 
 ## Features
 
