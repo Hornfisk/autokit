@@ -402,7 +402,7 @@ impl Sequencer {
 
             let velocity = step.velocity;
             let pad_index = lane.pad_index;
-            voices.trigger(pad_index, velocity, kit, sample_offset);
+            voices.trigger(pad_index, velocity, kit, sample_offset, step.pan, step.pitch);
             trigger_flags[pad_index].fetch_add(1, Ordering::Relaxed);
             count += 1;
         }
@@ -504,7 +504,7 @@ impl Sequencer {
 
             let velocity = step.velocity;
             let pad_index = lane.pad_index;
-            voices.trigger(pad_index, velocity, kit, sample_offset);
+            voices.trigger(pad_index, velocity, kit, sample_offset, step.pan, step.pitch);
             if pad_index < trigger_flags.len() {
                 trigger_flags[pad_index].fetch_add(1, Ordering::Relaxed);
             }

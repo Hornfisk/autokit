@@ -344,7 +344,7 @@ impl Plugin for Autokit {
                 match event {
                     NoteEvent::NoteOn { note, velocity, .. } => {
                         if let Some(pad_idx) = shared.kit.pad_for_note(note) {
-                            voices.trigger(pad_idx, velocity, &shared.kit, 0);
+                            voices.trigger(pad_idx, velocity, &shared.kit, 0, None, None);
                             self.trigger_flags[pad_idx].fetch_add(1, Ordering::Relaxed);
                         }
                     }
@@ -356,7 +356,7 @@ impl Plugin for Autokit {
             // Check GUI trigger requests (keyboard/click-to-play)
             for i in 0..NUM_PADS {
                 if self.gui_triggers[i].swap(0, Ordering::Relaxed) != 0 {
-                    voices.trigger(i, 0.8, &shared.kit, 0);
+                    voices.trigger(i, 0.8, &shared.kit, 0, None, None);
                     self.trigger_flags[i].fetch_add(1, Ordering::Relaxed);
                 }
             }
