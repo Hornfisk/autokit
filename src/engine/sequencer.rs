@@ -287,9 +287,7 @@ impl Sequencer {
             let host_step = ((sixteenths.floor() as usize) % 16) as usize;
             let frac = sixteenths.fract();
 
-            let expected_beats = self.last_pos_beats
-                + (self.tick_accumulator / sample_rate as f64) * (tempo / 60.0);
-            let drift = (beats - expected_beats).abs();
+            let drift = (beats - self.last_pos_beats).abs();
 
             if !self.playing || drift > 0.01 {
                 self.current_step = host_step;
@@ -365,9 +363,7 @@ impl Sequencer {
             let host_step = ((sixteenths.floor() as usize) % 16) as usize;
             let frac = sixteenths.fract();
 
-            let expected_beats = self.last_pos_beats
-                + (self.tick_accumulator / sample_rate as f64) * (tempo / 60.0);
-            let drift = (beats - expected_beats).abs();
+            let drift = (beats - self.last_pos_beats).abs();
 
             if !self.playing || drift > 0.01 {
                 // Sync: snap to host position. Fire the current step
@@ -948,5 +944,78 @@ mod tests {
         assert_eq!(restored.patterns[0].lanes[0].steps[0].condition, ConditionTrig::Fill);
         assert_eq!(restored.patterns[0].lanes[0].steps[3].pan, Some(-0.5));
         assert!((restored.patterns[0].swing - 0.4).abs() < 0.001);
+    }
+
+    #[test]
+    fn internal_play_fires_all_four_on_the_floor_kicks() {
+        // Simulates internal play: linearly ramping beats, no DAW transport.
+        // Verifies that a 4/4 kick (steps 0,4,8,12) fires exactly 4 times per pattern.
+        let mut seq = Sequencer::new();
+        seq.lanes_mut()[0].steps[0].enabled = true;
+        seq.lanes_mut()[0].steps[4].enabled = true;
+        seq.lanes_mut()[0].steps[8].enabled = true;
+        seq.lanes_mut()[0].steps[12].enabled = true;
+
+        let kit = test_kit();
+        let mut voices = VoicePool::new(44100.0);
+        let flags = dummy_flags();
+
+        let tempo = 120.0_f64;
+        let sr = 44100.0_f32;
+        let block_size = 512_usize;
+        // One full pattern at 120 BPM = 4 beats = 2s = 88200 samples
+        let samples_per_pattern = 88200_usize;
+        let blocks = samples_per_pattern / block_size;
+
+        let mut total_triggers = 0;
+        let mut internal_samples: u64 = 0;
+
+        for _ in 0..blocks {
+            let beats = internal_samples as f64 / sr as f64 * (tempo / 60.0);
+            internal_samples += block_size as u64;
+            let triggers = seq.process_buffer(
+                block_size, true, Some(tempo), Some(beats), sr,
+                &mut voices, &kit, &flags,
+            );
+            total_triggers += triggers;
+        }
+
+        assert_eq!(total_triggers, 4, "4/4 kick should fire exactly 4 times per pattern");
+    }
+
+    #[test]
+    fn internal_play_with_patterns_fires_all_steps() {
+        // Same test but using process_buffer_with_patterns (the actual code path for GUI).
+        let mut seq = Sequencer::new();
+        let mut bank = PatternBank::new();
+        bank.patterns[0].lanes[0].steps[0].enabled = true;
+        bank.patterns[0].lanes[0].steps[4].enabled = true;
+        bank.patterns[0].lanes[0].steps[8].enabled = true;
+        bank.patterns[0].lanes[0].steps[12].enabled = true;
+
+        let kit = test_kit();
+        let mut voices = VoicePool::new(44100.0);
+        let flags = dummy_flags();
+
+        let tempo = 120.0_f64;
+        let sr = 44100.0_f32;
+        let block_size = 512_usize;
+        let samples_per_pattern = 88200_usize;
+        let blocks = samples_per_pattern / block_size;
+
+        let mut total_triggers = 0;
+        let mut internal_samples: u64 = 0;
+
+        for _ in 0..blocks {
+            let beats = internal_samples as f64 / sr as f64 * (tempo / 60.0);
+            internal_samples += block_size as u64;
+            let triggers = seq.process_buffer_with_patterns(
+                block_size, true, Some(tempo), Some(beats), sr,
+                &mut voices, &kit, &bank, &flags,
+            );
+            total_triggers += triggers;
+        }
+
+        assert_eq!(total_triggers, 4, "4/4 kick should fire exactly 4 times per pattern");
     }
 }

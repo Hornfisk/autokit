@@ -386,20 +386,21 @@ impl Plugin for Autokit {
             // Sync sequencer fill state from GUI
             self.sequencer.fill_active = self.seq_fill_active.load(Ordering::Relaxed);
 
-            // Determine play state: host transport OR internal play
+            // Sequencer play state: only play when explicitly started via PLAY button
+            // or Space bar (seq_internal_play). Host transport provides tempo only.
+            // Reason: nih-plug standalone starts with transport.playing=true permanently,
+            // causing the sequencer to auto-play and be unstoppable.
             let transport = context.transport();
             let internal_play = self.seq_internal_play.load(Ordering::Relaxed);
-            let (playing, tempo, pos_beats) = if transport.playing {
-                (true, transport.tempo, transport.pos_beats())
-            } else if internal_play {
-                // Free-running mode at 120 BPM (or host tempo if available)
+            let (playing, tempo, pos_beats) = if internal_play {
+                // Free-running at host tempo (or 120 BPM default)
                 let t = transport.tempo.unwrap_or(120.0);
                 let beats = self.seq_internal_samples as f64 / self.sample_rate as f64 * (t / 60.0);
                 self.seq_internal_samples += num_samples as u64;
                 (true, Some(t), Some(beats))
             } else {
                 self.seq_internal_samples = 0;
-                (false, transport.tempo, transport.pos_beats())
+                (false, transport.tempo, None)
             };
 
             // Run sequencer with pattern data from SharedState

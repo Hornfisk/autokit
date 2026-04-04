@@ -210,6 +210,10 @@ fn draw_grid(
     let cell_size = ((available - cell_spacing * 15.0) / 16.0).floor().max(20.0);
     let row_height = cell_size.min(30.0);
 
+    // Track whether a drag was active before clearing — prevents the released
+    // frame's clicked() from double-toggling the step the drag already toggled.
+    let had_active_drag = view_state.drag_paint.is_some();
+
     // Clear drag state when mouse released
     if !ui.input(|i| i.pointer.any_pressed() || i.pointer.any_down()) {
         view_state.drag_paint = None;
@@ -368,8 +372,9 @@ fn draw_grid(
                     }
                 }
 
-                // Single click (no drag active): toggle + start drag paint
-                if response.clicked() && view_state.drag_paint.is_none() {
+                // Single click (no drag active): toggle + start drag paint.
+                // Suppress if a drag was just cleared this frame to prevent double-toggle.
+                if response.clicked() && view_state.drag_paint.is_none() && !had_active_drag {
                     let new_state = !step.enabled;
                     view_state.drag_paint = Some(new_state);
                     view_state.drag_visited.insert((lane_idx, step_idx));
