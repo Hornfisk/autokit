@@ -113,6 +113,11 @@ impl DrumKit {
         self.pads.iter().position(|p| p.midi_note == note)
     }
 
+    /// Get the MIDI note number for a pad index.
+    pub fn note_for_pad(&self, index: usize) -> u8 {
+        self.pads.get(index).map(|p| p.midi_note).unwrap_or(36 + index as u8)
+    }
+
     /// Capture the undoable state of all pads.
     pub fn snapshot(&self) -> Vec<PadSnapshot> {
         self.pads

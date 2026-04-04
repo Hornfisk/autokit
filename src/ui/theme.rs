@@ -63,6 +63,7 @@ pub const STEP_HOVER: egui::Color32 = egui::Color32::from_rgb(51, 51, 102);   //
 pub const PLOCK_DOT: egui::Color32 = egui::Color32::from_rgb(0, 170, 255);    // #00aaff
 pub const COND_TEXT: egui::Color32 = egui::Color32::from_rgb(255, 204, 0);     // #ffcc00
 pub const MUTE_RED: egui::Color32 = egui::Color32::from_rgb(255, 68, 68);     // #ff4444
+pub const SOLO_YELLOW: egui::Color32 = egui::Color32::from_rgb(0xE8, 0xC5, 0x30); // #e8c530
 pub const LOCK_ORANGE: egui::Color32 = egui::Color32::from_rgb(255, 159, 67); // #ff9f43
 pub const FILL_PURPLE: egui::Color32 = egui::Color32::from_rgb(153, 102, 255); // #9966ff
 pub const PAT_HAS_DATA: egui::Color32 = egui::Color32::from_rgb(136, 136, 136); // #888

@@ -16,6 +16,14 @@ pub struct SeqViewState {
     pub drag_visited: std::collections::HashSet<(usize, usize)>,
     /// Cell rects from last frame, for hit-testing during drag.
     pub cell_rects: Vec<(usize, usize, Rect)>,
+    /// Where the current drag started (lane, step).
+    pub drag_origin: Option<(usize, usize)>,
+    /// Y position at drag start.
+    pub drag_start_y: f32,
+    /// True once we've determined this drag is a velocity adjustment.
+    pub drag_is_velocity: bool,
+    /// The velocity value at the moment we enter velocity-drag mode.
+    pub drag_start_velocity: f32,
 }
 
 /// Display data for sequencer -- captured from SharedState + atomics.
@@ -34,6 +42,7 @@ pub struct LaneDisplay {
     pub pad_name: String,
     pub category: SampleCategory,
     pub muted: bool,
+    pub solo: bool,
     pub locked: bool,
     pub steps: [StepDisplay; NUM_STEPS],
 }
@@ -59,6 +68,7 @@ pub enum SeqAction {
     SetStepProbability { lane: usize, step: usize, value: f32 },
     SetStepCondition { lane: usize, step: usize, condition: ConditionTrig },
     ToggleLaneMute { lane: usize },
+    ToggleLaneSolo { lane: usize },
     ToggleLaneLock { lane: usize },
     SelectPattern { index: usize },
     SetSwing { value: f32 },
@@ -68,6 +78,7 @@ pub enum SeqAction {
     DicePattern,
     SetFillActive { active: bool },
     ToggleInternalPlay,
+    ExportMidi,
 }
 
 /// Draw the complete sequencer view. Returns a list of actions.
@@ -142,7 +153,7 @@ fn draw_pattern_bar(ui: &mut egui::Ui, display: &SeqDisplay) -> Option<SeqAction
                     .color(text_color),
             )
             .fill(bg)
-            .min_size(Vec2::new(30.0, 20.0))
+            .min_size(Vec2::new(24.0, 20.0))
             .corner_radius(3.0);
 
             let response = ui.add(btn);
@@ -206,18 +217,21 @@ fn draw_grid(
     let label_width = 56.0;
     let controls_width = 30.0;
     let cell_spacing = 2.0;
-    let available = ui.clip_rect().width() - label_width - controls_width - 24.0;
+    let available = ui.available_width() - label_width - controls_width - 16.0;
     let cell_size = ((available - cell_spacing * 15.0) / 16.0).floor().max(20.0);
     let row_height = cell_size.min(30.0);
 
     // Track whether a drag was active before clearing — prevents the released
     // frame's clicked() from double-toggling the step the drag already toggled.
-    let had_active_drag = view_state.drag_paint.is_some();
+    let had_active_drag = view_state.drag_paint.is_some()
+        || view_state.drag_origin.is_some();
 
     // Clear drag state when mouse released
     if !ui.input(|i| i.pointer.any_pressed() || i.pointer.any_down()) {
         view_state.drag_paint = None;
         view_state.drag_visited.clear();
+        view_state.drag_origin = None;
+        view_state.drag_is_velocity = false;
     }
     view_state.cell_rects.clear();
 
@@ -273,6 +287,16 @@ fn draw_grid(
                 actions.push(SeqAction::ToggleLaneMute { lane: lane_idx });
             }
 
+            // Solo button
+            let solo_text = egui::RichText::new("S").font(FontId::monospace(7.0));
+            let solo_btn = egui::Button::new(solo_text.color(if lane.solo { Color32::BLACK } else { theme::TEXT_DIM }))
+                .fill(if lane.solo { theme::SOLO_YELLOW } else { theme::STEP_BG })
+                .min_size(Vec2::new(13.0, 13.0))
+                .corner_radius(2.0);
+            if ui.add(solo_btn).clicked() {
+                actions.push(SeqAction::ToggleLaneSolo { lane: lane_idx });
+            }
+
             // Lock button
             let lock_text = egui::RichText::new("L").font(FontId::monospace(7.0));
             let lock_btn = egui::Button::new(lock_text.color(if lane.locked { Color32::BLACK } else { theme::TEXT_DIM }))
@@ -292,7 +316,7 @@ fn draw_grid(
 
                 let (rect, response) = ui.allocate_exact_size(
                     Vec2::new(cell_size, row_height),
-                    egui::Sense::click(),
+                    egui::Sense::click_and_drag(),
                 );
 
                 // Store rect for pointer hit-testing in drag pass
@@ -372,9 +396,22 @@ fn draw_grid(
                     }
                 }
 
-                // Single click (no drag active): toggle + start drag paint.
-                // Suppress if a drag was just cleared this frame to prevent double-toggle.
-                if response.clicked() && view_state.drag_paint.is_none() && !had_active_drag {
+                // Mouse-down on a cell: record origin for drag disambiguation.
+                // We don't toggle yet — wait for release (click) or drag direction.
+                if response.drag_started() && view_state.drag_origin.is_none() && !had_active_drag {
+                    if let Some(pos) = ui.input(|i| i.pointer.press_origin()) {
+                        view_state.drag_origin = Some((lane_idx, step_idx));
+                        view_state.drag_start_y = pos.y;
+                        view_state.drag_is_velocity = false;
+                        view_state.drag_start_velocity = step.velocity;
+                    }
+                }
+
+                // Click (release without significant drag): toggle step.
+                // Suppress if a drag mode was committed to prevent double-toggle.
+                if response.clicked() && view_state.drag_paint.is_none()
+                    && !view_state.drag_is_velocity && !had_active_drag
+                {
                     let new_state = !step.enabled;
                     view_state.drag_paint = Some(new_state);
                     view_state.drag_visited.insert((lane_idx, step_idx));
@@ -384,26 +421,58 @@ fn draw_grid(
         });
     }
 
-    // Drag-paint pass: check pointer against all cell rects
+    // Drag pass: disambiguate horizontal (paint) vs vertical (velocity) drag.
     let pointer_down = ui.input(|i| i.pointer.primary_down());
     if pointer_down {
         if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
-            // If no drag started yet but pointer is down over a cell, start drag
-            if view_state.drag_paint.is_none() {
-                for &(lane_idx, step_idx, rect) in &view_state.cell_rects {
-                    if rect.contains(pos) {
-                        let step_enabled = display.lanes.get(lane_idx)
-                            .map(|l| l.steps[step_idx].enabled)
+            let vert_threshold = 4.0;
+
+            // If we have a drag origin but haven't committed to a mode yet,
+            // decide based on pointer movement.
+            if let Some((origin_lane, origin_step)) = view_state.drag_origin {
+                if !view_state.drag_is_velocity && view_state.drag_paint.is_none() {
+                    // Check if pointer moved to a different step column -> paint mode
+                    let moved_horizontal = view_state.cell_rects.iter()
+                        .any(|&(_, si, r)| r.contains(pos) && si != origin_step);
+                    if moved_horizontal {
+                        // Enter paint mode: toggle origin cell, then paint the new one
+                        let step_enabled = display.lanes.get(origin_lane)
+                            .map(|l| l.steps[origin_step].enabled)
                             .unwrap_or(false);
                         let new_state = !step_enabled;
                         view_state.drag_paint = Some(new_state);
-                        view_state.drag_visited.insert((lane_idx, step_idx));
-                        actions.push(SeqAction::SetStepEnabled { lane: lane_idx, step: step_idx, enabled: new_state });
-                        break;
+                        view_state.drag_visited.insert((origin_lane, origin_step));
+                        actions.push(SeqAction::SetStepEnabled { lane: origin_lane, step: origin_step, enabled: new_state });
+                    }
+                    // Check if pointer moved vertically enough -> velocity mode
+                    let delta_y = pos.y - view_state.drag_start_y;
+                    if delta_y.abs() > vert_threshold {
+                        view_state.drag_is_velocity = true;
+                        // Select the step for visual feedback
+                        view_state.selected = Some((origin_lane, origin_step));
+                        // Ensure the step is enabled for velocity adjustment
+                        let step_enabled = display.lanes.get(origin_lane)
+                            .map(|l| l.steps[origin_step].enabled)
+                            .unwrap_or(false);
+                        if !step_enabled {
+                            actions.push(SeqAction::SetStepEnabled { lane: origin_lane, step: origin_step, enabled: true });
+                        }
                     }
                 }
             }
-            // Continue painting: any cell the pointer passes over
+
+            // Velocity drag mode: adjust velocity based on vertical delta
+            if view_state.drag_is_velocity {
+                if let Some((origin_lane, origin_step)) = view_state.drag_origin {
+                    let delta_y = pos.y - view_state.drag_start_y;
+                    // Drag up = increase velocity, drag down = decrease. 100px = full range.
+                    let velocity_delta = -delta_y / 100.0;
+                    let new_vel = (view_state.drag_start_velocity + velocity_delta).clamp(0.0, 1.0);
+                    actions.push(SeqAction::SetStepVelocity { lane: origin_lane, step: origin_step, value: new_vel });
+                }
+            }
+
+            // Paint mode: continue painting cells the pointer passes over
             if let Some(enable) = view_state.drag_paint {
                 for &(lane_idx, step_idx, rect) in &view_state.cell_rects {
                     if rect.contains(pos) && !view_state.drag_visited.contains(&(lane_idx, step_idx)) {
@@ -631,7 +700,7 @@ fn draw_bottom_bar(ui: &mut egui::Ui, display: &SeqDisplay) -> Option<SeqAction>
                     egui::RichText::new(text).font(FontId::monospace(10.0)).color(theme::TEXT_DIM),
                 )
                 .fill(theme::STEP_BG)
-                .min_size(Vec2::new(46.0, 22.0))
+                .min_size(Vec2::new(42.0, 22.0))
                 .corner_radius(3.0)
             };
 
@@ -643,6 +712,18 @@ fn draw_bottom_bar(ui: &mut egui::Ui, display: &SeqDisplay) -> Option<SeqAction>
             }
             if ui.add(btn_style("COPY")).clicked() {
                 action = Some(SeqAction::CopyPattern);
+            }
+
+            // EXPORT button — write active pattern to .mid file
+            let export_btn = egui::Button::new(
+                egui::RichText::new("EXPORT").font(FontId::monospace(10.0)).color(theme::ACCENT),
+            )
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::new(1.0, theme::ACCENT))
+            .min_size(Vec2::new(52.0, 22.0))
+            .corner_radius(3.0);
+            if ui.add(export_btn).clicked() {
+                action = Some(SeqAction::ExportMidi);
             }
         });
     });

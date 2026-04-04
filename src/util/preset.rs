@@ -5,13 +5,21 @@ use std::sync::Arc;
 use crate::engine::kit::{DrumKit, SampleCategory};
 use crate::util::audio_file;
 
-const PRESET_VERSION: u32 = 1;
+const PRESET_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 pub struct Preset {
     pub name: String,
     pub version: u32,
     pub pads: Vec<PresetPad>,
+    #[serde(default)]
+    pub patterns: Option<PresetPatterns>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PresetPatterns {
+    pub patterns: Vec<crate::engine::sequencer::Pattern>,
+    pub active: usize,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -102,7 +110,7 @@ pub fn list_presets() -> Vec<(String, PathBuf)> {
 }
 
 /// Create a `Preset` from the current kit state.
-pub fn from_kit(name: &str, kit: &DrumKit) -> Preset {
+pub fn from_kit(name: &str, kit: &DrumKit, pattern_bank: &crate::engine::sequencer::PatternBank) -> Preset {
     let pads = kit
         .pads
         .iter()
@@ -121,12 +129,17 @@ pub fn from_kit(name: &str, kit: &DrumKit) -> Preset {
         name: name.to_string(),
         version: PRESET_VERSION,
         pads,
+        patterns: Some(PresetPatterns {
+            patterns: pattern_bank.patterns.clone(),
+            active: pattern_bank.active,
+        }),
     }
 }
 
 /// Apply a preset to a kit, loading sample audio from disk.
 /// Pads with missing or unreadable sample files get `None` sample data.
-pub fn apply_to_kit(preset: &Preset, kit: &mut DrumKit) {
+/// If the preset contains pattern data, it is restored into `pattern_bank`.
+pub fn apply_to_kit(preset: &Preset, kit: &mut DrumKit, pattern_bank: &mut crate::engine::sequencer::PatternBank) {
     for (i, pp) in preset.pads.iter().enumerate() {
         if i >= kit.pads.len() {
             break;
@@ -158,5 +171,14 @@ pub fn apply_to_kit(preset: &Preset, kit: &mut DrumKit) {
                 pad.sample_path = None;
             }
         }
+    }
+
+    if let Some(ref pat_data) = preset.patterns {
+        for (i, pat) in pat_data.patterns.iter().enumerate() {
+            if i < pattern_bank.patterns.len() {
+                pattern_bank.patterns[i] = pat.clone();
+            }
+        }
+        pattern_bank.active = pat_data.active.min(pattern_bank.patterns.len().saturating_sub(1));
     }
 }

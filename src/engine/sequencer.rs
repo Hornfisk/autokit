@@ -85,6 +85,8 @@ pub struct Lane {
     pub pad_index: usize,
     pub steps: [Step; 16],
     pub muted: bool,
+    #[serde(default)]
+    pub solo: bool,
 }
 
 impl Lane {
@@ -93,6 +95,7 @@ impl Lane {
             pad_index,
             steps: [Step::default(); 16],
             muted: false,
+            solo: false,
         }
     }
 }
@@ -161,6 +164,7 @@ impl PatternBank {
                                 condition: pat.lanes[i].steps[j].condition,
                             }),
                             muted: pat.lanes[i].muted,
+                            solo: pat.lanes[i].solo,
                         }
                     }),
                     swing: pat.swing,
@@ -182,6 +186,7 @@ impl PatternBank {
                     step.condition = snap_step.condition;
                 }
                 lane.muted = snap_lane.muted;
+                lane.solo = snap_lane.solo;
             }
             pat.swing = snap_pat.swing;
         }
@@ -428,10 +433,12 @@ impl Sequencer {
     ) -> usize {
         let step_idx = self.current_step;
         let pattern = bank.active_pattern();
+        let any_solo = pattern.lanes.iter().any(|l| l.solo);
         let mut count = 0;
 
         for i in 0..pattern.lanes.len() {
             let lane = &pattern.lanes[i];
+            if any_solo && !lane.solo { continue; }
             if lane.muted { continue; }
 
             let step = &lane.steps[step_idx];
@@ -468,6 +475,7 @@ impl Sequencer {
                 LaneSnapshot {
                     steps,
                     muted: pat.lanes[i].muted,
+                    solo: pat.lanes[i].solo,
                 }
             });
             PatternSnapshot {
@@ -495,6 +503,7 @@ impl Sequencer {
                     step.condition = snap_step.condition;
                 }
                 lane.muted = snap_lane.muted;
+                lane.solo = snap_lane.solo;
             }
             pat.swing = snap_pat.swing;
         }
@@ -522,10 +531,14 @@ impl Sequencer {
         trigger_flags: &[AtomicU8; NUM_PADS],
     ) -> usize {
         let step_idx = self.current_step;
+        let any_solo = self.bank.active_pattern().lanes.iter().any(|l| l.solo);
         let mut count = 0;
 
         for i in 0..self.bank.active_pattern().lanes.len() {
             let lane = &self.bank.active_pattern().lanes[i];
+            if any_solo && !lane.solo {
+                continue;
+            }
             if lane.muted {
                 continue;
             }

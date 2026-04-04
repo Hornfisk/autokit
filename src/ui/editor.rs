@@ -457,6 +457,7 @@ pub fn create(
                                             pad_name: snap.pads[i].name.clone(),
                                             category: snap.pads[i].category,
                                             muted: lane.muted,
+                                            solo: lane.solo,
                                             locked: snap.pads[i].locked,
                                             steps: core::array::from_fn(|j| crate::ui::sequencer_ui::StepDisplay {
                                                 enabled: lane.steps[j].enabled,
@@ -487,6 +488,7 @@ pub fn create(
                                         SeqAction::SetStepProbability { lane, step, value } => GuiAction::SeqSetStepProbability { lane, step, value },
                                         SeqAction::SetStepCondition { lane, step, condition } => GuiAction::SeqSetStepCondition { lane, step, condition },
                                         SeqAction::ToggleLaneMute { lane } => GuiAction::SeqToggleLaneMute { lane },
+                                        SeqAction::ToggleLaneSolo { lane } => GuiAction::SeqToggleLaneSolo { lane },
                                         SeqAction::ToggleLaneLock { lane } => GuiAction::SeqToggleLaneLock { lane },
                                         SeqAction::SelectPattern { index } => GuiAction::SeqSelectPattern { index },
                                         SeqAction::SetSwing { value } => GuiAction::SeqSetSwing { value },
@@ -496,6 +498,7 @@ pub fn create(
                                         SeqAction::DicePattern => GuiAction::SeqDicePattern,
                                         SeqAction::SetFillActive { active } => GuiAction::SeqSetFillActive { active },
                                         SeqAction::ToggleInternalPlay => GuiAction::SeqToggleInternalPlay,
+                                        SeqAction::ExportMidi => GuiAction::SeqExportMidi,
                                     });
                                 }
                             }
@@ -761,7 +764,7 @@ pub fn create(
                         shared.kit.pads[i].decay = v;
                     }
                     GuiAction::SavePreset(name) => {
-                        let p = preset::from_kit(&name, &shared.kit);
+                        let p = preset::from_kit(&name, &shared.kit, &shared.pattern_bank);
                         match preset::save_preset(&p) {
                             Ok(path) => {
                                 tracing::info!("Saved preset to {}", path.display());
@@ -784,7 +787,8 @@ pub fn create(
                                     sequencer: shared.pattern_bank.snapshot(),
                                 };
                                 shared.history.push(snap);
-                                preset::apply_to_kit(&p, &mut shared.kit);
+                                let s = &mut *shared;
+                                preset::apply_to_kit(&p, &mut s.kit, &mut s.pattern_bank);
                                 needs_waveform_update = true;
                                 tracing::info!("Loaded preset: {}", p.name);
                                 state.status_message =
@@ -872,6 +876,10 @@ pub fn create(
                         let pat = shared.pattern_bank.active_pattern_mut();
                         pat.lanes[lane].muted = !pat.lanes[lane].muted;
                     }
+                    GuiAction::SeqToggleLaneSolo { lane } => {
+                        let pat = shared.pattern_bank.active_pattern_mut();
+                        pat.lanes[lane].solo = !pat.lanes[lane].solo;
+                    }
                     GuiAction::SeqToggleLaneLock { lane } => {
                         shared.kit.toggle_lock(lane);
                     }
@@ -951,6 +959,18 @@ pub fn create(
                         let current = seq_internal_play.load(Ordering::Relaxed);
                         seq_internal_play.store(!current, Ordering::Relaxed);
                     }
+                    GuiAction::SeqExportMidi => {
+                        match export_pattern_to_midi(&shared.pattern_bank, &shared.kit) {
+                            Ok(path) => {
+                                tracing::info!(?path, "MIDI pattern exported");
+                                state.status_message = Some(format!("Exported: {}", path.display()));
+                            }
+                            Err(e) => {
+                                tracing::error!(%e, "MIDI export failed");
+                                state.status_message = Some(format!("Export failed: {e}"));
+                            }
+                        }
+                    }
                 }
                 } // end for action in pending_actions
                 } // Lock drops here — held only for the mutation.
@@ -991,6 +1011,7 @@ enum GuiAction {
     SeqSetStepProbability { lane: usize, step: usize, value: f32 },
     SeqSetStepCondition { lane: usize, step: usize, condition: crate::engine::sequencer::ConditionTrig },
     SeqToggleLaneMute { lane: usize },
+    SeqToggleLaneSolo { lane: usize },
     SeqToggleLaneLock { lane: usize },
     SeqSelectPattern { index: usize },
     SeqSetSwing { value: f32 },
@@ -1000,4 +1021,146 @@ enum GuiAction {
     SeqDicePattern,
     SeqSetFillActive { active: bool },
     SeqToggleInternalPlay,
+    SeqExportMidi,
+}
+
+/// Export the active pattern from a PatternBank as a Standard MIDI File (Type 0).
+/// Returns the path of the written .mid file.
+fn export_pattern_to_midi(
+    bank: &crate::engine::sequencer::PatternBank,
+    kit: &crate::engine::kit::DrumKit,
+) -> Result<PathBuf, std::io::Error> {
+    use std::io::Write;
+
+    let export_dir = dirs_export_path();
+    std::fs::create_dir_all(&export_dir)?;
+
+    // Generate a timestamped filename
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let filename = format!("autokit_pattern_{timestamp}.mid");
+    let path = export_dir.join(&filename);
+
+    let pattern = bank.active_pattern();
+    let ticks_per_quarter: u16 = 96; // Standard PPQN
+    let ticks_per_step = ticks_per_quarter / 4; // 16th note = quarter / 4 = 24 ticks
+    let note_duration: u16 = ticks_per_step / 2; // Note lasts half a step
+
+    // Build MIDI track events
+    let mut track_data: Vec<u8> = Vec::new();
+
+    // Tempo meta event: 120 BPM = 500000 microseconds per quarter note
+    track_data.extend_from_slice(&[0x00, 0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20]);
+
+    // Collect all note events with absolute tick positions, then sort and delta-encode
+    struct MidiEvent {
+        tick: u32,
+        status: u8,
+        note: u8,
+        velocity: u8,
+    }
+
+    let mut events: Vec<MidiEvent> = Vec::new();
+
+    for lane in &pattern.lanes {
+        if lane.muted {
+            continue;
+        }
+        let note = kit.note_for_pad(lane.pad_index);
+
+        for (step_idx, step) in lane.steps.iter().enumerate() {
+            if !step.enabled {
+                continue;
+            }
+            let tick_on = step_idx as u32 * ticks_per_step as u32;
+            let tick_off = tick_on + note_duration as u32;
+            let vel = (step.velocity * 127.0).round().clamp(1.0, 127.0) as u8;
+
+            events.push(MidiEvent {
+                tick: tick_on,
+                status: 0x99, // Note On, channel 10 (0-indexed = 9)
+                note,
+                velocity: vel,
+            });
+            events.push(MidiEvent {
+                tick: tick_off,
+                status: 0x89, // Note Off, channel 10
+                note,
+                velocity: 0,
+            });
+        }
+    }
+
+    // Sort by tick, then note-off before note-on at same tick
+    events.sort_by(|a, b| {
+        a.tick.cmp(&b.tick)
+            .then_with(|| {
+                // Note-off (0x8x) sorts before note-on (0x9x)
+                a.status.cmp(&b.status)
+            })
+            .then_with(|| a.note.cmp(&b.note))
+    });
+
+    // Write events with delta times
+    let mut last_tick: u32 = 0;
+    for ev in &events {
+        let delta = ev.tick - last_tick;
+        last_tick = ev.tick;
+        write_variable_length(&mut track_data, delta);
+        track_data.push(ev.status);
+        track_data.push(ev.note);
+        track_data.push(ev.velocity);
+    }
+
+    // End of track meta event
+    write_variable_length(&mut track_data, 0);
+    track_data.extend_from_slice(&[0xFF, 0x2F, 0x00]);
+
+    // Write the SMF file
+    let mut file = std::fs::File::create(&path)?;
+
+    // Header chunk: MThd
+    file.write_all(b"MThd")?;
+    file.write_all(&(6u32).to_be_bytes())?; // header length
+    file.write_all(&(0u16).to_be_bytes())?; // format 0
+    file.write_all(&(1u16).to_be_bytes())?; // 1 track
+    file.write_all(&ticks_per_quarter.to_be_bytes())?;
+
+    // Track chunk: MTrk
+    file.write_all(b"MTrk")?;
+    file.write_all(&(track_data.len() as u32).to_be_bytes())?;
+    file.write_all(&track_data)?;
+
+    Ok(path)
+}
+
+/// Write a MIDI variable-length quantity.
+fn write_variable_length(buf: &mut Vec<u8>, mut value: u32) {
+    if value == 0 {
+        buf.push(0);
+        return;
+    }
+    // Encode in reverse, then push in order
+    let mut bytes = Vec::with_capacity(4);
+    bytes.push((value & 0x7F) as u8);
+    value >>= 7;
+    while value > 0 {
+        bytes.push((value & 0x7F) as u8 | 0x80);
+        value >>= 7;
+    }
+    bytes.reverse();
+    buf.extend_from_slice(&bytes);
+}
+
+/// Get the export directory path.
+fn dirs_export_path() -> PathBuf {
+    if let Some(data_dir) = std::env::var_os("XDG_DATA_HOME") {
+        PathBuf::from(data_dir).join("autokit/exports")
+    } else if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join(".local/share/autokit/exports")
+    } else {
+        PathBuf::from("/tmp/autokit/exports")
+    }
 }

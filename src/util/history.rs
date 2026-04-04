@@ -35,6 +35,7 @@ pub struct StepSnapshot {
 pub struct LaneSnapshot {
     pub steps: [StepSnapshot; 16],
     pub muted: bool,
+    pub solo: bool,
 }
 
 /// Snapshot of one pattern.
@@ -135,6 +136,7 @@ mod tests {
                     condition: crate::engine::sequencer::ConditionTrig::Always,
                 }; 16],
                 muted: false,
+                solo: false,
             });
             PatternSnapshot { lanes, swing: 0.0 }
         }).collect();

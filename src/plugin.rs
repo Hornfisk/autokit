@@ -386,10 +386,12 @@ impl Plugin for Autokit {
             // Sync sequencer fill state from GUI
             self.sequencer.fill_active = self.seq_fill_active.load(Ordering::Relaxed);
 
-            // Sequencer play state: only play when explicitly started via PLAY button
-            // or Space bar (seq_internal_play). Host transport provides tempo only.
-            // Reason: nih-plug standalone starts with transport.playing=true permanently,
-            // causing the sequencer to auto-play and be unstoppable.
+            // Sequencer play state:
+            // 1. Internal PLAY button / Space bar: free-run using internal sample counter
+            // 2. Host transport playing: follow host position (works in DAWs)
+            // 3. Neither: sequencer stopped
+            // In standalone mode, host transport.playing is always true but pos_beats
+            // is always None, so the user must use the internal PLAY button.
             let transport = context.transport();
             let internal_play = self.seq_internal_play.load(Ordering::Relaxed);
             let (playing, tempo, pos_beats) = if internal_play {
@@ -398,10 +400,19 @@ impl Plugin for Autokit {
                 let beats = self.seq_internal_samples as f64 / self.sample_rate as f64 * (t / 60.0);
                 self.seq_internal_samples += num_samples as u64;
                 (true, Some(t), Some(beats))
+            } else if transport.playing {
+                // Follow host transport (DAW provides position)
+                self.seq_internal_samples = 0;
+                (true, transport.tempo, transport.pos_beats())
             } else {
                 self.seq_internal_samples = 0;
                 (false, transport.tempo, None)
             };
+
+            // Capture trigger counts before sequencer runs
+            let pre_triggers: [u8; NUM_PADS] = core::array::from_fn(|i| {
+                self.trigger_flags[i].load(Ordering::Relaxed)
+            });
 
             // Run sequencer with pattern data from SharedState
             self.sequencer.process_buffer_with_patterns(
@@ -415,6 +426,37 @@ impl Plugin for Autokit {
                 &shared.pattern_bank,
                 &self.trigger_flags,
             );
+
+            // Send MIDI output for any new triggers so the host can record pattern data
+            for i in 0..NUM_PADS {
+                let post = self.trigger_flags[i].load(Ordering::Relaxed);
+                if post != pre_triggers[i] {
+                    let note = shared.kit.note_for_pad(i);
+                    let velocity = {
+                        let pattern = shared.pattern_bank.active_pattern();
+                        if i < pattern.lanes.len() {
+                            let step_idx = self.sequencer.current_step();
+                            pattern.lanes[i].steps[step_idx].velocity
+                        } else {
+                            0.8
+                        }
+                    };
+                    context.send_event(NoteEvent::NoteOn {
+                        timing: 0,
+                        voice_id: None,
+                        channel: 9,
+                        note,
+                        velocity,
+                    });
+                    context.send_event(NoteEvent::NoteOff {
+                        timing: 1,
+                        voice_id: None,
+                        channel: 9,
+                        note,
+                        velocity: 0.0,
+                    });
+                }
+            }
 
             // Write playback state for GUI
             self.seq_current_step.store(self.sequencer.current_step(), Ordering::Relaxed);
