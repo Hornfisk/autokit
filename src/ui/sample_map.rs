@@ -28,9 +28,15 @@ fn normalize_centroid(hz: f32) -> f32 {
     ((hz / 100.0).log2() / (200.0_f32).log2()).clamp(0.0, 1.0)
 }
 
-/// Normalize decay time to 0.0–1.0 (linear, max 4s).
+/// Normalize decay time to 0.0–1.0 via log scale.
+/// Maps ~0.01s → 0.0, ~4.0s → 1.0. Log scale spreads short percussion
+/// decays across the full Y axis instead of clustering near the top.
 fn normalize_decay(secs: f32) -> f32 {
-    (secs / 4.0).clamp(0.0, 1.0)
+    if secs <= 0.0 {
+        return 0.0;
+    }
+    // log2(secs / 0.01) / log2(4.0 / 0.01) = log2(secs/0.01) / log2(400)
+    ((secs / 0.01).log2() / (400.0_f32).log2()).clamp(0.0, 1.0)
 }
 
 use nih_plug_egui::egui;
@@ -464,7 +470,7 @@ mod tests {
 
     #[test]
     fn decay_4s_maps_to_one() {
-        assert_eq!(normalize_decay(4.0), 1.0);
+        assert!((normalize_decay(4.0) - 1.0).abs() < 0.01);
     }
 
     #[test]
@@ -473,8 +479,17 @@ mod tests {
     }
 
     #[test]
-    fn decay_2s_maps_to_half() {
-        assert!((normalize_decay(2.0) - 0.5).abs() < 0.01);
+    fn decay_short_spreads_well() {
+        // Key fix: short decays (typical percussion) should NOT cluster near 0
+        let d005 = normalize_decay(0.05); // 50ms — typical kick
+        let d02 = normalize_decay(0.2);   // 200ms — typical snare
+        let d1 = normalize_decay(1.0);    // 1s — longer perc
+        assert!(d005 > 0.15, "50ms should be well off the top, got {d005}");
+        assert!(d02 > 0.3, "200ms should be mid-low, got {d02}");
+        assert!(d1 > 0.6, "1s should be in the lower half, got {d1}");
+        // All should be distinct and spread out
+        assert!(d02 > d005 + 0.1, "should have clear separation");
+        assert!(d1 > d02 + 0.1, "should have clear separation");
     }
 
     #[test]
