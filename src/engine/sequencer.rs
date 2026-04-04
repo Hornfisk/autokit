@@ -1,5 +1,6 @@
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
+use serde::{Serialize, Deserialize};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::engine::kit::{DrumKit, NUM_PADS};
@@ -7,7 +8,7 @@ use crate::engine::sampler::VoicePool;
 use crate::util::history::{StepSnapshot, LaneSnapshot, PatternSnapshot, SequencerSnapshot};
 
 /// Conditional trig types — Elektron-style step conditions.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ConditionTrig {
     Always,        // Default — fires every loop
     Every(u8),     // 1:N — fires every Nth loop (N = 2, 4, 8)
@@ -55,7 +56,7 @@ impl ConditionTrig {
 }
 
 /// A single step in the sequencer.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct Step {
     pub enabled: bool,
     pub velocity: f32,
@@ -79,7 +80,7 @@ impl Default for Step {
 }
 
 /// One lane = one pad's 16-step sequence.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Lane {
     pub pad_index: usize,
     pub steps: [Step; 16],
@@ -100,7 +101,7 @@ pub const NUM_STEPS: usize = 16;
 pub const NUM_PATTERNS: usize = 16;
 
 /// One pattern: 8 lanes + swing setting.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Pattern {
     pub lanes: Vec<Lane>,
     pub swing: f32,
@@ -121,6 +122,7 @@ impl Pattern {
 }
 
 /// Bank of 16 patterns with active/queued selection.
+#[derive(Serialize, Deserialize)]
 pub struct PatternBank {
     pub patterns: Vec<Pattern>,
     pub active: usize,
@@ -878,5 +880,24 @@ mod tests {
             &mut voices, &kit, &flags,
         );
         assert_eq!(triggers, 0, "negative pos_beats should not trigger");
+    }
+
+    #[test]
+    fn pattern_bank_serializes_roundtrip() {
+        let mut bank = PatternBank::new();
+        bank.patterns[0].lanes[0].steps[0].enabled = true;
+        bank.patterns[0].lanes[0].steps[0].velocity = 0.6;
+        bank.patterns[0].lanes[0].steps[0].condition = ConditionTrig::Fill;
+        bank.patterns[0].lanes[0].steps[3].pan = Some(-0.5);
+        bank.patterns[0].swing = 0.4;
+
+        let json = serde_json::to_string(&bank).unwrap();
+        let restored: PatternBank = serde_json::from_str(&json).unwrap();
+
+        assert!(restored.patterns[0].lanes[0].steps[0].enabled);
+        assert!((restored.patterns[0].lanes[0].steps[0].velocity - 0.6).abs() < 0.001);
+        assert_eq!(restored.patterns[0].lanes[0].steps[0].condition, ConditionTrig::Fill);
+        assert_eq!(restored.patterns[0].lanes[0].steps[3].pan, Some(-0.5));
+        assert!((restored.patterns[0].swing - 0.4).abs() < 0.001);
     }
 }
