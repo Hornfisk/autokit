@@ -32,24 +32,44 @@ Autokit scans your sample library, classifies oneshots by type (kick, snare, hih
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-**System dependencies** (Debian/Ubuntu):
+**System dependencies:**
+
+A helper script is provided that detects your distro and installs everything:
+
+```bash
+python3 setup-deps.py
+```
+
+Or install manually:
+
+<details>
+<summary>Debian / Ubuntu / Pop!_OS</summary>
 
 ```bash
 sudo apt update
-sudo apt install build-essential pkg-config libx11-dev libxcursor-dev \
-    libxkbcommon-dev libgl1-mesa-dev libasound2-dev libxcb-render0-dev \
-    libxcb-shape0-dev libxcb-xfixes0-dev libclang-dev
+sudo apt install build-essential pkg-config cmake \
+    libx11-dev libx11-xcb-dev libxcb1-dev libxcb-icccm4-dev libxcb-keysyms1-dev \
+    libxcursor-dev libxkbcommon-dev libgl-dev libasound2-dev libjack-dev
 ```
+</details>
 
-On Arch Linux: `sudo pacman -S base-devel libx11 libxcursor libxkbcommon mesa alsa-lib libxcb clang`
+<details>
+<summary>Arch Linux / Manjaro</summary>
+
+```bash
+sudo pacman -S --needed base-devel pkg-config cmake \
+    libx11 libxcb xcb-util xcb-util-wm xcb-util-keysyms \
+    libxcursor libxkbcommon mesa alsa-lib jack2
+```
+</details>
 
 **Audio server:** PipeWire or JACK (PipeWire recommended, ships by default on most modern distros).
 
 ### Build
 
 ```bash
-git clone https://github.com/YOUR_USER/Autokit.git
-cd Autokit
+git clone https://github.com/Hornfisk/autokit.git
+cd autokit
 cargo build --release
 ```
 
