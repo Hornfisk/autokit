@@ -121,6 +121,8 @@ pub struct EditorState {
     pub map_hovered: Option<usize>,
     /// Assignment popup state for the sample map.
     pub map_popup: sample_map::PopupState,
+    /// Which pad is in shortcut-assign mode (click dot = assign to this pad).
+    pub map_shortcut_pad: Option<usize>,
 }
 
 impl Default for EditorState {
@@ -142,6 +144,7 @@ impl Default for EditorState {
             map_view: sample_map::MapViewState::default(),
             map_hovered: None,
             map_popup: sample_map::PopupState::default(),
+            map_shortcut_pad: None,
         }
     }
 }
@@ -380,15 +383,43 @@ pub fn create(
                             match map_action {
                                 sample_map::MapAction::ClickedDot { point_index } => {
                                     let lib_index = state.map_points[point_index].library_index;
-                                    pending_action = Some(GuiAction::PreviewSample(lib_index));
-                                    state.map_popup.active_point = Some(point_index);
-                                    if let Some(cursor) = ui.input(|i| i.pointer.interact_pos()) {
-                                        state.map_popup.anchor_pos = cursor;
+                                    if let Some(pad) = state.map_shortcut_pad {
+                                        // Shortcut mode: assign directly + preview
+                                        pending_action = Some(GuiAction::AssignFromMap { pad_index: pad, library_index: lib_index });
+                                    } else {
+                                        // Normal mode: preview + popup
+                                        pending_action = Some(GuiAction::PreviewSample(lib_index));
+                                        state.map_popup.active_point = Some(point_index);
+                                        if let Some(cursor) = ui.input(|i| i.pointer.interact_pos()) {
+                                            state.map_popup.anchor_pos = cursor;
+                                        }
                                     }
                                 }
                                 sample_map::MapAction::AssignToPad { .. } => {}
                                 sample_map::MapAction::None => {}
                             }
+
+                            // Separator
+                            ui.add(egui::Separator::default().spacing(0.0));
+
+                            // Mini pad bar
+                            let pad_names: [String; NUM_PADS] = core::array::from_fn(|i| snap.pads[i].name.clone());
+                            let pad_categories: [SampleCategory; NUM_PADS] = core::array::from_fn(|i| snap.pads[i].category);
+                            let bar_action = sample_map::draw_mini_pad_bar(ui, &pad_names, &pad_categories, state.map_shortcut_pad);
+                            match bar_action {
+                                sample_map::PadBarAction::ToggleShortcut(i) => {
+                                    state.map_shortcut_pad = if state.map_shortcut_pad == Some(i) { None } else { Some(i) };
+                                }
+                                sample_map::PadBarAction::None => {}
+                            }
+
+                            // Escape exits shortcut mode and closes popup
+                            ctx.input(|input| {
+                                if input.key_pressed(egui::Key::Escape) {
+                                    state.map_shortcut_pad = None;
+                                    state.map_popup.active_point = None;
+                                }
+                            });
                         }
                     }
                 });

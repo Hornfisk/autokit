@@ -291,6 +291,45 @@ pub fn draw_map(
     action
 }
 
+/// Actions returned by the mini pad bar.
+pub enum PadBarAction {
+    None,
+    ToggleShortcut(usize),
+}
+
+/// Draw a compact row of 8 pad buttons below the map.
+pub fn draw_mini_pad_bar(
+    ui: &mut egui::Ui,
+    pad_names: &[String; NUM_PADS],
+    pad_categories: &[SampleCategory; NUM_PADS],
+    shortcut_pad: Option<usize>,
+) -> PadBarAction {
+    let mut action = PadBarAction::None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let bar_width = ui.clip_rect().width() - 12.0;
+        let btn_width = (bar_width / NUM_PADS as f32) - 2.0;
+
+        for i in 0..NUM_PADS {
+            let color = theme::category_color(pad_categories[i]);
+            let is_active = shortcut_pad == Some(i);
+            let bg = if is_active { color.to_egui_alpha(0x44) } else { color.to_egui_alpha(0x22) };
+            let border = if is_active { egui::Stroke::new(2.0, color.to_egui()) } else { egui::Stroke::new(1.0, color.to_egui_alpha(0x55)) };
+            let label = format!("{} {}", i + 1, pad_categories[i].label().chars().take(3).collect::<String>().to_uppercase());
+            let btn = egui::Button::new(
+                egui::RichText::new(&label).font(egui::FontId::new(8.0, egui::FontFamily::Monospace)).color(color.to_egui()))
+                .fill(bg).stroke(border).min_size(egui::vec2(btn_width, 22.0));
+            let response = ui.add(btn);
+            if response.clicked() { action = PadBarAction::ToggleShortcut(i); }
+            if response.hovered() {
+                response.on_hover_text_at_pointer(
+                    egui::RichText::new(&pad_names[i]).font(egui::FontId::new(9.0, egui::FontFamily::Monospace)));
+            }
+        }
+    });
+    action
+}
+
 /// Draw the assignment popup near a clicked dot.
 pub fn draw_popup(
     ctx: &egui::Context,
