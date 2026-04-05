@@ -59,7 +59,7 @@ jobs:
         run: |
           mkdir -p staging
           cp -r target/bundled/autokit.vst3 staging/
-          cp target/bundled/autokit.clap staging/
+          cp -r target/bundled/autokit.clap staging/
           cp "target/${BUILD_TARGET}/release/autokit-standalone" staging/ || true
           cd staging && tar czf "../${ARTIFACT_NAME}.tar.gz" * && cd ..
 
@@ -72,7 +72,7 @@ jobs:
         run: |
           mkdir -p staging
           cp -r target/bundled/autokit.vst3 staging/
-          cp target/bundled/autokit.clap staging/
+          cp -r target/bundled/autokit.clap staging/
           cp "target/${BUILD_TARGET}/release/autokit-standalone.exe" staging/ || true
           cd staging && 7z a "../${ARTIFACT_NAME}.zip" * && cd ..
 
