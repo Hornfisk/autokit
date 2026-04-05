@@ -643,6 +643,8 @@ pub fn create(
                                         SeqAction::PastePattern => GuiAction::SeqPastePattern,
                                         SeqAction::ClearPattern => GuiAction::SeqClearPattern,
                                         SeqAction::DicePattern => GuiAction::SeqDicePattern,
+                                        SeqAction::ShiftLeft => GuiAction::SeqShiftLeft,
+                                        SeqAction::ShiftRight => GuiAction::SeqShiftRight,
                                         SeqAction::SetFillActive { active } => GuiAction::SeqSetFillActive { active },
                                         SeqAction::ToggleInternalPlay => GuiAction::SeqToggleInternalPlay,
                                         SeqAction::ExportMidi => GuiAction::SeqExportMidi,
@@ -1088,6 +1090,28 @@ pub fn create(
                             }
                         }
                     }
+                    GuiAction::SeqShiftLeft => {
+                        let snap = HistorySnapshot {
+                            pads: shared.kit.snapshot(),
+                            sequencer: shared.pattern_bank.snapshot(),
+                        };
+                        shared.history.push(snap);
+                        let pat = shared.pattern_bank.active_pattern_mut();
+                        for lane in &mut pat.lanes {
+                            lane.steps.rotate_left(1);
+                        }
+                    }
+                    GuiAction::SeqShiftRight => {
+                        let snap = HistorySnapshot {
+                            pads: shared.kit.snapshot(),
+                            sequencer: shared.pattern_bank.snapshot(),
+                        };
+                        shared.history.push(snap);
+                        let pat = shared.pattern_bank.active_pattern_mut();
+                        for lane in &mut pat.lanes {
+                            lane.steps.rotate_right(1);
+                        }
+                    }
                     GuiAction::SeqSetFillActive { active } => {
                         seq_fill_active.store(active, Ordering::Relaxed);
                     }
@@ -1168,6 +1192,8 @@ enum GuiAction {
     SeqPastePattern,
     SeqClearPattern,
     SeqDicePattern,
+    SeqShiftLeft,
+    SeqShiftRight,
     SeqSetFillActive { active: bool },
     SeqToggleInternalPlay,
     SeqExportMidi,

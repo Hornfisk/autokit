@@ -79,6 +79,8 @@ pub enum SeqAction {
     PastePattern,
     ClearPattern,
     DicePattern,
+    ShiftLeft,
+    ShiftRight,
     SetFillActive { active: bool },
     ToggleInternalPlay,
     ExportMidi,
@@ -771,6 +773,27 @@ fn draw_bottom_bar(ui: &mut egui::Ui, display: &SeqDisplay, tooltips_on: bool) -
         theme::tip(resp.clone(), "Randomize pattern steps", tooltips_on);
         if resp.clicked() {
             action = Some(SeqAction::DicePattern);
+        }
+
+        // Shift Left / Right buttons
+        let shift_btn = |label: &str| {
+            egui::Button::new(
+                egui::RichText::new(label).font(FontId::monospace(10.0)).color(theme::TEXT_DIM),
+            )
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::new(1.0, theme::TEXT_DIM))
+            .min_size(Vec2::new(28.0, 22.0))
+            .corner_radius(3.0)
+        };
+        let resp = ui.add(shift_btn("\u{25C0}"));
+        theme::tip(resp.clone(), "Shift pattern one step left", tooltips_on);
+        if resp.clicked() {
+            action = Some(SeqAction::ShiftLeft);
+        }
+        let resp = ui.add(shift_btn("\u{25B6}"));
+        theme::tip(resp.clone(), "Shift pattern one step right", tooltips_on);
+        if resp.clicked() {
+            action = Some(SeqAction::ShiftRight);
         }
 
         // FILL button (momentary)
