@@ -36,6 +36,7 @@ pub struct SeqDisplay {
     pub pattern_has_data: [bool; NUM_PATTERNS],
     pub lanes: Vec<LaneDisplay>,
     pub swing: f32,
+    pub ext_mode: bool,
 }
 
 pub struct LaneDisplay {
@@ -79,6 +80,8 @@ pub enum SeqAction {
     SetFillActive { active: bool },
     ToggleInternalPlay,
     ExportMidi,
+    ResetLane { lane: usize },
+    ResetStep { lane: usize, step: usize },
 }
 
 /// Draw the complete sequencer view. Returns a list of actions.
@@ -86,48 +89,44 @@ pub fn draw_sequencer_view(
     ui: &mut egui::Ui,
     display: &SeqDisplay,
     view_state: &mut SeqViewState,
+    available_height: f32,
 ) -> Vec<SeqAction> {
     let mut actions: Vec<SeqAction> = Vec::new();
 
-    // Pattern selector bar
-    if let Some(a) = draw_pattern_bar(ui, display) {
-        actions.push(a);
-    }
+    // Step grid at top (may return multiple actions from drag-paint)
+    let (grid_actions, grid_layout) = draw_grid(ui, display, available_height, view_state);
+    actions.extend(grid_actions);
+    let grid_right = grid_layout.grid_right_x;
 
     ui.add_space(2.0);
 
-    // Step grid (may return multiple actions from drag-paint)
-    actions.extend(draw_grid(ui, display, view_state));
+    // Combined row: step param knobs (left) + SWING + pattern selector (right-aligned to grid edge)
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
 
-    ui.add_space(2.0);
-
-    // Step parameter bar (only if a step is selected)
-    if let Some((lane_idx, step_idx)) = view_state.selected {
-        if lane_idx < display.lanes.len() {
-            let step = &display.lanes[lane_idx].steps[step_idx];
-            let cat = display.lanes[lane_idx].category;
-            if let Some(a) = draw_param_bar(ui, lane_idx, step_idx, step, cat) {
-                actions.push(a);
+        // Step parameter knobs (only if a step is selected)
+        if let Some((lane_idx, step_idx)) = view_state.selected {
+            if lane_idx < display.lanes.len() {
+                let step = &display.lanes[lane_idx].steps[step_idx];
+                let cat = display.lanes[lane_idx].category;
+                actions.extend(draw_param_controls(ui, lane_idx, step_idx, step, cat));
             }
         }
-    }
 
-    // Bottom bar
-    if let Some(a) = draw_bottom_bar(ui, display) {
-        actions.push(a);
-    }
+        // Pattern selector — right-aligned, ending at grid right edge
+        let ptrn_btn_w = 24.0;
+        let ptrn_spacing = 3.0;
+        let ptrn_label_w = 34.0;
+        let ptrn_total_w = ptrn_label_w + ptrn_spacing + NUM_PATTERNS as f32 * ptrn_btn_w + (NUM_PATTERNS - 1) as f32 * ptrn_spacing;
+        let ptrn_start_x = grid_right - ptrn_total_w;
+        let cur_x = ui.cursor().left();
+        let space_to_ptrn = (ptrn_start_x - cur_x).max(0.0);
+        ui.add_space(space_to_ptrn);
 
-    actions
-}
-
-fn draw_pattern_bar(ui: &mut egui::Ui, display: &SeqDisplay) -> Option<SeqAction> {
-    let mut action = None;
-
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 3.0;
+        ui.spacing_mut().item_spacing.x = ptrn_spacing;
 
         ui.label(
-            egui::RichText::new("PATTERN")
+            egui::RichText::new("PTRN")
                 .font(FontId::monospace(9.0))
                 .color(theme::TEXT_DIM),
         );
@@ -153,7 +152,7 @@ fn draw_pattern_bar(ui: &mut egui::Ui, display: &SeqDisplay) -> Option<SeqAction
                     .color(text_color),
             )
             .fill(bg)
-            .min_size(Vec2::new(24.0, 20.0))
+            .min_size(Vec2::new(ptrn_btn_w, 20.0))
             .corner_radius(3.0);
 
             let response = ui.add(btn);
@@ -171,55 +170,57 @@ fn draw_pattern_bar(ui: &mut egui::Ui, display: &SeqDisplay) -> Option<SeqAction
             }
 
             if response.clicked() && !is_active {
-                action = Some(SeqAction::SelectPattern { index: i });
+                actions.push(SeqAction::SelectPattern { index: i });
             }
         }
-
-        // Swing control (right side)
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let swing_pct = (display.swing * 100.0) as u8;
-            ui.label(
-                egui::RichText::new(format!("{swing_pct}%"))
-                    .font(FontId::monospace(9.0))
-                    .color(theme::ACCENT),
-            );
-
-            let (rect, response) = ui.allocate_exact_size(Vec2::new(60.0, 6.0), egui::Sense::drag());
-            ui.painter().rect_filled(rect, 3.0, theme::STEP_BG);
-            let fill_width = rect.width() * display.swing;
-            let fill_rect = Rect::from_min_size(rect.min, Vec2::new(fill_width, rect.height()));
-            ui.painter().rect_filled(fill_rect, 3.0, theme::ACCENT);
-
-            if response.dragged() {
-                let delta = response.drag_delta().x / 60.0;
-                let new_swing = (display.swing + delta).clamp(0.0, 1.0);
-                action = Some(SeqAction::SetSwing { value: new_swing });
-            }
-
-            ui.label(
-                egui::RichText::new("SWING")
-                    .font(FontId::monospace(9.0))
-                    .color(theme::TEXT_DIM),
-            );
-        });
     });
 
-    action
+    // Push bottom bar to near the bottom edge
+    let remaining = ui.available_height() - 32.0;
+    if remaining > 0.0 {
+        ui.add_space(remaining);
+    }
+
+    // Bottom bar
+    if let Some(a) = draw_bottom_bar(ui, display) {
+        actions.push(a);
+    }
+
+    actions
+}
+
+
+/// Layout info returned by draw_grid so the caller can align elements.
+struct GridLayout {
+    /// Right X coordinate of the last grid cell.
+    grid_right_x: f32,
 }
 
 fn draw_grid(
     ui: &mut egui::Ui,
     display: &SeqDisplay,
+    available_height: f32,
     view_state: &mut SeqViewState,
-) -> Vec<SeqAction> {
+) -> (Vec<SeqAction>, GridLayout) {
     let mut actions: Vec<SeqAction> = Vec::new();
 
-    let label_width = 56.0;
-    let controls_width = 30.0;
+    // Label area: 3px strip + 8px space + 46px tag + 4px space = 61px
+    let label_width = 61.0;
+    // M S L buttons: 3 x (13px + 2px spacing) = 45px
+    let controls_width = 45.0;
     let cell_spacing = 2.0;
-    let available = ui.available_width() - label_width - controls_width - 16.0;
-    let cell_size = ((available - cell_spacing * 15.0) / 16.0).floor().max(20.0);
-    let row_height = cell_size.min(30.0);
+    let num_lanes = display.lanes.len().max(1) as f32;
+    // Reserve space: step numbers ~14, combined param+pattern bar ~50, bottom bar ~28, spacing ~20
+    let vert_reserved = 112.0;
+    let vert_avail = available_height - vert_reserved;
+    let row_from_height = ((vert_avail - cell_spacing * (num_lanes - 1.0)) / num_lanes).floor();
+    let available_w = ui.available_width() - label_width - controls_width;
+    let cell_from_width = ((available_w - cell_spacing * 15.0) / 16.0).floor();
+    let cell_size = row_from_height.min(cell_from_width).clamp(20.0, 48.0);
+    let row_height = cell_size;
+    // Compute grid right edge position
+    let grid_start_x = ui.min_rect().left() + label_width + controls_width;
+    let grid_right_x = grid_start_x + cell_size * 16.0 + cell_spacing * 15.0;
 
     // Track whether a drag was active before clearing — prevents the released
     // frame's clicked() from double-toggling the step the drag already toggled.
@@ -235,9 +236,9 @@ fn draw_grid(
     }
     view_state.cell_rects.clear();
 
-    // Step numbers header
+    // Step numbers header — offset must match track row layout exactly
     ui.horizontal(|ui| {
-        ui.add_space(label_width + controls_width + 4.0);
+        ui.add_space(label_width + controls_width);
         ui.spacing_mut().item_spacing.x = cell_spacing;
         for s in 0..NUM_STEPS {
             let is_beat = s % 4 == 0;
@@ -258,24 +259,50 @@ fn draw_grid(
         }
     });
 
-    // Track rows
+    // Track rows — 2px vertical spacing to match pads view
+    ui.spacing_mut().item_spacing.y = 2.0;
     for lane_idx in 0..display.lanes.len() {
         let lane = &display.lanes[lane_idx];
         let cat_color = theme::category_color32(lane.category);
         let is_muted = lane.muted;
 
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.spacing_mut().item_spacing.x = 0.0;
 
-            // Track label
-            let label = egui::RichText::new(lane.category.label())
-                .font(FontId::monospace(9.0))
-                .color(if is_muted { cat_color.linear_multiply(0.3) } else { cat_color });
-            ui.allocate_ui(Vec2::new(label_width, row_height), |ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(label);
-                });
+            // Color strip (3px) — matches pads view
+            let strip_color = if is_muted { cat_color.linear_multiply(0.3) } else { cat_color };
+            let (strip_rect, _) = ui.allocate_exact_size(Vec2::new(3.0, row_height), egui::Sense::hover());
+            ui.painter().rect_filled(strip_rect, egui::CornerRadius::ZERO, strip_color);
+
+            ui.add_space(8.0);
+
+            // Category tag badge (double-click to reset lane) — matches pads view exactly
+            let tag_color = if is_muted { cat_color.linear_multiply(0.3) } else { cat_color };
+            let tag_size = Vec2::new(46.0, 16.0);
+            let label_resp = ui.allocate_ui(Vec2::new(46.0, row_height), |ui| {
+                ui.centered_and_justified(|ui| {
+                    let (tag_rect, _) = ui.allocate_exact_size(tag_size, egui::Sense::hover());
+                    if ui.is_rect_visible(tag_rect) {
+                        let painter = ui.painter_at(tag_rect);
+                        painter.rect_filled(tag_rect, 2.0, tag_color);
+                        painter.text(
+                            tag_rect.center(),
+                            Align2::CENTER_CENTER,
+                            lane.category.label(),
+                            FontId::new(8.0, egui::FontFamily::Monospace),
+                            theme::BG_MAIN,
+                        );
+                    }
+                })
             });
+            let label_rect = label_resp.response.rect;
+            let label_interact = ui.interact(label_rect, egui::Id::new(("lane_label_dblclick", lane_idx)), egui::Sense::click());
+            if label_interact.double_clicked() {
+                actions.push(SeqAction::ResetLane { lane: lane_idx });
+            }
+
+            ui.add_space(4.0);
+            ui.spacing_mut().item_spacing.x = 2.0;
 
             // Mute button
             let mute_text = egui::RichText::new("M").font(FontId::monospace(7.0));
@@ -327,19 +354,22 @@ fn draw_grid(
                 let bg = if is_muted { bg.linear_multiply(0.3) } else { bg };
                 ui.painter().rect_filled(rect, 3.0, bg);
 
-                // Velocity bar
+                // Active step fill — velocity controls brightness/saturation
                 if step.enabled {
-                    let bar_height = rect.height() * step.velocity * (if is_muted { 0.3 } else { 1.0 });
-                    let bar_rect = Rect::from_min_size(
-                        Pos2::new(rect.left() + rect.width() * 0.15, rect.bottom() - bar_height),
-                        Vec2::new(rect.width() * 0.7, bar_height),
+                    let pad = 2.0;
+                    let inner = Rect::from_min_max(
+                        Pos2::new(rect.left() + pad, rect.top() + pad),
+                        Pos2::new(rect.right() - pad, rect.bottom() - pad),
                     );
-                    let bar_color = if step.condition != ConditionTrig::Always {
-                        cat_color.linear_multiply(0.35)
+                    let vel = step.velocity * (if is_muted { 0.3 } else { 1.0 });
+                    // Velocity dims the color: low vel = dark/desaturated, high vel = full color
+                    let fill_alpha = 0.15 + vel * 0.85;
+                    let fill_color = if step.condition != ConditionTrig::Always {
+                        cat_color.linear_multiply(fill_alpha * 0.35)
                     } else {
-                        cat_color
+                        cat_color.linear_multiply(fill_alpha)
                     };
-                    ui.painter().rect_filled(bar_rect, 1.0, bar_color);
+                    ui.painter().rect_filled(inner, 2.0, fill_color);
                 }
 
                 // P-lock dot (top-left)
@@ -371,12 +401,29 @@ fn draw_grid(
                 let pointer_pos = ui.input(|i| i.pointer.hover_pos());
                 let is_hovered = pointer_pos.map_or(false, |p| rect.contains(p));
 
-                // Selection border
+                // Glow borders: green=active, red=muted, purple=selected
                 if is_selected {
+                    let purple = Color32::from_rgb(180, 100, 255);
                     ui.painter().rect_stroke(
                         rect,
                         3.0,
-                        Stroke::new(1.5, theme::ACCENT),
+                        Stroke::new(1.5, purple),
+                        egui::StrokeKind::Inside,
+                    );
+                } else if step.enabled && is_muted {
+                    let red = Color32::from_rgb(200, 60, 60);
+                    ui.painter().rect_stroke(
+                        rect,
+                        3.0,
+                        Stroke::new(1.0, red.linear_multiply(0.5)),
+                        egui::StrokeKind::Inside,
+                    );
+                } else if step.enabled {
+                    let green = Color32::from_rgb(50, 200, 100);
+                    ui.painter().rect_stroke(
+                        rect,
+                        3.0,
+                        Stroke::new(1.0, green.linear_multiply(0.35)),
                         egui::StrokeKind::Inside,
                     );
                 } else {
@@ -409,7 +456,10 @@ fn draw_grid(
 
                 // Click (release without significant drag): toggle step.
                 // Suppress if a drag mode was committed to prevent double-toggle.
-                if response.clicked() && view_state.drag_paint.is_none()
+                // Double-click: reset step to defaults
+                if response.double_clicked() {
+                    actions.push(SeqAction::ResetStep { lane: lane_idx, step: step_idx });
+                } else if response.clicked() && view_state.drag_paint.is_none()
                     && !view_state.drag_is_velocity && !had_active_drag
                 {
                     let new_state = !step.enabled;
@@ -489,150 +539,147 @@ fn draw_grid(
         ui.ctx().request_repaint();
     }
 
-    actions
+    (actions, GridLayout { grid_right_x })
 }
 
-fn draw_param_bar(
+/// Draw step parameter knobs inline (no wrapper horizontal — caller provides one).
+fn draw_param_controls(
     ui: &mut egui::Ui,
     lane_idx: usize,
     step_idx: usize,
     step: &StepDisplay,
     category: SampleCategory,
-) -> Option<SeqAction> {
-    let mut action = None;
+) -> Vec<SeqAction> {
+    let mut actions = Vec::new();
     let cat_color = theme::category_color32(category);
 
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 12.0;
+    // Step indicator
+    ui.label(
+        egui::RichText::new(format!("STEP {}", step_idx + 1))
+            .font(FontId::monospace(11.0))
+            .color(theme::ACCENT)
+            .strong(),
+    );
 
-        // Step indicator
-        ui.label(
-            egui::RichText::new(format!("STEP {}", step_idx + 1))
-                .font(FontId::monospace(11.0))
-                .color(theme::ACCENT)
-                .strong(),
-        );
+    // VEL knob
+    let mut vel = step.velocity;
+    let vel_resp = knob::knob(
+        ui,
+        egui::Id::new(("seq_vel", lane_idx, step_idx)),
+        &mut vel,
+        0.0, 1.0, 0.8,
+        "VEL",
+        |v| format!("{}", (v * 100.0) as u8),
+        cat_color,
+        34.0,
+    );
+    if vel_resp.changed {
+        actions.push(SeqAction::SetStepVelocity { lane: lane_idx, step: step_idx, value: vel });
+    }
+    if vel_resp.reset {
+        actions.push(SeqAction::SetStepVelocity { lane: lane_idx, step: step_idx, value: 0.8 });
+    }
 
-        // VEL knob
-        let mut vel = step.velocity;
-        let vel_resp = knob::knob(
-            ui,
-            egui::Id::new(("seq_vel", lane_idx, step_idx)),
-            &mut vel,
-            0.0, 1.0, 0.8,
-            "VEL",
-            |v| format!("{}", (v * 100.0) as u8),
-            cat_color,
-            34.0,
-        );
-        if vel_resp.changed {
-            action = Some(SeqAction::SetStepVelocity { lane: lane_idx, step: step_idx, value: vel });
-        }
-        if vel_resp.reset {
-            action = Some(SeqAction::SetStepVelocity { lane: lane_idx, step: step_idx, value: 0.8 });
-        }
+    // PAN knob
+    let mut pan = step.pan.unwrap_or(0.0);
+    let pan_color = if step.pan.is_some() { theme::PLOCK_DOT } else { Color32::from_rgb(80, 80, 80) };
+    let pan_resp = knob::knob(
+        ui,
+        egui::Id::new(("seq_pan", lane_idx, step_idx)),
+        &mut pan,
+        -1.0, 1.0, 0.0,
+        "PAN",
+        |v| {
+            if v.abs() < 0.01 { "C".to_string() }
+            else if v < 0.0 { format!("L{}", (-v * 100.0) as u8) }
+            else { format!("R{}", (v * 100.0) as u8) }
+        },
+        pan_color,
+        34.0,
+    );
+    if pan_resp.changed {
+        actions.push(SeqAction::SetStepPan { lane: lane_idx, step: step_idx, value: Some(pan) });
+    }
+    if pan_resp.reset {
+        actions.push(SeqAction::SetStepPan { lane: lane_idx, step: step_idx, value: None });
+    }
 
-        // PAN knob
-        let mut pan = step.pan.unwrap_or(0.0);
-        let pan_color = if step.pan.is_some() { theme::PLOCK_DOT } else { Color32::from_rgb(80, 80, 80) };
-        let pan_resp = knob::knob(
-            ui,
-            egui::Id::new(("seq_pan", lane_idx, step_idx)),
-            &mut pan,
-            -1.0, 1.0, 0.0,
-            "PAN",
-            |v| {
-                if v.abs() < 0.01 { "C".to_string() }
-                else if v < 0.0 { format!("L{}", (-v * 100.0) as u8) }
-                else { format!("R{}", (v * 100.0) as u8) }
-            },
-            pan_color,
-            34.0,
-        );
-        if pan_resp.changed {
-            action = Some(SeqAction::SetStepPan { lane: lane_idx, step: step_idx, value: Some(pan) });
-        }
-        if pan_resp.reset {
-            action = Some(SeqAction::SetStepPan { lane: lane_idx, step: step_idx, value: None });
-        }
+    // PITCH knob
+    let mut pitch = step.pitch.unwrap_or(0.0);
+    let pitch_color = if step.pitch.is_some() { theme::PLOCK_DOT } else { Color32::from_rgb(80, 80, 80) };
+    let pitch_resp = knob::knob(
+        ui,
+        egui::Id::new(("seq_pitch", lane_idx, step_idx)),
+        &mut pitch,
+        -24.0, 24.0, 0.0,
+        "PITCH",
+        |v| {
+            if v.abs() < 0.1 { "0".to_string() }
+            else { format!("{:+.0}", v) }
+        },
+        pitch_color,
+        34.0,
+    );
+    if pitch_resp.changed {
+        actions.push(SeqAction::SetStepPitch { lane: lane_idx, step: step_idx, value: Some(pitch) });
+    }
+    if pitch_resp.reset {
+        actions.push(SeqAction::SetStepPitch { lane: lane_idx, step: step_idx, value: None });
+    }
 
-        // PITCH knob
-        let mut pitch = step.pitch.unwrap_or(0.0);
-        let pitch_color = if step.pitch.is_some() { theme::PLOCK_DOT } else { Color32::from_rgb(80, 80, 80) };
-        let pitch_resp = knob::knob(
-            ui,
-            egui::Id::new(("seq_pitch", lane_idx, step_idx)),
-            &mut pitch,
-            -24.0, 24.0, 0.0,
-            "PITCH",
-            |v| {
-                if v.abs() < 0.1 { "0".to_string() }
-                else { format!("{:+.0}", v) }
-            },
-            pitch_color,
-            34.0,
-        );
-        if pitch_resp.changed {
-            action = Some(SeqAction::SetStepPitch { lane: lane_idx, step: step_idx, value: Some(pitch) });
-        }
-        if pitch_resp.reset {
-            action = Some(SeqAction::SetStepPitch { lane: lane_idx, step: step_idx, value: None });
-        }
+    // PROB knob
+    let mut prob = step.probability;
+    let prob_resp = knob::knob(
+        ui,
+        egui::Id::new(("seq_prob", lane_idx, step_idx)),
+        &mut prob,
+        0.0, 1.0, 1.0,
+        "PROB",
+        |v| format!("{}", (v * 100.0) as u8),
+        cat_color,
+        34.0,
+    );
+    if prob_resp.changed {
+        actions.push(SeqAction::SetStepProbability { lane: lane_idx, step: step_idx, value: prob });
+    }
+    if prob_resp.reset {
+        actions.push(SeqAction::SetStepProbability { lane: lane_idx, step: step_idx, value: 1.0 });
+    }
 
-        // PROB knob
-        let mut prob = step.probability;
-        let prob_resp = knob::knob(
-            ui,
-            egui::Id::new(("seq_prob", lane_idx, step_idx)),
-            &mut prob,
-            0.0, 1.0, 1.0,
-            "PROB",
-            |v| format!("{}", (v * 100.0) as u8),
-            cat_color,
-            34.0,
-        );
-        if prob_resp.changed {
-            action = Some(SeqAction::SetStepProbability { lane: lane_idx, step: step_idx, value: prob });
-        }
-        if prob_resp.reset {
-            action = Some(SeqAction::SetStepProbability { lane: lane_idx, step: step_idx, value: 1.0 });
-        }
-
-        // COND selector — dropdown showing all options
-        ui.vertical(|ui| {
-            let cond_text = step.condition.label();
-            let cond_color = if step.condition != ConditionTrig::Always { theme::COND_TEXT } else { theme::TEXT_DIM };
-            egui::ComboBox::from_id_salt(("seq_cond", lane_idx, step_idx))
-                .selected_text(
-                    egui::RichText::new(cond_text)
-                        .font(FontId::monospace(9.0))
-                        .color(cond_color),
-                )
-                .width(56.0)
-                .show_ui(ui, |ui| {
-                    for &cond in ConditionTrig::CYCLE {
-                        let is_active = step.condition == cond;
-                        let label_color = if is_active { theme::ACCENT } else { theme::TEXT_DIM };
-                        let resp = ui.selectable_label(
-                            is_active,
-                            egui::RichText::new(cond.label())
-                                .font(FontId::monospace(9.0))
-                                .color(label_color),
-                        );
-                        if resp.clicked() && !is_active {
-                            action = Some(SeqAction::SetStepCondition { lane: lane_idx, step: step_idx, condition: cond });
-                        }
+    // COND selector
+    ui.vertical(|ui| {
+        let cond_text = step.condition.label();
+        let cond_color = if step.condition != ConditionTrig::Always { theme::COND_TEXT } else { theme::TEXT_DIM };
+        egui::ComboBox::from_id_salt(("seq_cond", lane_idx, step_idx))
+            .selected_text(
+                egui::RichText::new(cond_text)
+                    .font(FontId::monospace(9.0))
+                    .color(cond_color),
+            )
+            .width(56.0)
+            .show_ui(ui, |ui| {
+                for &cond in ConditionTrig::CYCLE {
+                    let is_active = step.condition == cond;
+                    let label_color = if is_active { theme::ACCENT } else { theme::TEXT_DIM };
+                    let resp = ui.selectable_label(
+                        is_active,
+                        egui::RichText::new(cond.label())
+                            .font(FontId::monospace(9.0))
+                            .color(label_color),
+                    );
+                    if resp.clicked() && !is_active {
+                        actions.push(SeqAction::SetStepCondition { lane: lane_idx, step: step_idx, condition: cond });
                     }
-                });
-            ui.label(
-                egui::RichText::new("COND")
-                    .font(FontId::monospace(8.0))
-                    .color(theme::TEXT_DIM),
-            );
-        });
+                }
+            });
+        ui.label(
+            egui::RichText::new("COND")
+                .font(FontId::monospace(8.0))
+                .color(theme::TEXT_DIM),
+        );
     });
 
-    action
+    actions
 }
 
 fn draw_bottom_bar(ui: &mut egui::Ui, display: &SeqDisplay) -> Option<SeqAction> {
@@ -654,6 +701,18 @@ fn draw_bottom_bar(ui: &mut egui::Ui, display: &SeqDisplay) -> Option<SeqAction>
             .corner_radius(3.0),
         ).clicked() {
             action = Some(SeqAction::ToggleInternalPlay);
+        }
+
+        // EXT indicator — shown when echo suppression is active
+        if display.ext_mode {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new("EXT")
+                        .font(FontId::monospace(10.0))
+                        .color(Color32::from_rgb(255, 165, 0))
+                        .strong()
+                )
+            );
         }
 
         ui.separator();

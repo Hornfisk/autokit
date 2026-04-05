@@ -71,10 +71,12 @@ Audio Unit (AU) is not supported. Most macOS DAWs (Ableton, Bitwig, REAPER, Reno
 - **Sample analysis** — recursive library scan with spectral classification. Results are cached for fast startup.
 - **8-pad drum kit** — kick x2, snare, hihat, clap, perc, cymbal, tom. Per-pad volume, pan, pitch, and decay.
 - **2D sample map** — scatter plot by spectral centroid (x) and decay time (y). Zoom, pan, hover to preview, click to assign.
-- **Step sequencer** — 16-step, 8-track grid with per-step velocity, probability, pan/pitch p-locks, and conditional trigs (1:2, 1:4, Fill, etc.). 16 patterns, swing, FILL mode, DICE randomization.
+- **Step sequencer** — 16-step, 8-track grid with per-step velocity, probability, pan/pitch p-locks, and conditional trigs (1:2, 1:4, Fill, etc.). 16 patterns, swing, FILL mode, DICE randomization. Solo and mute per track, velocity drag-painting.
+- **Host transport sync** — sequencer locks to host position every buffer with no drift. Missed steps are caught up in order. Also runs standalone with internal transport.
+- **MIDI echo detection** — automatically suppresses doubled playback when the host routes sequencer output back as input.
+- **DAW state persistence** — kit and pattern state saved with the DAW session and restored on project load.
 - **Undo/redo** — 64-deep snapshot history covering kit and sequencer state.
-- **Presets** — save/load JSON presets.
-- **Standalone + plugin** — runs as a desktop app with internal transport, or syncs to host tempo in a DAW.
+- **Presets** — save/load JSON presets. MIDI pattern export.
 
 ## Usage
 
@@ -171,7 +173,6 @@ Run `./install.sh` (Linux/macOS) or `install.bat` (Windows) to copy plugins to s
 
 - Sample library path is hardcoded to `~/Music/Samples`. Configurable path is planned.
 - No Audio Unit (AU) support (nih-plug limitation).
-- Standalone uses internal timing only; does not sync to host transport in a DAW.
 - Window is not dynamically resizable (egui-baseview limitation).
 
 ## Dependencies

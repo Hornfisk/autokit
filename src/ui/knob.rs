@@ -42,15 +42,35 @@ pub fn knob(
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
         let response = response.on_hover_cursor(egui::CursorIcon::ResizeVertical);
 
-        // Ctrl+click to reset
-        if response.clicked() && ui.input(|i| i.modifiers.ctrl) {
+        // Double-click detection from raw pointer events. egui-baseview
+        // doesn't provide click_count in PointerButton events, so egui's
+        // built-in double_clicked() never fires. We detect press events on
+        // the knob rect manually and track timestamps.
+        let dbl_id = response.id.with("last_press");
+        let pointer_pressed_on_knob = ui.input(|i| {
+            i.events.iter().any(|e| matches!(
+                e,
+                egui::Event::PointerButton { pressed: true, button: egui::PointerButton::Primary, .. }
+            ))
+        }) && response.contains_pointer();
+        let is_double_click = if pointer_pressed_on_knob {
+            let now = ui.input(|i| i.time);
+            let prev: f64 = ui.data(|d| d.get_temp(dbl_id).unwrap_or(0.0));
+            ui.data_mut(|d| d.insert_temp(dbl_id, now));
+            now - prev < 0.4
+        } else {
+            false
+        };
+
+        // Double-click or ctrl+click to reset
+        if is_double_click || (response.clicked() && ui.input(|i| i.modifiers.ctrl)) {
             *value = default;
             result.changed = true;
             result.reset = true;
         }
 
-        // Vertical drag to change value
-        if response.dragged() {
+        // Vertical drag to change value (skip if resetting via double-click)
+        if response.dragged() && !is_double_click {
             let delta = -response.drag_delta().y;
             let speed = if ui.input(|i| i.modifiers.shift) {
                 0.001 // Fine control
@@ -61,11 +81,11 @@ pub fn knob(
             result.changed = true;
         }
 
-        // Paint the knob
+        // Paint the knob (use ui.painter() to avoid clipping the stroke at rect edges)
         if ui.is_rect_visible(rect) {
-            let painter = ui.painter_at(rect);
+            let painter = ui.painter();
             let center = rect.center();
-            let radius = diameter / 2.0 - 1.0;
+            let radius = diameter / 2.0 - 2.0;
 
             // Ring
             painter.circle_stroke(center, radius, egui::Stroke::new(2.0, ring_color));

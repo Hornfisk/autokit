@@ -11,11 +11,13 @@ use crossbeam_channel::Receiver;
 use crate::engine::kit::NUM_PADS;
 
 use crate::analysis::library::SampleLibrary;
+use crate::engine::echo_detect::EchoDetector;
 use crate::engine::sampler::VoicePool;
 use crate::engine::sequencer::Sequencer;
 use crate::logging;
 use crate::ui::state::{ScanStatus, SharedState};
 use crate::util::history::HistorySnapshot;
+use crate::util::preset;
 
 /// Hard-coded sample library root — folder picker comes in GUI phase.
 const SAMPLE_LIBRARY_ROOT: &str = "/home/natalia/Music/Samples";
@@ -25,8 +27,12 @@ const WAVEFORM_POINTS: usize = 200;
 
 #[derive(Params)]
 pub struct AutokitParams {
-    #[persist = "editor-state"]
+    #[persist = "editor-state-v2"]
     pub editor_state: Arc<EguiState>,
+
+    /// Serialized kit + pattern state for DAW save/load persistence.
+    #[persist = "plugin-state"]
+    pub plugin_state: Arc<parking_lot::Mutex<String>>,
 
     #[id = "master_vol"]
     pub master_volume: FloatParam,
@@ -35,7 +41,8 @@ pub struct AutokitParams {
 impl Default for AutokitParams {
     fn default() -> Self {
         Self {
-            editor_state: EguiState::from_size(960, 540),
+            editor_state: EguiState::from_size(1060, 540),
+            plugin_state: Arc::new(parking_lot::Mutex::new(String::new())),
             master_volume: FloatParam::new(
                 "Master Volume",
                 util::db_to_gain(0.0),
@@ -127,8 +134,16 @@ pub struct Autokit {
     /// Internal play toggle — written by GUI, read by audio thread.
     /// When true, sequencer runs even without host transport (free-running at current tempo).
     pub seq_internal_play: Arc<AtomicBool>,
+    /// Detects MIDI echo from host and suppresses doubled playback.
+    echo_detector: EchoDetector,
+    /// Whether echo suppression is active — read by GUI for "EXT" indicator.
+    pub seq_ext_mode: Arc<AtomicBool>,
     /// Internal beat counter for free-running mode (samples elapsed).
     seq_internal_samples: u64,
+    /// Counter for periodic state persistence (~1s intervals).
+    persist_counter: u64,
+    /// Whether initial state restoration is complete — blocks persist until then.
+    state_restored: bool,
     /// Debug: counts process() calls to log periodic status.
     #[cfg(debug_assertions)]
     process_count: u64,
@@ -151,7 +166,11 @@ impl Default for Autokit {
             seq_active_pattern: Arc::new(AtomicUsize::new(0)),
             seq_fill_active: Arc::new(AtomicBool::new(false)),
             seq_internal_play: Arc::new(AtomicBool::new(false)),
+            echo_detector: EchoDetector::new(),
+            seq_ext_mode: Arc::new(AtomicBool::new(false)),
             seq_internal_samples: 0,
+            persist_counter: 0,
+            state_restored: false,
             #[cfg(debug_assertions)]
             process_count: 0,
         }
@@ -240,6 +259,7 @@ impl Plugin for Autokit {
             Arc::clone(&self.seq_active_pattern),
             Arc::clone(&self.seq_fill_active),
             Arc::clone(&self.seq_internal_play),
+            Arc::clone(&self.seq_ext_mode),
         );
         tracing::info!("editor() result: {}", if result.is_some() { "Some" } else { "None" });
         result
@@ -307,10 +327,34 @@ impl Plugin for Autokit {
                             };
                             shared.history.push(snapshot);
                             shared.library = Some(library);
-                            populate_kit_from_library(&mut shared);
+
+                            // Check for persisted state from DAW save/load
+                            let persisted = self.params.plugin_state.lock().clone();
+                            tracing::info!(
+                                persisted_len = persisted.len(),
+                                "checking for persisted plugin state"
+                            );
+                            if !persisted.is_empty() {
+                                match serde_json::from_str::<preset::Preset>(&persisted) {
+                                    Ok(p) => {
+                                        tracing::info!("restoring persisted kit+patterns");
+                                        let s = &mut *shared;
+                                        preset::apply_to_kit(&p, &mut s.kit, &mut s.pattern_bank);
+                                        shared.update_all_waveforms(WAVEFORM_POINTS);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("failed to parse persisted state: {e}");
+                                        populate_kit_from_library(&mut shared);
+                                    }
+                                }
+                            } else {
+                                populate_kit_from_library(&mut shared);
+                            }
+
                             shared.scan_status = ScanStatus::Ready {
                                 total: shared.library.as_ref().map(|l| l.total).unwrap_or(0),
                             };
+                            self.state_restored = true;
                         }
                     }
                 });
@@ -356,27 +400,8 @@ impl Plugin for Autokit {
         // which would otherwise trigger assert_no_alloc panic.
         let got_lock = permit_alloc(|| self.shared.try_lock());
         if let Some(mut shared) = got_lock {
-            // Drain MIDI events and trigger voices
-            while let Some(event) = context.next_event() {
-                match event {
-                    NoteEvent::NoteOn { note, velocity, .. } => {
-                        if let Some(pad_idx) = shared.kit.pad_for_note(note) {
-                            voices.trigger(pad_idx, velocity, &shared.kit, 0, None, None);
-                            self.trigger_flags[pad_idx].fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-                    NoteEvent::NoteOff { .. } => {}
-                    _ => {}
-                }
-            }
-
-            // Check GUI trigger requests (keyboard/click-to-play)
-            for i in 0..NUM_PADS {
-                if self.gui_triggers[i].swap(0, Ordering::Relaxed) != 0 {
-                    voices.trigger(i, 0.8, &shared.kit, 0, None, None);
-                    self.trigger_flags[i].fetch_add(1, Ordering::Relaxed);
-                }
-            }
+            // Advance echo detector clock
+            self.echo_detector.tick(num_samples);
 
             // Check for preview sample request
             if let Some(preview_data) = shared.preview_sample.take() {
@@ -409,12 +434,15 @@ impl Plugin for Autokit {
                 (false, transport.tempo, None)
             };
 
+            // --- Sequencer fires FIRST so echo detector can record outgoing notes ---
             // Capture trigger counts before sequencer runs
             let pre_triggers: [u8; NUM_PADS] = core::array::from_fn(|i| {
                 self.trigger_flags[i].load(Ordering::Relaxed)
             });
 
             // Run sequencer with pattern data from SharedState
+            // Split borrow: kit (immutable) and pattern_bank (mutable) are separate fields
+            let shared_ref = &mut *shared;
             self.sequencer.process_buffer_with_patterns(
                 num_samples,
                 playing,
@@ -422,12 +450,12 @@ impl Plugin for Autokit {
                 pos_beats,
                 self.sample_rate,
                 voices,
-                &shared.kit,
-                &shared.pattern_bank,
+                &shared_ref.kit,
+                &mut shared_ref.pattern_bank,
                 &self.trigger_flags,
             );
 
-            // Send MIDI output for any new triggers so the host can record pattern data
+            // Send MIDI output and record in echo detector BEFORE processing incoming MIDI
             for i in 0..NUM_PADS {
                 let post = self.trigger_flags[i].load(Ordering::Relaxed);
                 if post != pre_triggers[i] {
@@ -441,6 +469,7 @@ impl Plugin for Autokit {
                             0.8
                         }
                     };
+                    self.echo_detector.record(note);
                     context.send_event(NoteEvent::NoteOn {
                         timing: 0,
                         voice_id: None,
@@ -458,37 +487,70 @@ impl Plugin for Autokit {
                 }
             }
 
+            // --- Now process incoming MIDI — echoed notes will be suppressed ---
+            while let Some(event) = context.next_event() {
+                match event {
+                    NoteEvent::NoteOn { note, velocity, .. } => {
+                        if let Some(pad_idx) = shared.kit.pad_for_note(note) {
+                            if !self.echo_detector.check(note) {
+                                voices.trigger(pad_idx, velocity, &shared.kit, 0, None, None);
+                                self.trigger_flags[pad_idx].fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    NoteEvent::NoteOff { .. } => {}
+                    _ => {}
+                }
+            }
+
+            // Check GUI trigger requests (keyboard/click-to-play)
+            for i in 0..NUM_PADS {
+                if self.gui_triggers[i].swap(0, Ordering::Relaxed) != 0 {
+                    voices.trigger(i, 0.8, &shared.kit, 0, None, None);
+                    self.trigger_flags[i].fetch_add(1, Ordering::Relaxed);
+                }
+            }
+
+            // Sync echo suppression state for GUI
+            self.seq_ext_mode.store(self.echo_detector.is_suppressing(), Ordering::Relaxed);
+
+            // Periodic state persistence for DAW save/load (~every 1s)
+            // Guard: don't persist until library has loaded and state is restored,
+            // otherwise we overwrite the DAW-saved state with empty defaults.
+            if self.state_restored {
+            self.persist_counter += num_samples as u64;
+            }
+            if self.state_restored && self.persist_counter >= self.sample_rate as u64 {
+                self.persist_counter = 0;
+                permit_alloc(|| {
+                    let p = preset::from_kit("_daw_state", &shared.kit, &shared.pattern_bank);
+                    if let Ok(json) = serde_json::to_string(&p) {
+                        *self.params.plugin_state.lock() = json;
+                    }
+                });
+            }
+
             // Write playback state for GUI
             self.seq_current_step.store(self.sequencer.current_step(), Ordering::Relaxed);
             self.seq_playing.store(self.sequencer.is_playing(), Ordering::Relaxed);
             self.seq_active_pattern.store(shared.pattern_bank.active, Ordering::Relaxed);
 
-            let channels = buffer.as_slice();
-            if channels.len() >= 2 {
-                let (left_channels, right_channels) = channels.split_at_mut(1);
-                let output_left = &mut left_channels[0][..num_samples];
-                let output_right = &mut right_channels[0][..num_samples];
-                output_left.fill(0.0);
-                output_right.fill(0.0);
-                voices.process(output_left, output_right, &shared.kit);
-                // Mix preview voice
-                self.preview_voice.process(output_left, output_right);
-            }
             // permit_alloc for drop: parking_lot unlock_slow() may allocate.
             permit_alloc(|| drop(shared));
-        } else {
-            // GUI holds the lock — output silence this buffer.
-            let channels = buffer.as_slice();
-            if channels.len() >= 2 {
-                let (left_channels, right_channels) = channels.split_at_mut(1);
-                left_channels[0][..num_samples].fill(0.0);
-                right_channels[0][..num_samples].fill(0.0);
-                // Preview voice can still play even without shared state lock
-                self.preview_voice.process(
-                    &mut left_channels[0][..num_samples],
-                    &mut right_channels[0][..num_samples],
-                );
-            }
+        }
+
+        // Render voices OUTSIDE the lock — pan is cached at trigger time,
+        // so voices never need the kit reference. No more silence on lock contention.
+        let channels = buffer.as_slice();
+        if channels.len() >= 2 {
+            let (left_channels, right_channels) = channels.split_at_mut(1);
+            let output_left = &mut left_channels[0][..num_samples];
+            let output_right = &mut right_channels[0][..num_samples];
+            output_left.fill(0.0);
+            output_right.fill(0.0);
+            voices.process(output_left, output_right);
+            // Mix preview voice
+            self.preview_voice.process(output_left, output_right);
         }
 
         // Apply master volume per-sample for smooth transitions

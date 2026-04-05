@@ -37,8 +37,8 @@ struct Voice {
     max_samples: usize,
     /// Output samples rendered so far (for decay cutoff tracking).
     samples_rendered: usize,
-    /// Per-step pan override (from sequencer p-lock). None = use pad's pan.
-    pan_override: Option<f32>,
+    /// Effective pan value, resolved at trigger time (pad pan or p-lock override).
+    pan: f32,
 }
 
 impl Voice {
@@ -55,7 +55,7 @@ impl Voice {
             start_offset: 0,
             max_samples: usize::MAX,
             samples_rendered: 0,
-            pan_override: None,
+            pan: 0.0,
         }
     }
 
@@ -203,7 +203,7 @@ impl VoicePool {
         voice.fade_length = self.fade_samples;
         voice.start_offset = start_offset;
         voice.samples_rendered = 0;
-        voice.pan_override = pan_override;
+        voice.pan = pan_override.unwrap_or(pad.pan);
         let sample_len = sample.len();
         voice.max_samples = if pad.decay >= 1.0 {
             usize::MAX
@@ -232,16 +232,14 @@ impl VoicePool {
     }
 
     /// Mix all active voices into the output buffer.
-    /// `kit` provides per-pad pan values.
-    pub fn process(&mut self, output_left: &mut [f32], output_right: &mut [f32], kit: &DrumKit) {
+    /// Pan values are resolved at trigger time — no kit reference needed.
+    pub fn process(&mut self, output_left: &mut [f32], output_right: &mut [f32]) {
         for voice in self.voices.iter_mut() {
             if !voice.is_active() {
                 continue;
             }
 
-            let pan = voice.pan_override.unwrap_or_else(|| {
-                voice.pad_index.map(|i| kit.pads[i].pan).unwrap_or(0.0)
-            });
+            let pan = voice.pan;
 
             for (i, (l, r)) in output_left.iter_mut().zip(output_right.iter_mut()).enumerate() {
                 if i < voice.start_offset {
@@ -296,7 +294,7 @@ mod tests {
 
         let mut left = vec![0.0f32; 8];
         let mut right = vec![0.0f32; 8];
-        pool.process(&mut left, &mut right, &kit);
+        pool.process(&mut left, &mut right);
 
         // Pan center: constant-power pan gives cos(PI/4) ≈ 0.7071
         let expected = (0.25 * std::f32::consts::PI).cos();
@@ -312,7 +310,7 @@ mod tests {
 
         let mut left = vec![0.0f32; 12];
         let mut right = vec![0.0f32; 12];
-        pool.process(&mut left, &mut right, &kit);
+        pool.process(&mut left, &mut right);
 
         // Samples 0..4 should be silent
         for i in 0..4 {
@@ -338,13 +336,13 @@ mod tests {
         // First buffer: 8 samples, offset should apply (0..4 silent)
         let mut left1 = vec![0.0f32; 8];
         let mut right1 = vec![0.0f32; 8];
-        pool.process(&mut left1, &mut right1, &kit);
+        pool.process(&mut left1, &mut right1);
         assert_eq!(left1[0], 0.0, "first buffer: sample 0 should be silent");
 
         // Second buffer: offset should be reset, audio starts at sample 0
         let mut left2 = vec![0.0f32; 8];
         let mut right2 = vec![0.0f32; 8];
-        pool.process(&mut left2, &mut right2, &kit);
+        pool.process(&mut left2, &mut right2);
         let expected = (0.25 * std::f32::consts::PI).cos();
         assert!((left2[0] - expected).abs() < 0.001, "second buffer: sample 0 should have audio (offset reset)");
     }
@@ -359,21 +357,21 @@ mod tests {
         pool.trigger(0, 1.0, &kit, 0, None, None);
         let mut left_full = vec![0.0f32; 4];
         let mut right_full = vec![0.0f32; 4];
-        pool.process(&mut left_full, &mut right_full, &kit);
+        pool.process(&mut left_full, &mut right_full);
 
         // Half velocity
         let mut pool = VoicePool::new(44100.0);
         pool.trigger(0, 0.5, &kit, 0, None, None);
         let mut left_half = vec![0.0f32; 4];
         let mut right_half = vec![0.0f32; 4];
-        pool.process(&mut left_half, &mut right_half, &kit);
+        pool.process(&mut left_half, &mut right_half);
 
         // Zero velocity
         let mut pool = VoicePool::new(44100.0);
         pool.trigger(0, 0.0, &kit, 0, None, None);
         let mut left_zero = vec![0.0f32; 4];
         let mut right_zero = vec![0.0f32; 4];
-        pool.process(&mut left_zero, &mut right_zero, &kit);
+        pool.process(&mut left_zero, &mut right_zero);
 
         // Full velocity should give pan_gain (sample=1.0 * vel=1.0 * pan)
         assert!((left_full[0] - pan_gain).abs() < 0.001,

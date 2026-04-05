@@ -105,172 +105,170 @@ pub fn draw_toolbar_snapshot(
                         .color(theme::ACCENT));
                 }
 
-                // Reserve space for right-aligned toolbar items.
-                // Underestimating this constant clips right-side items;
-                // overestimating wastes space but is harmless.
-                const RIGHT_SIDE_BUDGET: f32 = 580.0;
-                let spacer = (ui.available_width() - RIGHT_SIDE_BUDGET).max(0.0);
-                ui.add_space(spacer);
+                // Right-aligned toolbar items — anchored to the right edge
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
 
-                // Undo
-                let undo_color = if can_undo { theme::TEXT_DIM } else { theme::TEXT_DISABLED };
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new("UNDO")
-                                .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                                .color(undo_color),
-                        )
-                        .fill(theme::BG_ROW)
-                        .min_size(egui::vec2(44.0, 22.0)),
-                    )
-                    .clicked()
-                    && can_undo
-                {
-                    action = ToolbarAction::Undo;
-                }
-
-                // Redo
-                let redo_color = if can_redo { theme::TEXT_DIM } else { theme::TEXT_DISABLED };
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new("REDO")
-                                .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                                .color(redo_color),
-                        )
-                        .fill(theme::BG_ROW)
-                        .min_size(egui::vec2(44.0, 22.0)),
-                    )
-                    .clicked()
-                    && can_redo
-                {
-                    action = ToolbarAction::Redo;
-                }
-
-                ui.add(egui::Separator::default().vertical().spacing(4.0));
-
-                // Dice All
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new("DICE ALL")
-                                .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                                .color(theme::ACCENT)
-                                .strong(),
-                        )
-                        .fill(theme::ACCENT_DIM)
-                        .min_size(egui::vec2(60.0, 22.0)),
-                    )
-                    .clicked()
-                {
-                    action = ToolbarAction::DiceAll;
-                }
-
-                // Lock All
-                let lock_label = if all_locked { "UNLOCK ALL" } else { "LOCK ALL" };
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new(lock_label)
+                    // Scale selector (rightmost)
+                    let scale_label = format!("{}%", (current_scale * 100.0) as u32);
+                    egui::ComboBox::from_id_salt("scale")
+                        .selected_text(
+                            egui::RichText::new(&scale_label)
                                 .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
                                 .color(theme::TEXT_DIM),
                         )
-                        .fill(theme::BG_ROW)
-                        .min_size(egui::vec2(60.0, 22.0)),
-                    )
-                    .clicked()
-                {
-                    action = ToolbarAction::LockAll;
-                }
-
-                ui.add(egui::Separator::default().vertical().spacing(4.0));
-
-                // Save preset
-                let save_color = egui::Color32::from_rgb(0x74, 0xb9, 0xff); // blue
-                let save_dim = egui::Color32::from_rgba_premultiplied(0x1c, 0x2e, 0x44, 0x44);
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new("SAVE")
-                                .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                                .color(save_color)
-                                .strong(),
-                        )
-                        .fill(save_dim)
-                        .min_size(egui::vec2(44.0, 22.0)),
-                    )
-                    .clicked()
-                {
-                    action = ToolbarAction::OpenSaveDialog;
-                }
-
-                // Load preset
-                let load_color = egui::Color32::from_rgb(0xff, 0x9f, 0x43); // orange
-                let load_dim = egui::Color32::from_rgba_premultiplied(0x44, 0x28, 0x10, 0x44);
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new("LOAD")
-                                .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                                .color(load_color)
-                                .strong(),
-                        )
-                        .fill(load_dim)
-                        .min_size(egui::vec2(44.0, 22.0)),
-                    )
-                    .clicked()
-                {
-                    action = ToolbarAction::OpenLoadDialog;
-                }
-
-                ui.add(egui::Separator::default().vertical().spacing(4.0));
-
-                // Master volume
-                ui.label(
-                    egui::RichText::new("MASTER")
-                        .font(egui::FontId::new(8.0, egui::FontFamily::Monospace))
-                        .color(theme::TEXT_DISABLED),
-                );
-
-                let mut gain_db = util::gain_to_db(params.master_volume.value());
-                let slider = egui::Slider::new(&mut gain_db, -60.0..=6.0)
-                    .show_value(false)
-                    .trailing_fill(true);
-                if ui.add(slider).changed() {
-                    setter.begin_set_parameter(&params.master_volume);
-                    setter.set_parameter(&params.master_volume, util::db_to_gain(gain_db));
-                    setter.end_set_parameter(&params.master_volume);
-                }
-
-                ui.label(
-                    egui::RichText::new(format!("{gain_db:.1}dB"))
-                        .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                        .color(theme::ACCENT),
-                );
-
-                ui.add_space(4.0);
-
-                // Scale selector
-                let scale_label = format!("{}%", (current_scale * 100.0) as u32);
-                egui::ComboBox::from_id_salt("scale")
-                    .selected_text(
-                        egui::RichText::new(&scale_label)
-                            .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                            .color(theme::TEXT_DIM),
-                    )
-                    .width(50.0)
-                    .show_ui(ui, |ui| {
-                        for &s in &[0.75f32, 1.0, 1.25, 1.5] {
-                            let label = format!("{}%", (s * 100.0) as u32);
-                            if ui
-                                .selectable_label((current_scale - s).abs() < 0.01, &label)
-                                .clicked()
-                            {
-                                action = ToolbarAction::SetScale(s);
+                        .width(50.0)
+                        .show_ui(ui, |ui| {
+                            for &s in &[0.75f32, 1.0, 1.25, 1.5] {
+                                let label = format!("{}%", (s * 100.0) as u32);
+                                if ui
+                                    .selectable_label((current_scale - s).abs() < 0.01, &label)
+                                    .clicked()
+                                {
+                                    action = ToolbarAction::SetScale(s);
+                                }
                             }
-                        }
-                    });
+                        });
+
+                    // Master volume dB label
+                    let gain_db_display = util::gain_to_db(params.master_volume.value());
+                    ui.label(
+                        egui::RichText::new(format!("{gain_db_display:.1}dB"))
+                            .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                            .color(theme::ACCENT),
+                    );
+
+                    // Master volume slider
+                    let mut gain_db = gain_db_display;
+                    let slider = egui::Slider::new(&mut gain_db, -60.0..=6.0)
+                        .show_value(false)
+                        .trailing_fill(true);
+                    if ui.add(slider).changed() {
+                        setter.begin_set_parameter(&params.master_volume);
+                        setter.set_parameter(&params.master_volume, util::db_to_gain(gain_db));
+                        setter.end_set_parameter(&params.master_volume);
+                    }
+
+                    ui.label(
+                        egui::RichText::new("MASTER")
+                            .font(egui::FontId::new(8.0, egui::FontFamily::Monospace))
+                            .color(theme::TEXT_DISABLED),
+                    );
+
+                    ui.add(egui::Separator::default().vertical().spacing(4.0));
+
+                    // Load preset
+                    let load_color = egui::Color32::from_rgb(0xff, 0x9f, 0x43);
+                    let load_dim = egui::Color32::from_rgba_premultiplied(0x44, 0x28, 0x10, 0x44);
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("LOAD")
+                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                    .color(load_color)
+                                    .strong(),
+                            )
+                            .fill(load_dim)
+                            .min_size(egui::vec2(44.0, 22.0)),
+                        )
+                        .clicked()
+                    {
+                        action = ToolbarAction::OpenLoadDialog;
+                    }
+
+                    // Save preset
+                    let save_color = egui::Color32::from_rgb(0x74, 0xb9, 0xff);
+                    let save_dim = egui::Color32::from_rgba_premultiplied(0x1c, 0x2e, 0x44, 0x44);
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("SAVE")
+                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                    .color(save_color)
+                                    .strong(),
+                            )
+                            .fill(save_dim)
+                            .min_size(egui::vec2(44.0, 22.0)),
+                        )
+                        .clicked()
+                    {
+                        action = ToolbarAction::OpenSaveDialog;
+                    }
+
+                    ui.add(egui::Separator::default().vertical().spacing(4.0));
+
+                    // Lock All
+                    let lock_label = if all_locked { "UNLOCK ALL" } else { "LOCK ALL" };
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(lock_label)
+                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                    .color(theme::TEXT_DIM),
+                            )
+                            .fill(theme::BG_ROW)
+                            .min_size(egui::vec2(60.0, 22.0)),
+                        )
+                        .clicked()
+                    {
+                        action = ToolbarAction::LockAll;
+                    }
+
+                    // Dice All
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("DICE ALL")
+                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                    .color(theme::ACCENT)
+                                    .strong(),
+                            )
+                            .fill(theme::ACCENT_DIM)
+                            .min_size(egui::vec2(60.0, 22.0)),
+                        )
+                        .clicked()
+                    {
+                        action = ToolbarAction::DiceAll;
+                    }
+
+                    ui.add(egui::Separator::default().vertical().spacing(4.0));
+
+                    // Redo
+                    let redo_color = if can_redo { theme::TEXT_DIM } else { theme::TEXT_DISABLED };
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("REDO")
+                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                    .color(redo_color),
+                            )
+                            .fill(theme::BG_ROW)
+                            .min_size(egui::vec2(44.0, 22.0)),
+                        )
+                        .clicked()
+                        && can_redo
+                    {
+                        action = ToolbarAction::Redo;
+                    }
+
+                    // Undo
+                    let undo_color = if can_undo { theme::TEXT_DIM } else { theme::TEXT_DISABLED };
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("UNDO")
+                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                    .color(undo_color),
+                            )
+                            .fill(theme::BG_ROW)
+                            .min_size(egui::vec2(44.0, 22.0)),
+                        )
+                        .clicked()
+                        && can_undo
+                    {
+                        action = ToolbarAction::Undo;
+                    }
+                });
             });
         });
 

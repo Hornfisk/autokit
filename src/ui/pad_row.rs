@@ -42,6 +42,7 @@ pub fn draw_collapsed_from_snapshot(
     is_selected: bool,
     play_brightness: f32,
     locked: bool,
+    row_height: f32,
 ) -> PadRowAction {
     let mut action = PadRowAction::None;
     let cat_color = category_color(category);
@@ -69,7 +70,7 @@ pub fn draw_collapsed_from_snapshot(
         })
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.set_height(34.0);
+                ui.set_height(row_height);
                 // Use clip_rect width rather than available_width() — if any
                 // earlier widget (e.g. the toolbar) overflows, egui expands
                 // max_rect beyond the viewport, making available_width() too
@@ -79,7 +80,7 @@ pub fn draw_collapsed_from_snapshot(
 
                 // Color strip (3px) — brightened on trigger
                 let (strip_rect, _) =
-                    ui.allocate_exact_size(egui::vec2(3.0, 34.0), egui::Sense::hover());
+                    ui.allocate_exact_size(egui::vec2(3.0, row_height), egui::Sense::hover());
                 let strip_color = if play_brightness > 0.0 {
                     let [r, g, b, a] = cat_egui.to_array();
                     let t = play_brightness;
@@ -96,23 +97,29 @@ pub fn draw_collapsed_from_snapshot(
                     .rect_filled(strip_rect, egui::CornerRadius::ZERO, strip_color);
 
                 ui.add_space(8.0);
-                ui.spacing_mut().item_spacing.x = 6.0;
 
-                // Category tag
+                // Category tag — vertically centered in row
                 let tag_size = egui::vec2(46.0, 16.0);
-                let (tag_rect, _) =
-                    ui.allocate_exact_size(tag_size, egui::Sense::hover());
-                if ui.is_rect_visible(tag_rect) {
-                    let painter = ui.painter_at(tag_rect);
-                    painter.rect_filled(tag_rect, 2, cat_egui);
-                    painter.text(
-                        tag_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        category.label(),
-                        egui::FontId::new(8.0, egui::FontFamily::Monospace),
-                        theme::BG_MAIN,
-                    );
-                }
+                ui.allocate_ui(egui::vec2(46.0, row_height), |ui| {
+                    ui.centered_and_justified(|ui| {
+                        let (tag_rect, _) =
+                            ui.allocate_exact_size(tag_size, egui::Sense::hover());
+                        if ui.is_rect_visible(tag_rect) {
+                            let painter = ui.painter_at(tag_rect);
+                            painter.rect_filled(tag_rect, 2, cat_egui);
+                            painter.text(
+                                tag_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                category.label(),
+                                egui::FontId::new(8.0, egui::FontFamily::Monospace),
+                                theme::BG_MAIN,
+                            );
+                        }
+                    });
+                });
+
+                ui.add_space(4.0);
+                ui.spacing_mut().item_spacing.x = 6.0;
 
                 // Play button (▶)
                 let play_response = ui.add(
@@ -122,7 +129,7 @@ pub fn draw_collapsed_from_snapshot(
                             .color(theme::ACCENT),
                     )
                     .fill(egui::Color32::TRANSPARENT)
-                    .min_size(egui::vec2(18.0, 34.0)),
+                    .min_size(egui::vec2(18.0, row_height)),
                 );
                 if play_response.clicked() {
                     action = PadRowAction::PlayPad;
@@ -153,8 +160,8 @@ pub fn draw_collapsed_from_snapshot(
 
                 // Waveform — compute from total width minus all fixed elements.
                 // Fixed: strip(3) + space(8) + tag(46) + spacing(6) + play(18+6)
-                //        + name(140+6) + vol(40+6) + dice(46+6) + lock(46) + margin(8)
-                const FIXED_W: f32 = 3.0 + 8.0 + 46.0 + 6.0 + 24.0 + 146.0 + 46.0 + 6.0 + 52.0 + 52.0;
+                //        + name(140+6) + dice(46+6) + lock(46+6)
+                const FIXED_W: f32 = 3.0 + 8.0 + 46.0 + 6.0 + 24.0 + 146.0 + 52.0 + 52.0 + 6.0 + 12.0;
                 let waveform_width = (total_w - FIXED_W).max(40.0);
                 let wf_color = cat_color.to_egui_alpha((waveform_opacity * 255.0) as u8);
                 waveform::paint_waveform(
@@ -163,24 +170,6 @@ pub fn draw_collapsed_from_snapshot(
                     wf_color,
                     egui::vec2(waveform_width, 26.0),
                 );
-
-                // Volume bar
-                let vol_size = egui::vec2(40.0, 3.0);
-                let (vol_rect, _) =
-                    ui.allocate_exact_size(vol_size, egui::Sense::hover());
-                if ui.is_rect_visible(vol_rect) {
-                    let painter = ui.painter_at(vol_rect);
-                    painter.rect_filled(vol_rect, 2, theme::BG_MAIN);
-                    let fill_width = vol_rect.width() * volume;
-                    let fill_rect = egui::Rect::from_min_size(
-                        vol_rect.min,
-                        egui::vec2(fill_width, vol_rect.height()),
-                    );
-                    let fill_color = cat_color.to_egui_alpha(0x66);
-                    let glow_rect = fill_rect.expand2(egui::vec2(0.0, 1.5));
-                    painter.rect_filled(glow_rect, 2, cat_color.to_egui_alpha(0x18));
-                    painter.rect_filled(fill_rect, 2, fill_color);
-                }
 
                 ui.add_space(6.0);
 

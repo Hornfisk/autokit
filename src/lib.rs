@@ -4,6 +4,7 @@ mod plugin;
 mod logging;
 
 mod engine {
+    pub mod echo_detect;
     pub mod kit;
     pub mod sampler;
     pub mod sequencer;

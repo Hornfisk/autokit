@@ -201,6 +201,8 @@ pub struct Sequencer {
     current_step: usize,
     tick_accumulator: f64,
     last_pos_beats: f64,
+    /// Last step derived from host position (not from accumulator advancement).
+    last_host_step: usize,
     rng: SmallRng,
     pub fill_active: bool,
     loop_count: u64,
@@ -214,6 +216,7 @@ impl Sequencer {
             current_step: 0,
             tick_accumulator: 0.0,
             last_pos_beats: 0.0,
+            last_host_step: 0,
             rng: SmallRng::from_os_rng(),
             fill_active: false,
             loop_count: 0,
@@ -281,8 +284,8 @@ impl Sequencer {
             }
         };
 
-        // Sync to host position
-        let mut fire_immediately = false;
+        // Sync to host position — always derive step from host beats (no drift accumulation)
+        let mut fire_steps: Vec<usize> = Vec::new();
         if let Some(beats) = pos_beats {
             if beats < 0.0 {
                 self.playing = false;
@@ -292,25 +295,41 @@ impl Sequencer {
             let host_step = ((sixteenths.floor() as usize) % 16) as usize;
             let frac = sixteenths.fract();
 
-            let drift = (beats - self.last_pos_beats).abs();
+            self.current_step = host_step;
+            let step_dur = self.step_duration_samples(host_step, tempo, sample_rate);
+            self.tick_accumulator = frac * step_dur;
 
-            if !self.playing || drift > 0.01 {
-                self.current_step = host_step;
-                let step_dur = self.step_duration_samples(host_step, tempo, sample_rate);
-                self.tick_accumulator = frac * step_dur;
-                if frac < 0.001 {
-                    fire_immediately = true;
+            if !self.playing {
+                fire_steps.push(host_step);
+            } else if host_step != self.last_host_step {
+                let prev = self.last_host_step;
+                let mut s = (prev + 1) % 16;
+                loop {
+                    if s == 0 {
+                        self.loop_count += 1;
+                        if let Some(queued) = self.bank.queued.take() {
+                            self.bank.active = queued;
+                        }
+                    }
+                    fire_steps.push(s);
+                    if s == host_step { break; }
+                    s = (s + 1) % 16;
                 }
             }
 
+            self.last_host_step = host_step;
             self.last_pos_beats = beats;
         }
 
         self.playing = true;
         let mut triggered = 0usize;
 
-        if fire_immediately {
+        for &step in &fire_steps {
+            self.current_step = step;
             triggered += self.fire_step(0, voices, kit, trigger_flags);
+        }
+        if let Some(&last) = fire_steps.last() {
+            self.current_step = last;
         }
 
         for sample_offset in 0..buffer_len {
@@ -320,6 +339,7 @@ impl Sequencer {
             if self.tick_accumulator >= step_dur {
                 self.tick_accumulator -= step_dur;
                 self.current_step = (self.current_step + 1) % 16;
+                self.last_host_step = self.current_step;
 
                 if self.current_step == 0 {
                     self.loop_count += 1;
@@ -332,7 +352,6 @@ impl Sequencer {
             }
         }
 
-        self.last_pos_beats += (buffer_len as f64 / sample_rate as f64) * (tempo / 60.0);
         triggered
     }
 
@@ -347,7 +366,7 @@ impl Sequencer {
         sample_rate: f32,
         voices: &mut VoicePool,
         kit: &DrumKit,
-        bank: &PatternBank,
+        bank: &mut PatternBank,
         trigger_flags: &[AtomicU8; NUM_PADS],
     ) -> usize {
         let tempo = match (host_playing, tempo) {
@@ -358,7 +377,7 @@ impl Sequencer {
             }
         };
 
-        let mut fire_immediately = false;
+        let mut fire_steps: Vec<usize> = Vec::new();
         if let Some(beats) = pos_beats {
             if beats < 0.0 {
                 self.playing = false;
@@ -368,29 +387,45 @@ impl Sequencer {
             let host_step = ((sixteenths.floor() as usize) % 16) as usize;
             let frac = sixteenths.fract();
 
-            let drift = (beats - self.last_pos_beats).abs();
+            self.current_step = host_step;
+            let step_dur = self.step_duration_with_swing(host_step, tempo, sample_rate, bank.active_pattern().swing);
+            self.tick_accumulator = frac * step_dur;
 
-            if !self.playing || drift > 0.01 {
-                // Sync: snap to host position. Fire the current step
-                // so it's not missed when playback starts mid-step.
-                let was_playing = self.playing;
-                self.current_step = host_step;
-                let step_dur = self.step_duration_with_swing(host_step, tempo, sample_rate, bank.active_pattern().swing);
-                self.tick_accumulator = frac * step_dur;
-                if !was_playing {
-                    // Fresh start — fire the step we land on
-                    fire_immediately = true;
+            if !self.playing {
+                // Fresh start — fire the step we land on
+                fire_steps.push(host_step);
+            } else if host_step != self.last_host_step {
+                // Host step changed — fire any steps we may have missed
+                // (e.g. due to GUI lock contention skipping a buffer)
+                let prev = self.last_host_step;
+                let mut s = (prev + 1) % 16;
+                loop {
+                    if s == 0 {
+                        self.loop_count += 1;
+                        if let Some(queued) = bank.queued.take() {
+                            bank.active = queued;
+                        }
+                    }
+                    fire_steps.push(s);
+                    if s == host_step { break; }
+                    s = (s + 1) % 16;
                 }
             }
 
+            self.last_host_step = host_step;
             self.last_pos_beats = beats;
         }
 
         self.playing = true;
         let mut triggered = 0usize;
 
-        if fire_immediately {
+        for &step in &fire_steps {
+            self.current_step = step;
             triggered += self.fire_step_from_bank(0, voices, kit, bank, trigger_flags);
+        }
+        // Restore current_step from host after firing missed steps
+        if let Some(&last) = fire_steps.last() {
+            self.current_step = last;
         }
 
         for sample_offset in 0..buffer_len {
@@ -400,16 +435,21 @@ impl Sequencer {
             if self.tick_accumulator >= step_dur {
                 self.tick_accumulator -= step_dur;
                 self.current_step = (self.current_step + 1) % 16;
+                // Keep last_host_step in sync so the next buffer's catch-up
+                // doesn't re-fire a step the accumulator already advanced past.
+                self.last_host_step = self.current_step;
 
                 if self.current_step == 0 {
                     self.loop_count += 1;
+                    if let Some(queued) = bank.queued.take() {
+                        bank.active = queued;
+                    }
                 }
 
                 triggered += self.fire_step_from_bank(sample_offset, voices, kit, bank, trigger_flags);
             }
         }
 
-        self.last_pos_beats += (buffer_len as f64 / sample_rate as f64) * (tempo / 60.0);
         triggered
     }
 
@@ -1024,7 +1064,7 @@ mod tests {
             internal_samples += block_size as u64;
             let triggers = seq.process_buffer_with_patterns(
                 block_size, true, Some(tempo), Some(beats), sr,
-                &mut voices, &kit, &bank, &flags,
+                &mut voices, &kit, &mut bank, &flags,
             );
             total_triggers += triggers;
         }

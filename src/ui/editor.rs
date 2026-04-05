@@ -124,6 +124,10 @@ pub struct EditorState {
     pub map_shortcut_pad: Option<usize>,
     /// Sequencer view state.
     pub seq_view: crate::ui::sequencer_ui::SeqViewState,
+    /// Timestamp (frame count) when status_message was set — used for auto-dismiss.
+    pub status_message_frame: u64,
+    /// Frame counter.
+    pub frame_count: u64,
 }
 
 impl Default for EditorState {
@@ -146,6 +150,8 @@ impl Default for EditorState {
             map_popup: sample_map::PopupState::default(),
             map_shortcut_pad: None,
             seq_view: Default::default(),
+            status_message_frame: 0,
+            frame_count: 0,
         }
     }
 }
@@ -162,6 +168,7 @@ pub fn create(
     seq_active_pattern: Arc<std::sync::atomic::AtomicUsize>,
     seq_fill_active: Arc<std::sync::atomic::AtomicBool>,
     seq_internal_play: Arc<std::sync::atomic::AtomicBool>,
+    seq_ext_mode: Arc<std::sync::atomic::AtomicBool>,
 ) -> Option<Box<dyn Editor>> {
     create_egui_editor(
         egui_state,
@@ -173,6 +180,8 @@ pub fn create(
         },
         // Update (called every frame)
         move |ctx, setter, state| {
+            state.frame_count += 1;
+
             // --- Phase 1: Brief lock to snapshot display state ---
             let snap = {
                 let shared = shared.lock();
@@ -243,7 +252,7 @@ pub fn create(
             let mut pending_actions: Vec<GuiAction> = Vec::new();
 
             egui::CentralPanel::default()
-                .frame(egui::Frame::NONE.fill(theme::BG_MAIN))
+                .frame(egui::Frame::NONE.fill(theme::BG_MAIN).inner_margin(egui::Margin { left: 8, right: 8, top: 0, bottom: 0 }))
                 .show(ctx, |ui| {
                     // Toolbar (uses snapshot data, no mutex held)
                     let all_locked = snap.pads.iter().all(|p| p.locked);
@@ -299,13 +308,57 @@ pub fn create(
                     // Separator line
                     ui.add(egui::Separator::default().spacing(0.0));
 
+                    // Shared row height — identical in both pad and seq views
+                    let shared_avail_h = ui.available_height();
+                    let shared_row_height = {
+                        let num_lanes = 8.0_f32;
+                        let cell_spacing = 2.0_f32;
+                        let vert_reserved = 112.0_f32;
+                        let vert_avail = shared_avail_h - vert_reserved;
+                        let row_from_height = ((vert_avail - cell_spacing * (num_lanes - 1.0)) / num_lanes).floor();
+                        let label_width = 61.0_f32;
+                        let controls_width = 45.0_f32;
+                        let available_w = ui.available_width() - label_width - controls_width;
+                        let cell_from_width = ((available_w - cell_spacing * 15.0) / 16.0).floor();
+                        row_from_height.min(cell_from_width).clamp(20.0, 48.0)
+                    };
+
                     match state.view_mode {
                         ViewMode::PadStrip => {
-                            // Pad list
+                            // Step number header — matches sequencer grid layout exactly
+                            {
+                                use egui::{FontId, Color32, Vec2};
+                                // Must match seq grid: label_width(61) + controls_width(45)
+                                let header_offset = 61.0 + 45.0;
+                                let cell_spacing = 2.0;
+                                ui.horizontal(|ui| {
+                                    ui.add_space(header_offset);
+                                    ui.spacing_mut().item_spacing.x = cell_spacing;
+                                    let avail_w = ui.available_width() - 4.0;
+                                    let cell_w = ((avail_w - cell_spacing * 15.0) / 16.0).floor();
+                                    for s in 0..16 {
+                                        let is_beat = s % 4 == 0;
+                                        let color = if is_beat {
+                                            crate::ui::theme::TEXT_DIM
+                                        } else {
+                                            Color32::from_rgb(51, 51, 51)
+                                        };
+                                        let text = egui::RichText::new(format!("{}", s + 1))
+                                            .font(FontId::monospace(8.0))
+                                            .color(color);
+                                        ui.allocate_ui(Vec2::new(cell_w, 12.0), |ui| {
+                                            ui.centered_and_justified(|ui| ui.label(text));
+                                        });
+                                    }
+                                });
+                            }
+
+                            // Pad list — row height matches seq grid cell_size exactly
                             egui::ScrollArea::vertical()
                                 .auto_shrink([false, false])
                                 .show(ui, |ui| {
                                     ui.spacing_mut().item_spacing.y = 2.0;
+                                    let pad_row_height = shared_row_height;
 
                                     for i in 0..NUM_PADS {
                                         let is_selected = state.selected_pad == Some(i);
@@ -315,7 +368,7 @@ pub fn create(
                                         let row_action = pad_row::draw_collapsed_from_snapshot(
                                             ui, i, pad.has_sample, &pad.name, pad.category,
                                             pad.volume, wf, is_selected, state.brightness[i],
-                                            pad.locked,
+                                            pad.locked, pad_row_height,
                                         );
 
                                         match row_action {
@@ -470,13 +523,30 @@ pub fn create(
                                         }
                                     }).collect(),
                                     swing: pat.swing,
+                                    ext_mode: seq_ext_mode.load(Ordering::Relaxed),
                                 }
                             };
+
+                            // Status message toast (export feedback etc.)
+                            if let Some(ref msg) = state.status_message {
+                                let age = state.frame_count.saturating_sub(state.status_message_frame);
+                                if age > 600 { // ~10 seconds at 60fps
+                                    state.status_message = None;
+                                } else {
+                                    let alpha = if age > 540 { ((600 - age) as f32 / 60.0 * 255.0) as u8 } else { 255 };
+                                    ui.label(
+                                        egui::RichText::new(msg)
+                                            .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
+                                            .color(egui::Color32::from_rgba_unmultiplied(0, 212, 170, alpha)),
+                                    );
+                                    ui.ctx().request_repaint();
+                                }
+                            }
 
                             {
                                 use crate::ui::sequencer_ui::SeqAction;
                                 for seq_action in crate::ui::sequencer_ui::draw_sequencer_view(
-                                    ui, &seq_display, &mut state.seq_view,
+                                    ui, &seq_display, &mut state.seq_view, shared_avail_h,
                                 ) {
                                     pending_actions.push(match seq_action {
                                         SeqAction::ToggleStep { lane, step } => GuiAction::SeqToggleStep { lane, step },
@@ -499,6 +569,8 @@ pub fn create(
                                         SeqAction::SetFillActive { active } => GuiAction::SeqSetFillActive { active },
                                         SeqAction::ToggleInternalPlay => GuiAction::SeqToggleInternalPlay,
                                         SeqAction::ExportMidi => GuiAction::SeqExportMidi,
+                                        SeqAction::ResetLane { lane } => GuiAction::SeqResetLane { lane },
+                                        SeqAction::ResetStep { lane, step } => GuiAction::SeqResetStep { lane, step },
                                     });
                                 }
                             }
@@ -883,8 +955,38 @@ pub fn create(
                     GuiAction::SeqToggleLaneLock { lane } => {
                         shared.kit.toggle_lock(lane);
                     }
+                    GuiAction::SeqResetLane { lane } => {
+                        let snap = HistorySnapshot {
+                            pads: shared.kit.snapshot(),
+                            sequencer: shared.pattern_bank.snapshot(),
+                        };
+                        shared.history.push(snap);
+                        let pat = shared.pattern_bank.active_pattern_mut();
+                        if lane < pat.lanes.len() {
+                            for step in &mut pat.lanes[lane].steps {
+                                *step = crate::engine::sequencer::Step::default();
+                            }
+                            pat.lanes[lane].muted = false;
+                            pat.lanes[lane].solo = false;
+                        }
+                    }
+                    GuiAction::SeqResetStep { lane, step } => {
+                        let pat = shared.pattern_bank.active_pattern_mut();
+                        if lane < pat.lanes.len() && step < pat.lanes[lane].steps.len() {
+                            pat.lanes[lane].steps[step] = crate::engine::sequencer::Step::default();
+                        }
+                    }
                     GuiAction::SeqSelectPattern { index } => {
-                        shared.pattern_bank.queued = Some(index);
+                        let is_playing = seq_playing.load(Ordering::Relaxed)
+                            || seq_internal_play.load(Ordering::Relaxed);
+                        if is_playing {
+                            // Queue for bar boundary switch
+                            shared.pattern_bank.queued = Some(index);
+                        } else {
+                            // Switch immediately when stopped
+                            shared.pattern_bank.active = index;
+                            shared.pattern_bank.queued = None;
+                        }
                     }
                     GuiAction::SeqSetSwing { value } => {
                         shared.pattern_bank.active_pattern_mut().swing = value;
@@ -964,10 +1066,12 @@ pub fn create(
                             Ok(path) => {
                                 tracing::info!(?path, "MIDI pattern exported");
                                 state.status_message = Some(format!("Exported: {}", path.display()));
+                                state.status_message_frame = state.frame_count;
                             }
                             Err(e) => {
                                 tracing::error!(%e, "MIDI export failed");
                                 state.status_message = Some(format!("Export failed: {e}"));
+                                state.status_message_frame = state.frame_count;
                             }
                         }
                     }
@@ -1022,6 +1126,8 @@ enum GuiAction {
     SeqSetFillActive { active: bool },
     SeqToggleInternalPlay,
     SeqExportMidi,
+    SeqResetLane { lane: usize },
+    SeqResetStep { lane: usize, step: usize },
 }
 
 /// Export the active pattern from a PatternBank as a Standard MIDI File (Type 0).
