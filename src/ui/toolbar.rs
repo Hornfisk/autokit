@@ -93,13 +93,19 @@ pub fn draw_toolbar_snapshot(
                         .min_size(egui::vec2(36.0, 22.0))
                     };
 
-                    if ui.add(tab("PADS", ViewMode::PadStrip)).clicked() && view_mode != ViewMode::PadStrip {
+                    let resp = ui.add(tab("PADS", ViewMode::PadStrip));
+                    theme::tip(resp.clone(), "Pad strip view", tooltips_on);
+                    if resp.clicked() && view_mode != ViewMode::PadStrip {
                         action = ToolbarAction::SetView(ViewMode::PadStrip);
                     }
-                    if ui.add(tab("MAP", ViewMode::SampleMap)).clicked() && view_mode != ViewMode::SampleMap {
+                    let resp = ui.add(tab("MAP", ViewMode::SampleMap));
+                    theme::tip(resp.clone(), "Sample map scatter plot", tooltips_on);
+                    if resp.clicked() && view_mode != ViewMode::SampleMap {
                         action = ToolbarAction::SetView(ViewMode::SampleMap);
                     }
-                    if ui.add(tab("SEQ", ViewMode::Sequencer)).clicked() && view_mode != ViewMode::Sequencer {
+                    let resp = ui.add(tab("SEQ", ViewMode::Sequencer));
+                    theme::tip(resp.clone(), "Step sequencer", tooltips_on);
+                    if resp.clicked() && view_mode != ViewMode::Sequencer {
                         action = ToolbarAction::SetView(ViewMode::Sequencer);
                     }
                 }
@@ -177,19 +183,17 @@ pub fn draw_toolbar_snapshot(
                         }
                     }
                     ScanStatus::Ready { total } => {
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new(format!("{total} samples"))
-                                        .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                                        .color(theme::ACCENT),
-                                )
-                                .fill(egui::Color32::TRANSPARENT)
-                                .frame(false),
+                        let resp = ui.add(
+                            egui::Button::new(
+                                egui::RichText::new(format!("{total} samples"))
+                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                    .color(theme::ACCENT),
                             )
-                            .on_hover_text("Click to change sample folder")
-                            .clicked()
-                        {
+                            .fill(egui::Color32::TRANSPARENT)
+                            .frame(false),
+                        );
+                        theme::tip(resp.clone(), "Click to change sample folder", tooltips_on);
+                        if resp.clicked() {
                             action = ToolbarAction::OpenSetup;
                         }
                     }
@@ -210,7 +214,9 @@ pub fn draw_toolbar_snapshot(
                         .speed(0.5)
                         .fixed_decimals(1)
                         .suffix(" BPM");
-                    if ui.add_sized(egui::vec2(72.0, 22.0), drag).changed() {
+                    let resp = ui.add_sized(egui::vec2(72.0, 22.0), drag);
+                    theme::tip(resp.clone(), "Tempo (BPM)", tooltips_on);
+                    if resp.changed() {
                         standalone_tempo.store((bpm * 10.0) as u32, Ordering::Relaxed);
                     }
                     ui.add(egui::Separator::default().vertical().spacing(4.0));
@@ -251,7 +257,7 @@ pub fn draw_toolbar_snapshot(
                         let lim_val = params.limiter_on.value();
                         let lim_color = if lim_val { theme::ACCENT } else { theme::TEXT_DIM };
                         let lim_bg = if lim_val { theme::ACCENT_DIM } else { theme::BG_ROW };
-                        if ui.add(
+                        let resp = ui.add(
                             egui::Button::new(
                                 egui::RichText::new("LIM")
                                     .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
@@ -260,7 +266,9 @@ pub fn draw_toolbar_snapshot(
                             )
                             .fill(lim_bg)
                             .min_size(egui::vec2(32.0, 22.0)),
-                        ).clicked() {
+                        );
+                        theme::tip(resp.clone(), "Master limiter on/off", tooltips_on);
+                        if resp.clicked() {
                             setter.begin_set_parameter(&params.limiter_on);
                             setter.set_parameter(&params.limiter_on, !lim_val);
                             setter.end_set_parameter(&params.limiter_on);
@@ -316,40 +324,36 @@ pub fn draw_toolbar_snapshot(
                     // Load preset
                     let load_color = egui::Color32::from_rgb(0xff, 0x9f, 0x43);
                     let load_dim = egui::Color32::from_rgba_premultiplied(0x44, 0x28, 0x10, 0x44);
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new("L")
-                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                                    .color(load_color)
-                                    .strong(),
-                            )
-                            .fill(load_dim)
-                            .min_size(egui::vec2(22.0, 22.0)),
+                    let resp = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new("L")
+                                .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                .color(load_color)
+                                .strong(),
                         )
-                        .on_hover_text("Load preset")
-                        .clicked()
-                    {
+                        .fill(load_dim)
+                        .min_size(egui::vec2(22.0, 22.0)),
+                    );
+                    theme::tip(resp.clone(), "Load preset", tooltips_on);
+                    if resp.clicked() {
                         action = ToolbarAction::OpenLoadDialog;
                     }
 
                     // Save preset
                     let save_color = egui::Color32::from_rgb(0x74, 0xb9, 0xff);
                     let save_dim = egui::Color32::from_rgba_premultiplied(0x1c, 0x2e, 0x44, 0x44);
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new("S")
-                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                                    .color(save_color)
-                                    .strong(),
-                            )
-                            .fill(save_dim)
-                            .min_size(egui::vec2(22.0, 22.0)),
+                    let resp = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new("S")
+                                .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                .color(save_color)
+                                .strong(),
                         )
-                        .on_hover_text("Save preset")
-                        .clicked()
-                    {
+                        .fill(save_dim)
+                        .min_size(egui::vec2(22.0, 22.0)),
+                    );
+                    theme::tip(resp.clone(), "Save preset", tooltips_on);
+                    if resp.clicked() {
                         action = ToolbarAction::OpenSaveDialog;
                     }
 
@@ -357,35 +361,33 @@ pub fn draw_toolbar_snapshot(
 
                     // Lock All
                     let lock_label = if all_locked { "UNLOCK ALL" } else { "LOCK ALL" };
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new(lock_label)
-                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                                    .color(theme::TEXT_DIM),
-                            )
-                            .fill(theme::BG_ROW)
-                            .min_size(egui::vec2(60.0, 22.0)),
+                    let resp = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new(lock_label)
+                                .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                .color(theme::TEXT_DIM),
                         )
-                        .clicked()
-                    {
+                        .fill(theme::BG_ROW)
+                        .min_size(egui::vec2(60.0, 22.0)),
+                    );
+                    theme::tip(resp.clone(), "Lock/unlock all pads (locked pads keep their sample on dice)", tooltips_on);
+                    if resp.clicked() {
                         action = ToolbarAction::LockAll;
                     }
 
                     // Dice All
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new("DICE ALL")
-                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                                    .color(theme::ACCENT)
-                                    .strong(),
-                            )
-                            .fill(theme::ACCENT_DIM)
-                            .min_size(egui::vec2(60.0, 22.0)),
+                    let resp = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new("DICE ALL")
+                                .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                .color(theme::ACCENT)
+                                .strong(),
                         )
-                        .clicked()
-                    {
+                        .fill(theme::ACCENT_DIM)
+                        .min_size(egui::vec2(60.0, 22.0)),
+                    );
+                    theme::tip(resp.clone(), "Randomize all unlocked pads", tooltips_on);
+                    if resp.clicked() {
                         action = ToolbarAction::DiceAll;
                     }
 
@@ -393,37 +395,33 @@ pub fn draw_toolbar_snapshot(
 
                     // Redo
                     let redo_color = if can_redo { theme::TEXT_DIM } else { theme::TEXT_DISABLED };
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new("REDO")
-                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                                    .color(redo_color),
-                            )
-                            .fill(theme::BG_ROW)
-                            .min_size(egui::vec2(44.0, 22.0)),
+                    let resp = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new("REDO")
+                                .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                .color(redo_color),
                         )
-                        .clicked()
-                        && can_redo
-                    {
+                        .fill(theme::BG_ROW)
+                        .min_size(egui::vec2(44.0, 22.0)),
+                    );
+                    theme::tip(resp.clone(), "Redo last undone change", tooltips_on);
+                    if resp.clicked() && can_redo {
                         action = ToolbarAction::Redo;
                     }
 
                     // Undo
                     let undo_color = if can_undo { theme::TEXT_DIM } else { theme::TEXT_DISABLED };
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new("UNDO")
-                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                                    .color(undo_color),
-                            )
-                            .fill(theme::BG_ROW)
-                            .min_size(egui::vec2(44.0, 22.0)),
+                    let resp = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new("UNDO")
+                                .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                .color(undo_color),
                         )
-                        .clicked()
-                        && can_undo
-                    {
+                        .fill(theme::BG_ROW)
+                        .min_size(egui::vec2(44.0, 22.0)),
+                    );
+                    theme::tip(resp.clone(), "Undo last change", tooltips_on);
+                    if resp.clicked() && can_undo {
                         action = ToolbarAction::Undo;
                     }
                 });
