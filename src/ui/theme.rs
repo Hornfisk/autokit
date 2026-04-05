@@ -68,13 +68,34 @@ pub const LOCK_ORANGE: egui::Color32 = egui::Color32::from_rgb(255, 159, 67); //
 pub const FILL_PURPLE: egui::Color32 = egui::Color32::from_rgb(153, 102, 255); // #9966ff
 pub const PAT_HAS_DATA: egui::Color32 = egui::Color32::from_rgb(136, 136, 136); // #888
 pub const PAT_EMPTY: egui::Color32 = egui::Color32::from_rgb(85, 85, 85);     // #555
-pub const PATTERN_BAR_BG: egui::Color32 = egui::Color32::from_rgb(12, 12, 30); // #0c0c1e
-pub const PARAM_BAR_BG: egui::Color32 = egui::Color32::from_rgb(12, 12, 30);  // #0c0c1e
 
 /// Get display color for a sample category as egui Color32.
 pub fn category_color32(cat: SampleCategory) -> egui::Color32 {
     let c = category_color(cat);
     c.to_egui()
+}
+
+// --- Layout constants ---
+
+/// Shared grid layout values used by both pad-strip and sequencer views.
+pub const CELL_SPACING: f32 = 2.0;
+/// Vertical space reserved for toolbar, headers, parameter bars, bottom controls.
+pub const GRID_VERT_RESERVED: f32 = 112.0;
+/// Width of the category color strip.
+pub const STRIP_WIDTH: f32 = 3.0;
+/// Width of the category tag badge.
+pub const TAG_WIDTH: f32 = 46.0;
+/// Width of M/S/L control buttons column.
+pub const CONTROLS_WIDTH: f32 = 45.0;
+/// Linearly interpolate a color toward white by `factor` (0.0 = original, 1.0 = white).
+pub fn brighten(color: egui::Color32, factor: f32) -> egui::Color32 {
+    let [r, g, b, a] = color.to_array();
+    egui::Color32::from_rgba_unmultiplied(
+        (r as f32 + (255.0 - r as f32) * factor) as u8,
+        (g as f32 + (255.0 - g as f32) * factor) as u8,
+        (b as f32 + (255.0 - b as f32) * factor) as u8,
+        a,
+    )
 }
 
 // Font

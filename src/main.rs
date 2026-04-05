@@ -18,6 +18,7 @@ mod analysis {
 }
 
 mod ui {
+    pub mod dialogs;
     pub mod editor;
     pub mod folder_browser;
     pub mod knob;

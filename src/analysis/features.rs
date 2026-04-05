@@ -61,7 +61,7 @@ fn compute_attack_time(samples: &[f32], sample_rate: f32) -> f32 {
     let peak_idx = samples
         .iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
+        .max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
         .map(|(i, _)| i)
         .unwrap_or(0);
 
@@ -76,7 +76,7 @@ fn compute_decay_time(samples: &[f32], sample_rate: f32, peak: f32) -> f32 {
     let peak_idx = samples
         .iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
+        .max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
         .map(|(i, _)| i)
         .unwrap_or(0);
 
@@ -115,6 +115,8 @@ fn compute_spectral_features(samples: &[f32], sample_rate: f32) -> (f32, f32) {
     let mut total_centroid = 0.0f32;
     let mut total_flatness = 0.0f32;
     let mut valid_windows = 0u32;
+    // Pre-allocate buffer outside loop to avoid per-window allocation
+    let mut buffer = vec![0.0f32; fft_size];
 
     for w in 0..num_windows {
         let start = w * hop;
@@ -122,7 +124,7 @@ fn compute_spectral_features(samples: &[f32], sample_rate: f32) -> (f32, f32) {
             break;
         }
 
-        let mut buffer: Vec<f32> = samples[start..start + fft_size].to_vec();
+        buffer.copy_from_slice(&samples[start..start + fft_size]);
 
         // Apply Hann window
         for (i, s) in buffer.iter_mut().enumerate() {

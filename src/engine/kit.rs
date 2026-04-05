@@ -157,28 +157,29 @@ impl DrumKit {
         }
     }
 
+    /// Assign an analyzed sample to a pad, updating audio data, path, name, and category.
+    /// Preserves volume, pan, pitch, decay.
+    fn assign_sample(pad: &mut DrumPad, sample: &crate::analysis::library::AnalyzedSample, used: &mut HashSet<String>) {
+        let path = sample.entry.path.to_string_lossy().to_string();
+        used.insert(path.clone());
+        pad.sample = Some(Arc::clone(&sample.data));
+        pad.sample_path = Some(path);
+        pad.name = sample.entry.filename.clone();
+        pad.category = sample.entry.category;
+    }
+
     /// Re-roll all unlocked pads from their current category.
     /// Preserves volume, pan, pitch. Avoids assigning the same sample to multiple pads.
     pub fn dice_all(&mut self, library: &SampleLibrary) {
-        // Seed exclusion set with paths from locked pads
-        let mut used: HashSet<String> = self
-            .pads
-            .iter()
+        let mut used: HashSet<String> = self.pads.iter()
             .filter(|p| p.locked)
             .filter_map(|p| p.sample_path.clone())
             .collect();
 
         for pad in &mut self.pads {
-            if pad.locked {
-                continue;
-            }
+            if pad.locked { continue; }
             if let Some(sample) = library.random_from_excluding(pad.category, &used) {
-                let path = sample.entry.path.to_string_lossy().to_string();
-                used.insert(path.clone());
-                pad.sample = Some(Arc::clone(&sample.data));
-                pad.sample_path = Some(path);
-                pad.name = sample.entry.filename.clone();
-                pad.category = sample.entry.category;
+                Self::assign_sample(pad, &sample, &mut used);
             }
         }
     }
@@ -186,16 +187,8 @@ impl DrumKit {
     /// Re-roll one specific pad. No-op if locked or out of range.
     /// Preserves volume, pan, pitch. Avoids paths already used by other pads.
     pub fn dice_pad(&mut self, index: usize, library: &SampleLibrary) {
-        if index >= self.pads.len() {
-            return;
-        }
-        if self.pads[index].locked {
-            return;
-        }
-        // Collect paths used by all OTHER pads
-        let used: HashSet<String> = self
-            .pads
-            .iter()
+        if index >= self.pads.len() || self.pads[index].locked { return; }
+        let mut used: HashSet<String> = self.pads.iter()
             .enumerate()
             .filter(|(i, _)| *i != index)
             .filter_map(|(_, p)| p.sample_path.clone())
@@ -203,38 +196,22 @@ impl DrumKit {
 
         let category = self.pads[index].category;
         if let Some(sample) = library.random_from_excluding(category, &used) {
-            let path = sample.entry.path.to_string_lossy().to_string();
-            let pad = &mut self.pads[index];
-            pad.sample = Some(Arc::clone(&sample.data));
-            pad.sample_path = Some(path);
-            pad.name = sample.entry.filename.clone();
-            pad.category = sample.entry.category;
+            Self::assign_sample(&mut self.pads[index], &sample, &mut used);
         }
     }
 
     /// Re-roll all unlocked pads of a given category.
     /// Preserves volume, pan, pitch. Avoids assigning the same sample to multiple pads.
     pub fn dice_category(&mut self, category: SampleCategory, library: &SampleLibrary) {
-        // Seed exclusion set with paths from pads NOT being re-rolled
-        // (locked pads of this category, or pads of a different category)
-        let mut used: HashSet<String> = self
-            .pads
-            .iter()
+        let mut used: HashSet<String> = self.pads.iter()
             .filter(|p| p.locked || p.category != category)
             .filter_map(|p| p.sample_path.clone())
             .collect();
 
         for pad in &mut self.pads {
-            if pad.locked || pad.category != category {
-                continue;
-            }
+            if pad.locked || pad.category != category { continue; }
             if let Some(sample) = library.random_from_excluding(category, &used) {
-                let path = sample.entry.path.to_string_lossy().to_string();
-                used.insert(path.clone());
-                pad.sample = Some(Arc::clone(&sample.data));
-                pad.sample_path = Some(path);
-                pad.name = sample.entry.filename.clone();
-                pad.category = sample.entry.category;
+                Self::assign_sample(pad, &sample, &mut used);
             }
         }
     }

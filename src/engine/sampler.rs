@@ -10,9 +10,6 @@ const MAX_VOICES: usize = 32;
 /// Fade-out duration in seconds when re-triggering the same pad.
 const RETRIGGER_FADE_SECS: f32 = 0.05; // 50ms
 
-/// Fade-out duration in seconds for decay envelope end.
-const DECAY_FADE_SECS: f32 = 0.01; // 10ms
-
 /// A single playback voice.
 struct Voice {
     /// Which pad this voice is playing, or None if inactive.

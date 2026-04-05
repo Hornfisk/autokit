@@ -82,14 +82,7 @@ pub fn draw_collapsed_from_snapshot(
                 let (strip_rect, _) =
                     ui.allocate_exact_size(egui::vec2(3.0, row_height), egui::Sense::hover());
                 let strip_color = if play_brightness > 0.0 {
-                    let [r, g, b, a] = cat_egui.to_array();
-                    let t = play_brightness;
-                    egui::Color32::from_rgba_unmultiplied(
-                        (r as f32 + (255.0 - r as f32) * t) as u8,
-                        (g as f32 + (255.0 - g as f32) * t) as u8,
-                        (b as f32 + (255.0 - b as f32) * t) as u8,
-                        a,
-                    )
+                    theme::brighten(cat_egui, play_brightness)
                 } else {
                     cat_egui
                 };

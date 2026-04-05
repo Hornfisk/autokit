@@ -194,6 +194,13 @@ impl PatternBank {
     }
 }
 
+/// Advance to queued pattern at bar boundary (step 0).
+fn advance_pattern_if_queued(bank: &mut PatternBank) {
+    if let Some(queued) = bank.queued.take() {
+        bank.active = queued;
+    }
+}
+
 /// The sequencer — owns playback state; pattern data lives in PatternBank.
 pub struct Sequencer {
     pub bank: PatternBank,
@@ -294,14 +301,15 @@ impl Sequencer {
         };
 
         // Sync to host position — always derive step from host beats (no drift accumulation)
-        let mut fire_steps: Vec<usize> = Vec::new();
+        let mut fire_steps = [0usize; NUM_STEPS];
+        let mut fire_count = 0usize;
         if let Some(beats) = pos_beats {
             if beats < 0.0 {
                 self.playing = false;
                 return 0;
             }
             let sixteenths = beats * 4.0;
-            let host_step = ((sixteenths.floor() as usize) % 16) as usize;
+            let host_step = (sixteenths.floor() as usize) % 16;
             let frac = sixteenths.fract();
 
             self.current_step = host_step;
@@ -309,18 +317,20 @@ impl Sequencer {
             self.tick_accumulator = frac * step_dur;
 
             if !self.playing {
-                fire_steps.push(host_step);
+                fire_steps[fire_count] = host_step;
+                fire_count += 1;
             } else if host_step != self.last_host_step {
                 let prev = self.last_host_step;
                 let mut s = (prev + 1) % 16;
                 loop {
                     if s == 0 {
                         self.loop_count += 1;
-                        if let Some(queued) = self.bank.queued.take() {
-                            self.bank.active = queued;
-                        }
+                        advance_pattern_if_queued(&mut self.bank);
                     }
-                    fire_steps.push(s);
+                    if fire_count < NUM_STEPS {
+                        fire_steps[fire_count] = s;
+                        fire_count += 1;
+                    }
                     if s == host_step { break; }
                     s = (s + 1) % 16;
                 }
@@ -333,12 +343,12 @@ impl Sequencer {
         self.playing = true;
         let mut triggered = 0usize;
 
-        for &step in &fire_steps {
+        for &step in &fire_steps[..fire_count] {
             self.current_step = step;
             triggered += self.fire_step(0, voices, kit, trigger_flags);
         }
-        if let Some(&last) = fire_steps.last() {
-            self.current_step = last;
+        if fire_count > 0 {
+            self.current_step = fire_steps[fire_count - 1];
         }
 
         for sample_offset in 0..buffer_len {
@@ -352,9 +362,7 @@ impl Sequencer {
 
                 if self.current_step == 0 {
                     self.loop_count += 1;
-                    if let Some(queued) = self.bank.queued.take() {
-                        self.bank.active = queued;
-                    }
+                    advance_pattern_if_queued(&mut self.bank);
                 }
 
                 triggered += self.fire_step(sample_offset, voices, kit, trigger_flags);
@@ -386,14 +394,15 @@ impl Sequencer {
             }
         };
 
-        let mut fire_steps: Vec<usize> = Vec::new();
+        let mut fire_steps = [0usize; NUM_STEPS];
+        let mut fire_count = 0usize;
         if let Some(beats) = pos_beats {
             if beats < 0.0 {
                 self.playing = false;
                 return 0;
             }
             let sixteenths = beats * 4.0;
-            let host_step = ((sixteenths.floor() as usize) % 16) as usize;
+            let host_step = (sixteenths.floor() as usize) % 16;
             let frac = sixteenths.fract();
 
             self.current_step = host_step;
@@ -402,7 +411,8 @@ impl Sequencer {
 
             if !self.playing {
                 // Fresh start — fire the step we land on
-                fire_steps.push(host_step);
+                fire_steps[fire_count] = host_step;
+                fire_count += 1;
             } else if host_step != self.last_host_step {
                 // Host step changed — fire any steps we may have missed
                 // (e.g. due to GUI lock contention skipping a buffer)
@@ -411,11 +421,12 @@ impl Sequencer {
                 loop {
                     if s == 0 {
                         self.loop_count += 1;
-                        if let Some(queued) = bank.queued.take() {
-                            bank.active = queued;
-                        }
+                        advance_pattern_if_queued(bank);
                     }
-                    fire_steps.push(s);
+                    if fire_count < NUM_STEPS {
+                        fire_steps[fire_count] = s;
+                        fire_count += 1;
+                    }
                     if s == host_step { break; }
                     s = (s + 1) % 16;
                 }
@@ -428,13 +439,13 @@ impl Sequencer {
         self.playing = true;
         let mut triggered = 0usize;
 
-        for &step in &fire_steps {
+        for &step in &fire_steps[..fire_count] {
             self.current_step = step;
             triggered += self.fire_step_from_bank(0, voices, kit, bank, trigger_flags);
         }
         // Restore current_step from host after firing missed steps
-        if let Some(&last) = fire_steps.last() {
-            self.current_step = last;
+        if fire_count > 0 {
+            self.current_step = fire_steps[fire_count - 1];
         }
 
         for sample_offset in 0..buffer_len {
@@ -450,9 +461,7 @@ impl Sequencer {
 
                 if self.current_step == 0 {
                     self.loop_count += 1;
-                    if let Some(queued) = bank.queued.take() {
-                        bank.active = queued;
-                    }
+                    advance_pattern_if_queued(bank);
                 }
 
                 triggered += self.fire_step_from_bank(sample_offset, voices, kit, bank, trigger_flags);
@@ -565,10 +574,6 @@ impl Sequencer {
 
     pub fn is_playing(&self) -> bool {
         self.playing
-    }
-
-    pub fn active_pattern_index(&self) -> usize {
-        self.bank.active
     }
 
     /// Fire all enabled, non-muted lanes of the active pattern for the current step.

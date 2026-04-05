@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use nih_plug::prelude::*;
@@ -52,7 +51,7 @@ pub fn draw_toolbar_snapshot(
     scan_processed: u32,
     scan_total: u32,
     is_standalone: bool,
-    standalone_tempo: &Arc<AtomicU32>,
+    standalone_tempo: &AtomicU32,
 ) -> ToolbarAction {
     let mut action = ToolbarAction::None;
 

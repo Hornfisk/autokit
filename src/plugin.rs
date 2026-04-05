@@ -90,10 +90,57 @@ impl PreviewVoice {
                 });
                 return;
             }
-            let s = data[self.position] * 0.7071; // center pan (sqrt(0.5))
+            let s = data[self.position] * std::f32::consts::FRAC_1_SQRT_2;
             *l += s;
             *r += s;
             self.position += 1;
+        }
+    }
+}
+
+/// Atomic state shared lock-free between audio thread and GUI.
+///
+/// Audio thread writes: current_step, playing, active_pattern, ext_mode, host_playing, tempo, is_daw.
+/// GUI thread writes: fill_active, internal_play, standalone_tempo.
+pub struct SequencerSync {
+    /// Current step position (0-15).
+    pub current_step: AtomicUsize,
+    /// Whether sequencer is playing (host or internal).
+    pub playing: AtomicBool,
+    /// Active pattern index (0-15).
+    pub active_pattern: AtomicUsize,
+    /// Fill mode toggle.
+    pub fill_active: AtomicBool,
+    /// Internal play toggle — runs sequencer without host transport.
+    pub internal_play: AtomicBool,
+    /// Whether echo suppression is active — drives "EXT" indicator.
+    pub ext_mode: AtomicBool,
+    /// Whether host transport is actively driving playback.
+    pub host_playing: AtomicBool,
+    /// Current tempo (BPM * 10) — written by audio thread.
+    pub tempo: AtomicU32,
+    /// Standalone tempo override (BPM * 10) — written by GUI.
+    pub standalone_tempo: AtomicU32,
+    /// Whether running inside a real DAW (host has ever stopped).
+    pub is_daw: AtomicBool,
+    /// Set by audio thread when state should be persisted; cleared by GUI after serialization.
+    pub persist_dirty: AtomicBool,
+}
+
+impl SequencerSync {
+    pub fn new() -> Self {
+        Self {
+            current_step: AtomicUsize::new(0),
+            playing: AtomicBool::new(false),
+            active_pattern: AtomicUsize::new(0),
+            fill_active: AtomicBool::new(false),
+            internal_play: AtomicBool::new(false),
+            ext_mode: AtomicBool::new(false),
+            host_playing: AtomicBool::new(false),
+            tempo: AtomicU32::new(1200),             // 120.0 BPM
+            standalone_tempo: AtomicU32::new(1200),   // 120.0 BPM
+            is_daw: AtomicBool::new(false),
+            persist_dirty: AtomicBool::new(false),
         }
     }
 }
@@ -112,30 +159,10 @@ pub struct Autokit {
     pub gui_triggers: Arc<[AtomicU8; NUM_PADS]>,
     /// Lightweight preview voice for sample map auditioning.
     preview_voice: PreviewVoice,
-    /// Current step position — written by audio thread, read by GUI.
-    pub seq_current_step: Arc<AtomicUsize>,
-    /// Whether sequencer is playing — written by audio thread, read by GUI.
-    pub seq_playing: Arc<AtomicBool>,
-    /// Active pattern index — written by audio thread, read by GUI.
-    pub seq_active_pattern: Arc<AtomicUsize>,
-    /// Fill mode — written by GUI, read by audio thread.
-    pub seq_fill_active: Arc<AtomicBool>,
-    /// Internal play toggle — written by GUI, read by audio thread.
-    /// When true, sequencer runs even without host transport (free-running at current tempo).
-    pub seq_internal_play: Arc<AtomicBool>,
+    /// Lock-free sequencer state shared with GUI thread.
+    pub seq_sync: Arc<SequencerSync>,
     /// Detects MIDI echo from host and suppresses doubled playback.
     echo_detector: EchoDetector,
-    /// Whether echo suppression is active — read by GUI for "EXT" indicator.
-    pub seq_ext_mode: Arc<AtomicBool>,
-    /// Whether the host transport is actively driving playback — read by GUI to gate Space bar.
-    pub seq_host_playing: Arc<AtomicBool>,
-    /// Current tempo (BPM * 10) — written by audio thread, read by GUI for display.
-    pub seq_tempo: Arc<AtomicU32>,
-    /// Standalone tempo override (BPM * 10) — written by GUI, read by audio thread.
-    pub seq_standalone_tempo: Arc<AtomicU32>,
-    /// Whether we're running inside a real DAW (host has ever stopped transport).
-    /// Standalone backends never stop, so this stays false. Read by GUI to show/hide tempo control.
-    pub seq_is_daw: Arc<AtomicBool>,
     /// Internal beat accumulator for free-running mode.
     /// Tracks beats directly (not samples) so tempo changes don't cause position jumps.
     seq_internal_beats: f64,
@@ -165,17 +192,8 @@ impl Default for Autokit {
             trigger_flags: Arc::new(core::array::from_fn(|_| AtomicU8::new(0))),
             gui_triggers: Arc::new(core::array::from_fn(|_| AtomicU8::new(0))),
             preview_voice: PreviewVoice::new(),
-            seq_current_step: Arc::new(AtomicUsize::new(0)),
-            seq_playing: Arc::new(AtomicBool::new(false)),
-            seq_active_pattern: Arc::new(AtomicUsize::new(0)),
-            seq_fill_active: Arc::new(AtomicBool::new(false)),
-            seq_internal_play: Arc::new(AtomicBool::new(false)),
+            seq_sync: Arc::new(SequencerSync::new()),
             echo_detector: EchoDetector::new(),
-            seq_ext_mode: Arc::new(AtomicBool::new(false)),
-            seq_host_playing: Arc::new(AtomicBool::new(false)),
-            seq_tempo: Arc::new(AtomicU32::new(1200)), // 120.0 BPM
-            seq_standalone_tempo: Arc::new(AtomicU32::new(1200)), // 120.0 BPM
-            seq_is_daw: Arc::new(AtomicBool::new(false)),
             seq_internal_beats: 0.0,
             persist_counter: 0,
             state_restored: false,
@@ -304,16 +322,7 @@ impl Plugin for Autokit {
             params,
             Arc::clone(&self.trigger_flags),
             Arc::clone(&self.gui_triggers),
-            Arc::clone(&self.seq_current_step),
-            Arc::clone(&self.seq_playing),
-            Arc::clone(&self.seq_active_pattern),
-            Arc::clone(&self.seq_fill_active),
-            Arc::clone(&self.seq_internal_play),
-            Arc::clone(&self.seq_ext_mode),
-            Arc::clone(&self.seq_host_playing),
-            Arc::clone(&self.seq_tempo),
-            Arc::clone(&self.seq_standalone_tempo),
-            Arc::clone(&self.seq_is_daw),
+            Arc::clone(&self.seq_sync),
         );
         tracing::info!("editor() result: {}", if result.is_some() { "Some" } else { "None" });
         result
@@ -356,7 +365,7 @@ impl Plugin for Autokit {
                     shared.bg_rx = Some(rx);
                 }
 
-                std::thread::Builder::new()
+                if let Err(e) = std::thread::Builder::new()
                     .name("autokit-scanner".to_string())
                     .spawn(move || {
                         tracing::info!("background scan starting");
@@ -365,7 +374,11 @@ impl Plugin for Autokit {
                             tracing::warn!("plugin dropped before scan completed");
                         }
                     })
-                    .expect("failed to spawn scanner thread");
+                {
+                    tracing::error!("failed to spawn scanner thread: {e}");
+                    let mut shared = self.shared.lock();
+                    shared.scan_status = ScanStatus::Ready { total: 0 };
+                }
             } else {
                 tracing::warn!(path = %cfg.sample_library_root, "configured sample path not found");
                 let mut shared = self.shared.lock();
@@ -421,7 +434,7 @@ impl Plugin for Autokit {
                         s.bg_rx = Some(rx);
                     }
 
-                    std::thread::Builder::new()
+                    if let Err(e) = std::thread::Builder::new()
                         .name("autokit-scanner".to_string())
                         .spawn(move || {
                             tracing::info!(path = %root.display(), "background scan starting (from GUI)");
@@ -430,7 +443,9 @@ impl Plugin for Autokit {
                                 tracing::warn!("plugin dropped before scan completed");
                             }
                         })
-                        .expect("failed to spawn scanner thread");
+                    {
+                        tracing::error!("failed to spawn scanner thread: {e}");
+                    }
                 });
             }
         }
@@ -483,7 +498,7 @@ impl Plugin for Autokit {
             }
 
             // Sync sequencer fill state from GUI
-            self.sequencer.fill_active = self.seq_fill_active.load(Ordering::Relaxed);
+            self.sequencer.fill_active = self.seq_sync.fill_active.load(Ordering::Relaxed);
 
             // Sequencer play state:
             // 1. Internal PLAY button / Space bar: free-run using internal sample counter
@@ -501,10 +516,10 @@ impl Plugin for Autokit {
             if !transport.playing {
                 self.host_ever_stopped = true;
             }
-            self.seq_is_daw.store(self.host_ever_stopped, Ordering::Relaxed);
-            let internal_play = self.seq_internal_play.load(Ordering::Relaxed);
+            self.seq_sync.is_daw.store(self.host_ever_stopped, Ordering::Relaxed);
+            let internal_play = self.seq_sync.internal_play.load(Ordering::Relaxed);
             let host_driving = self.host_ever_stopped && transport.playing && !internal_play;
-            self.seq_host_playing.store(host_driving, Ordering::Relaxed);
+            self.seq_sync.host_playing.store(host_driving, Ordering::Relaxed);
 
             // Edge detection: reset internal counter when internal play is toggled on
             if internal_play && !self.seq_internal_play_prev {
@@ -516,7 +531,7 @@ impl Plugin for Autokit {
             let (playing, tempo, pos_beats) = if internal_play {
                 // Free-running — use standalone tempo if no host, otherwise host tempo
                 let t = if !self.host_ever_stopped {
-                    self.seq_standalone_tempo.load(Ordering::Relaxed) as f64 / 10.0
+                    self.seq_sync.standalone_tempo.load(Ordering::Relaxed) as f64 / 10.0
                 } else {
                     transport.tempo.unwrap_or(120.0)
                 };
@@ -534,7 +549,7 @@ impl Plugin for Autokit {
 
             // Store current tempo for GUI display
             let display_tempo = tempo.unwrap_or(120.0);
-            self.seq_tempo.store((display_tempo * 10.0) as u32, Ordering::Relaxed);
+            self.seq_sync.tempo.store((display_tempo * 10.0) as u32, Ordering::Relaxed);
 
             tracing::debug!(
                 internal_play,
@@ -628,28 +643,22 @@ impl Plugin for Autokit {
             }
 
             // Sync echo suppression state for GUI
-            self.seq_ext_mode.store(self.echo_detector.is_suppressing(), Ordering::Relaxed);
+            self.seq_sync.ext_mode.store(self.echo_detector.is_suppressing(), Ordering::Relaxed);
 
             // Periodic state persistence for DAW save/load (~every 1s)
-            // Guard: don't persist until library has loaded and state is restored,
-            // otherwise we overwrite the DAW-saved state with empty defaults.
+            // Audio thread sets a dirty flag; GUI thread does the actual serialization.
             if self.state_restored {
-            self.persist_counter += num_samples as u64;
+                self.persist_counter += num_samples as u64;
             }
             if self.state_restored && self.persist_counter >= self.sample_rate as u64 {
                 self.persist_counter = 0;
-                permit_alloc(|| {
-                    let p = preset::from_kit("_daw_state", &shared.kit, &shared.pattern_bank);
-                    if let Ok(json) = serde_json::to_string(&p) {
-                        *self.params.plugin_state.lock() = json;
-                    }
-                });
+                self.seq_sync.persist_dirty.store(true, Ordering::Relaxed);
             }
 
             // Write playback state for GUI
-            self.seq_current_step.store(self.sequencer.current_step(), Ordering::Relaxed);
-            self.seq_playing.store(self.sequencer.is_playing(), Ordering::Relaxed);
-            self.seq_active_pattern.store(shared.pattern_bank.active, Ordering::Relaxed);
+            self.seq_sync.current_step.store(self.sequencer.current_step(), Ordering::Relaxed);
+            self.seq_sync.playing.store(self.sequencer.is_playing(), Ordering::Relaxed);
+            self.seq_sync.active_pattern.store(shared.pattern_bank.active, Ordering::Relaxed);
 
             // permit_alloc for drop: parking_lot unlock_slow() may allocate.
             permit_alloc(|| drop(shared));

@@ -13,7 +13,7 @@ use crate::ui::pad_row::{self, PadRowAction};
 use crate::ui::sample_map::{self, MapPoint};
 use crate::ui::state::{ScanStatus, SharedState, WaveformSummary};
 use crate::ui::theme;
-use crate::ui::folder_browser::{self, FolderBrowser};
+use crate::ui::dialogs::{self, DialogState, DialogAction};
 use crate::ui::toolbar::{self, ToolbarAction};
 use crate::plugin::populate_kit_from_library;
 use crate::util::config;
@@ -111,14 +111,8 @@ pub struct EditorState {
     pub last_trigger: [u8; NUM_PADS],
     /// Per-pad flash brightness for play animation (0.0 = dark, 1.0 = full flash).
     pub brightness: [f32; NUM_PADS],
-    /// Whether the save-preset dialog is open.
-    pub show_save_dialog: bool,
-    /// Text input for preset name in save dialog.
-    pub save_name: String,
-    /// Whether the load-preset dialog is open.
-    pub show_load_dialog: bool,
-    /// Cached list of available presets (refreshed when load dialog opens).
-    pub preset_list: Vec<(String, PathBuf)>,
+    /// Modal dialog state (save, load, setup).
+    pub dialogs: DialogState,
     /// Status message shown briefly after save/load.
     pub status_message: Option<String>,
     /// Which view is active (pad strip or sample map scatter plot).
@@ -143,12 +137,6 @@ pub struct EditorState {
     pub frame_count: u64,
     /// Cached logo texture handle.
     pub logo_texture: Option<egui::TextureHandle>,
-    /// Whether the sample folder setup dialog is shown.
-    pub show_setup_dialog: bool,
-    /// Text input for the sample folder path in the setup dialog.
-    pub setup_path: String,
-    /// Folder browser state (when browsing for a folder).
-    pub folder_browser: Option<FolderBrowser>,
 }
 
 impl Default for EditorState {
@@ -158,10 +146,7 @@ impl Default for EditorState {
             scale: 1.0,
             last_trigger: [0u8; NUM_PADS],
             brightness: [0.0f32; NUM_PADS],
-            show_save_dialog: false,
-            save_name: String::new(),
-            show_load_dialog: false,
-            preset_list: Vec::new(),
+            dialogs: DialogState::default(),
             status_message: None,
             view_mode: ViewMode::PadStrip,
             map_points: Vec::new(),
@@ -174,9 +159,6 @@ impl Default for EditorState {
             status_message_frame: 0,
             frame_count: 0,
             logo_texture: None,
-            show_setup_dialog: false,
-            setup_path: String::new(),
-            folder_browser: None,
         }
     }
 }
@@ -188,16 +170,7 @@ pub fn create(
     params: Arc<AutokitParams>,
     trigger_flags: Arc<[AtomicU8; NUM_PADS]>,
     gui_triggers: Arc<[AtomicU8; NUM_PADS]>,
-    seq_current_step: Arc<std::sync::atomic::AtomicUsize>,
-    seq_playing: Arc<std::sync::atomic::AtomicBool>,
-    seq_active_pattern: Arc<std::sync::atomic::AtomicUsize>,
-    seq_fill_active: Arc<std::sync::atomic::AtomicBool>,
-    seq_internal_play: Arc<std::sync::atomic::AtomicBool>,
-    seq_ext_mode: Arc<std::sync::atomic::AtomicBool>,
-    seq_host_playing: Arc<std::sync::atomic::AtomicBool>,
-    seq_tempo: Arc<std::sync::atomic::AtomicU32>,
-    seq_standalone_tempo: Arc<std::sync::atomic::AtomicU32>,
-    seq_is_daw: Arc<std::sync::atomic::AtomicBool>,
+    seq_sync: Arc<crate::plugin::SequencerSync>,
 ) -> Option<Box<dyn Editor>> {
     create_egui_editor(
         egui_state,
@@ -209,6 +182,18 @@ pub fn create(
         },
         // Update (called every frame)
         move |ctx, setter, state| {
+            // Destructure sync struct into local references for readability
+            let seq_current_step = &seq_sync.current_step;
+            let seq_playing = &seq_sync.playing;
+            let seq_active_pattern = &seq_sync.active_pattern;
+            let seq_fill_active = &seq_sync.fill_active;
+            let seq_internal_play = &seq_sync.internal_play;
+            let seq_ext_mode = &seq_sync.ext_mode;
+            let seq_host_playing = &seq_sync.host_playing;
+            let seq_tempo = &seq_sync.tempo;
+            let seq_standalone_tempo = &seq_sync.standalone_tempo;
+            let seq_is_daw = &seq_sync.is_daw;
+
             state.frame_count += 1;
 
             // --- Phase 1: Brief lock to snapshot display state ---
@@ -226,6 +211,13 @@ pub fn create(
                         shared.scan_status = ScanStatus::Ready {
                             total: shared.library.as_ref().map(|l| l.total).unwrap_or(0),
                         };
+                    }
+                }
+
+                // Persist state for DAW save/load if audio thread flagged it dirty.
+                if seq_sync.persist_dirty.swap(false, Ordering::Relaxed) {
+                    if let Some(json) = preset::serialize_state(&shared.kit, &shared.pattern_bank) {
+                        *params.plugin_state.lock() = json;
                     }
                 }
 
@@ -299,12 +291,12 @@ pub fn create(
             // Collect any actions triggered during rendering.
             // Auto-open setup dialog on first frame if no config
             if let ScanStatus::NeedsSetup { ref suggested_path } = snap.scan_status {
-                if !state.show_setup_dialog && state.frame_count == 1 {
-                    state.setup_path = suggested_path
+                if !state.dialogs.show_setup && state.frame_count == 1 {
+                    state.dialogs.setup_path = suggested_path
                         .as_ref()
                         .map(|p| p.to_string_lossy().into_owned())
                         .unwrap_or_default();
-                    state.show_setup_dialog = true;
+                    state.dialogs.show_setup = true;
                 }
             }
 
@@ -352,13 +344,13 @@ pub fn create(
                             ctx.set_pixels_per_point(s);
                         }
                         ToolbarAction::OpenSaveDialog => {
-                            state.show_save_dialog = true;
-                            state.show_load_dialog = false;
+                            state.dialogs.show_save = true;
+                            state.dialogs.show_load = false;
                         }
                         ToolbarAction::OpenLoadDialog => {
-                            state.preset_list = preset::list_presets();
-                            state.show_load_dialog = true;
-                            state.show_save_dialog = false;
+                            state.dialogs.preset_list = preset::list_presets();
+                            state.dialogs.show_load = true;
+                            state.dialogs.show_save = false;
                         }
                         ToolbarAction::ToggleView => {
                             state.view_mode = match state.view_mode {
@@ -372,13 +364,13 @@ pub fn create(
                         }
                         ToolbarAction::OpenSetup => {
                             // Pre-fill with discovered path if empty
-                            if state.setup_path.is_empty() {
+                            if state.dialogs.setup_path.is_empty() {
                                 if let Some(discovered) = config::discover_sample_root() {
-                                    state.setup_path = discovered.to_string_lossy().into_owned();
+                                    state.dialogs.setup_path = discovered.to_string_lossy().into_owned();
                                 }
                             }
-                            state.show_setup_dialog = true;
-                            state.folder_browser = None;
+                            state.dialogs.show_setup = true;
+                            state.dialogs.folder_browser = None;
                         }
                         ToolbarAction::None => {}
                     }
@@ -390,12 +382,12 @@ pub fn create(
                     let shared_avail_h = ui.available_height();
                     let shared_row_height = {
                         let num_lanes = 8.0_f32;
-                        let cell_spacing = 2.0_f32;
-                        let vert_reserved = 112.0_f32;
-                        let vert_avail = shared_avail_h - vert_reserved;
+                        let cell_spacing = theme::CELL_SPACING;
+                        let vert_avail = shared_avail_h - theme::GRID_VERT_RESERVED;
                         let row_from_height = ((vert_avail - cell_spacing * (num_lanes - 1.0)) / num_lanes).floor();
-                        let label_width = 61.0_f32;
-                        let controls_width = 45.0_f32;
+                        // Pad strip label: strip + space + tag + space = 61px
+                        let label_width = theme::STRIP_WIDTH + 8.0 + theme::TAG_WIDTH + 4.0;
+                        let controls_width = theme::CONTROLS_WIDTH;
                         let available_w = ui.available_width() - label_width - controls_width;
                         let cell_from_width = ((available_w - cell_spacing * 15.0) / 16.0).floor();
                         row_from_height.min(cell_from_width).clamp(20.0, 48.0)
@@ -406,9 +398,8 @@ pub fn create(
                             // Step number header — matches sequencer grid layout exactly
                             {
                                 use egui::{FontId, Color32, Vec2};
-                                // Must match seq grid: label_width(61) + controls_width(45)
-                                let header_offset = 61.0 + 45.0;
-                                let cell_spacing = 2.0;
+                                let header_offset = (theme::STRIP_WIDTH + 8.0 + theme::TAG_WIDTH + 4.0) + theme::CONTROLS_WIDTH;
+                                let cell_spacing = theme::CELL_SPACING;
                                 ui.horizontal(|ui| {
                                     ui.add_space(header_offset);
                                     ui.spacing_mut().item_spacing.x = cell_spacing;
@@ -466,7 +457,7 @@ pub fn create(
                                                 pending_actions.push(GuiAction::ToggleLock(i));
                                             }
                                             PadRowAction::SetVolume(v) => {
-                                                pending_actions.push(GuiAction::SetPadVolume(i, v));
+                                                pending_actions.push(GuiAction::SetPadParam(i, PadParam::Volume, v));
                                             }
                                             _ => {}
                                         }
@@ -480,13 +471,13 @@ pub fn create(
 
                                             match detail_action {
                                                 PadRowAction::SetPan(v) => {
-                                                    pending_actions.push(GuiAction::SetPadPan(i, v));
+                                                    pending_actions.push(GuiAction::SetPadParam(i, PadParam::Pan, v));
                                                 }
                                                 PadRowAction::SetPitch(v) => {
-                                                    pending_actions.push(GuiAction::SetPadPitch(i, v));
+                                                    pending_actions.push(GuiAction::SetPadParam(i, PadParam::Pitch, v));
                                                 }
                                                 PadRowAction::SetDecay(v) => {
-                                                    pending_actions.push(GuiAction::SetPadDecay(i, v));
+                                                    pending_actions.push(GuiAction::SetPadParam(i, PadParam::Decay, v));
                                                 }
                                                 PadRowAction::DiceCategory => {
                                                     if snap.has_library {
@@ -679,262 +670,23 @@ pub fn create(
                 state.map_popup.active_point = None;
             }
 
-            // --- Save preset dialog ---
-            if state.show_save_dialog {
-                let mut open = true;
-                egui::Window::new("Save Preset")
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                    .fixed_size([240.0, 0.0])
-                    .open(&mut open)
-                    .show(ctx, |ui| {
-                        ui.label(
-                            egui::RichText::new("Preset name:")
-                                .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
-                                .color(theme::TEXT_DIM),
-                        );
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut state.save_name)
-                                .font(egui::FontId::new(11.0, egui::FontFamily::Monospace))
-                                .desired_width(220.0),
-                        );
-                        // Auto-focus the text input
-                        if response.gained_focus() || state.save_name.is_empty() {
-                            response.request_focus();
-                        }
-
-                        ui.add_space(6.0);
-
-                        let name_valid = !state.save_name.trim().is_empty();
-                        let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
-
-                        ui.horizontal(|ui| {
-                            let save_enabled = name_valid;
-                            if ui
-                                .add_enabled(
-                                    save_enabled,
-                                    egui::Button::new(
-                                        egui::RichText::new("SAVE")
-                                            .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
-                                            .color(if save_enabled {
-                                                egui::Color32::from_rgb(0x74, 0xb9, 0xff)
-                                            } else {
-                                                theme::TEXT_DISABLED
-                                            }),
-                                    )
-                                    .fill(theme::BG_ROW)
-                                    .min_size(egui::vec2(60.0, 22.0)),
-                                )
-                                .clicked()
-                                || (enter_pressed && save_enabled)
-                            {
-                                pending_actions.push(
-                                    GuiAction::SavePreset(state.save_name.trim().to_string()));
-                                state.show_save_dialog = false;
-                            }
-
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        egui::RichText::new("CANCEL")
-                                            .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
-                                            .color(theme::TEXT_DIM),
-                                    )
-                                    .fill(theme::BG_ROW)
-                                    .min_size(egui::vec2(60.0, 22.0)),
-                                )
-                                .clicked()
-                            {
-                                state.show_save_dialog = false;
-                            }
-                        });
-                    });
-                if !open {
-                    state.show_save_dialog = false;
+            // --- Modal dialogs (save, load, setup) ---
+            if state.dialogs.show_save {
+                match dialogs::show_save_dialog(ctx, &mut state.dialogs) {
+                    DialogAction::SavePreset(name) => pending_actions.push(GuiAction::SavePreset(name)),
+                    _ => {}
                 }
             }
-
-            // --- Load preset dialog ---
-            if state.show_load_dialog {
-                let mut open = true;
-                egui::Window::new("Load Preset")
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                    .fixed_size([280.0, 300.0])
-                    .open(&mut open)
-                    .show(ctx, |ui| {
-                        if state.preset_list.is_empty() {
-                            ui.label(
-                                egui::RichText::new("No presets found.")
-                                    .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
-                                    .color(theme::TEXT_DIM),
-                            );
-                        } else {
-                            egui::ScrollArea::vertical()
-                                .max_height(260.0)
-                                .show(ui, |ui| {
-                                    // Clone the list to avoid borrow conflict with state
-                                    let list: Vec<(String, PathBuf)> =
-                                        state.preset_list.clone();
-                                    for (name, path) in &list {
-                                        if ui
-                                            .add(
-                                                egui::Button::new(
-                                                    egui::RichText::new(name)
-                                                        .font(egui::FontId::new(
-                                                            11.0,
-                                                            egui::FontFamily::Monospace,
-                                                        ))
-                                                        .color(theme::ACCENT),
-                                                )
-                                                .fill(theme::BG_ROW)
-                                                .min_size(egui::vec2(260.0, 24.0)),
-                                            )
-                                            .clicked()
-                                        {
-                                            pending_actions.push(
-                                                GuiAction::LoadPreset(path.clone()));
-                                            state.show_load_dialog = false;
-                                        }
-                                    }
-                                });
-                        }
-
-                        ui.add_space(4.0);
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new("CANCEL")
-                                        .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
-                                        .color(theme::TEXT_DIM),
-                                )
-                                .fill(theme::BG_ROW)
-                                .min_size(egui::vec2(60.0, 22.0)),
-                            )
-                            .clicked()
-                        {
-                            state.show_load_dialog = false;
-                        }
-                    });
-                if !open {
-                    state.show_load_dialog = false;
+            if state.dialogs.show_load {
+                match dialogs::show_load_dialog(ctx, &mut state.dialogs) {
+                    DialogAction::LoadPreset(path) => pending_actions.push(GuiAction::LoadPreset(path)),
+                    _ => {}
                 }
             }
-
-            // --- Sample folder setup dialog ---
-            if state.show_setup_dialog {
-                // If folder browser is active, show it
-                if let Some(browser) = &mut state.folder_browser {
-                    match browser.show(ctx) {
-                        folder_browser::BrowserAction::Selected(path) => {
-                            state.setup_path = path.to_string_lossy().into_owned();
-                            state.folder_browser = None;
-                        }
-                        folder_browser::BrowserAction::Cancelled => {
-                            state.folder_browser = None;
-                        }
-                        folder_browser::BrowserAction::None => {}
-                    }
-                } else {
-                    // Show the setup dialog
-                    let mut open = true;
-                    egui::Window::new("Sample Library")
-                        .collapsible(false)
-                        .resizable(false)
-                        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                        .fixed_size([400.0, 0.0])
-                        .open(&mut open)
-                        .show(ctx, |ui| {
-                            ui.label(
-                                egui::RichText::new("Select your samples folder:")
-                                    .font(egui::FontId::new(11.0, egui::FontFamily::Monospace))
-                                    .color(theme::TEXT_DIM),
-                            );
-                            ui.add_space(6.0);
-
-                            ui.horizontal(|ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut state.setup_path)
-                                        .font(egui::FontId::new(11.0, egui::FontFamily::Monospace))
-                                        .desired_width(300.0),
-                                );
-                                if ui
-                                    .add(
-                                        egui::Button::new(
-                                            egui::RichText::new("BROWSE")
-                                                .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                                                .color(theme::ACCENT),
-                                        )
-                                        .fill(theme::ACCENT_DIM)
-                                        .min_size(egui::vec2(60.0, 22.0)),
-                                    )
-                                    .clicked()
-                                {
-                                    let start = if state.setup_path.is_empty() {
-                                        config::home_dir()
-                                    } else {
-                                        PathBuf::from(&state.setup_path)
-                                    };
-                                    state.folder_browser = Some(FolderBrowser::new(&start));
-                                }
-                            });
-
-                            // Validation hint
-                            let path = PathBuf::from(&state.setup_path);
-                            let path_valid = !state.setup_path.is_empty() && path.is_dir();
-                            if !state.setup_path.is_empty() && !path_valid {
-                                ui.label(
-                                    egui::RichText::new("folder not found")
-                                        .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                                        .color(egui::Color32::from_rgb(0xff, 0x6b, 0x6b)),
-                                );
-                            }
-
-                            ui.add_space(8.0);
-
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .add_enabled(
-                                        path_valid,
-                                        egui::Button::new(
-                                            egui::RichText::new("SCAN")
-                                                .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
-                                                .color(if path_valid { theme::ACCENT } else { theme::TEXT_DISABLED })
-                                                .strong(),
-                                        )
-                                        .fill(if path_valid { theme::ACCENT_DIM } else { theme::BG_ROW })
-                                        .min_size(egui::vec2(60.0, 24.0)),
-                                    )
-                                    .clicked()
-                                {
-                                    // Save config and trigger scan
-                                    let cfg = config::Config::new(&state.setup_path);
-                                    cfg.save();
-                                    pending_actions.push(GuiAction::StartScan(path));
-                                    state.show_setup_dialog = false;
-                                }
-
-                                if ui
-                                    .add(
-                                        egui::Button::new(
-                                            egui::RichText::new("CANCEL")
-                                                .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
-                                                .color(theme::TEXT_DIM),
-                                        )
-                                        .fill(theme::BG_ROW)
-                                        .min_size(egui::vec2(60.0, 24.0)),
-                                    )
-                                    .clicked()
-                                {
-                                    state.show_setup_dialog = false;
-                                }
-                            });
-                        });
-                    if !open {
-                        state.show_setup_dialog = false;
-                    }
+            if state.dialogs.show_setup {
+                match dialogs::show_setup_dialog(ctx, &mut state.dialogs) {
+                    DialogAction::StartScan(path) => pending_actions.push(GuiAction::StartScan(path)),
+                    _ => {}
                 }
             }
 
@@ -1018,17 +770,14 @@ pub fn create(
                     GuiAction::ToggleLock(i) => {
                         shared.kit.toggle_lock(i);
                     }
-                    GuiAction::SetPadVolume(i, v) => {
-                        shared.kit.pads[i].volume = v;
-                    }
-                    GuiAction::SetPadPan(i, v) => {
-                        shared.kit.pads[i].pan = v;
-                    }
-                    GuiAction::SetPadPitch(i, v) => {
-                        shared.kit.pads[i].pitch = v;
-                    }
-                    GuiAction::SetPadDecay(i, v) => {
-                        shared.kit.pads[i].decay = v;
+                    GuiAction::SetPadParam(i, param, v) => {
+                        let pad = &mut shared.kit.pads[i];
+                        match param {
+                            PadParam::Volume => pad.volume = v,
+                            PadParam::Pan => pad.pan = v,
+                            PadParam::Pitch => pad.pitch = v,
+                            PadParam::Decay => pad.decay = v,
+                        }
                     }
                     GuiAction::SavePreset(name) => {
                         let p = preset::from_kit(&name, &shared.kit, &shared.pattern_bank);
@@ -1293,6 +1042,9 @@ pub fn create(
 }
 
 /// Actions that the GUI can trigger, applied in a brief second lock.
+/// Which pad parameter to set.
+enum PadParam { Volume, Pan, Pitch, Decay }
+
 enum GuiAction {
     None,
     Undo,
@@ -1302,10 +1054,7 @@ enum GuiAction {
     DiceCategory(usize, SampleCategory),
     LockAll,
     ToggleLock(usize),
-    SetPadVolume(usize, f32),
-    SetPadPan(usize, f32),
-    SetPadPitch(usize, f32),
-    SetPadDecay(usize, f32),
+    SetPadParam(usize, PadParam, f32),
     SavePreset(String),
     LoadPreset(PathBuf),
     PreviewSample(usize),

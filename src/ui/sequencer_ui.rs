@@ -1,6 +1,6 @@
 use nih_plug_egui::egui;
 use egui::{Color32, Rect, Pos2, Vec2, Stroke, FontId, Align2};
-use crate::engine::kit::{SampleCategory, NUM_PADS};
+use crate::engine::kit::SampleCategory;
 use crate::engine::sequencer::{ConditionTrig, NUM_STEPS, NUM_PATTERNS};
 use crate::ui::theme;
 use crate::ui::knob;
@@ -206,14 +206,12 @@ fn draw_grid(
 ) -> (Vec<SeqAction>, GridLayout) {
     let mut actions: Vec<SeqAction> = Vec::new();
 
-    // Label area: 3px strip + 8px space + 46px tag + 4px space + 16px knob + 4px space = 81px
-    let label_width = 81.0;
-    // M S L buttons: 3 x (13px + 2px spacing) = 45px
-    let controls_width = 45.0;
-    let cell_spacing = 2.0;
+    // Label area: strip + space + tag + space + knob + space = 81px
+    let label_width = theme::STRIP_WIDTH + 8.0 + theme::TAG_WIDTH + 4.0 + 16.0 + 4.0;
+    let controls_width = theme::CONTROLS_WIDTH;
+    let cell_spacing = theme::CELL_SPACING;
     let num_lanes = display.lanes.len().max(1) as f32;
-    // Reserve space: step numbers ~14, combined param+pattern bar ~50, bottom bar ~28, spacing ~20
-    let vert_reserved = 112.0;
+    let vert_reserved = theme::GRID_VERT_RESERVED;
     let vert_avail = available_height - vert_reserved;
     let row_from_height = ((vert_avail - cell_spacing * (num_lanes - 1.0)) / num_lanes).floor();
     let available_w = ui.available_width() - label_width - controls_width;

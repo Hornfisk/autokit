@@ -71,7 +71,13 @@ pub fn init() {
             });
 
         let file_layer = fmt::layer()
-            .with_writer(move || LineCountWriter::new(file.try_clone().unwrap()))
+            .with_writer(move || {
+                LineCountWriter::new(file.try_clone().unwrap_or_else(|_| {
+                    // Fallback: open /dev/null to avoid panic if clone fails
+                    fs::OpenOptions::new().write(true).open("/dev/null")
+                        .expect("/dev/null should always be openable")
+                }))
+            })
             .with_ansi(false)
             .with_target(true)
             .with_thread_ids(true)

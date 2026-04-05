@@ -136,6 +136,12 @@ pub fn from_kit(name: &str, kit: &DrumKit, pattern_bank: &crate::engine::sequenc
     }
 }
 
+/// Serialize the current kit + pattern state to a JSON string for DAW persistence.
+pub fn serialize_state(kit: &DrumKit, pattern_bank: &crate::engine::sequencer::PatternBank) -> Option<String> {
+    let p = from_kit("_daw_state", kit, pattern_bank);
+    serde_json::to_string(&p).ok()
+}
+
 /// Apply a preset to a kit, loading sample audio from disk.
 /// Pads with missing or unreadable sample files get `None` sample data.
 /// If the preset contains pattern data, it is restored into `pattern_bank`.
