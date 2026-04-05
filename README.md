@@ -6,9 +6,9 @@ A sample-based drum machine plugin that scans your library, classifies oneshots 
 **Platforms:** Linux, macOS, Windows
 **License:** GPL-3.0-or-later
 
-![Sequencer view](assets/screenshot-sequencer.png)
-![Sample map](assets/screenshot-map.png)
-![Pads view](assets/screenshot-pads.png)
+![Pads view](assets/screenshot1.webp)
+![Sample map](assets/screenshot2.webp)
+![Sequencer view](assets/screenshot3.webp)
 
 ## Quick start
 
