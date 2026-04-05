@@ -63,6 +63,9 @@ jobs:
           cp -r target/bundled/autokit.vst3 staging/
           cp -r target/bundled/autokit.clap staging/
           cp "target/${BUILD_TARGET}/release/autokit-standalone" staging/ || true
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            cp scripts/autokit-macos.sh staging/
+          fi
           cd staging && tar czf "../${ARTIFACT_NAME}.tar.gz" * && cd ..
 
       - name: Package artifacts (Windows)
