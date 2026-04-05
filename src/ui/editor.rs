@@ -13,7 +13,10 @@ use crate::ui::pad_row::{self, PadRowAction};
 use crate::ui::sample_map::{self, MapPoint};
 use crate::ui::state::{ScanStatus, SharedState, WaveformSummary};
 use crate::ui::theme;
+use crate::ui::folder_browser::{self, FolderBrowser};
 use crate::ui::toolbar::{self, ToolbarAction};
+use crate::plugin::populate_kit_from_library;
+use crate::util::config;
 use crate::util::history::HistorySnapshot;
 use crate::util::preset;
 
@@ -37,6 +40,8 @@ struct DisplaySnapshot {
     pads: [PadDisplay; NUM_PADS],
     waveforms: [Option<WaveformSummary>; NUM_PADS],
     scan_status: ScanStatus,
+    scan_processed: u32,
+    scan_total: u32,
     can_undo: bool,
     can_redo: bool,
     has_library: bool,
@@ -57,10 +62,18 @@ impl DisplaySnapshot {
                 decay: pad.decay,
             }
         });
+        let (scan_processed, scan_total) = shared.scan_progress.as_ref()
+            .map(|p| {
+                (p.processed.load(std::sync::atomic::Ordering::Relaxed),
+                 p.total.load(std::sync::atomic::Ordering::Relaxed))
+            })
+            .unwrap_or((0, 0));
         Self {
             pads,
             waveforms: shared.waveforms.clone(),
             scan_status: shared.scan_status.clone(),
+            scan_processed,
+            scan_total,
             can_undo: shared.history.can_undo(),
             can_redo: shared.history.can_redo(),
             has_library: shared.library.is_some(),
@@ -128,6 +141,14 @@ pub struct EditorState {
     pub status_message_frame: u64,
     /// Frame counter.
     pub frame_count: u64,
+    /// Cached logo texture handle.
+    pub logo_texture: Option<egui::TextureHandle>,
+    /// Whether the sample folder setup dialog is shown.
+    pub show_setup_dialog: bool,
+    /// Text input for the sample folder path in the setup dialog.
+    pub setup_path: String,
+    /// Folder browser state (when browsing for a folder).
+    pub folder_browser: Option<FolderBrowser>,
 }
 
 impl Default for EditorState {
@@ -152,6 +173,10 @@ impl Default for EditorState {
             seq_view: Default::default(),
             status_message_frame: 0,
             frame_count: 0,
+            logo_texture: None,
+            show_setup_dialog: false,
+            setup_path: String::new(),
+            folder_browser: None,
         }
     }
 }
@@ -169,6 +194,10 @@ pub fn create(
     seq_fill_active: Arc<std::sync::atomic::AtomicBool>,
     seq_internal_play: Arc<std::sync::atomic::AtomicBool>,
     seq_ext_mode: Arc<std::sync::atomic::AtomicBool>,
+    seq_host_playing: Arc<std::sync::atomic::AtomicBool>,
+    seq_tempo: Arc<std::sync::atomic::AtomicU32>,
+    seq_standalone_tempo: Arc<std::sync::atomic::AtomicU32>,
+    seq_is_daw: Arc<std::sync::atomic::AtomicBool>,
 ) -> Option<Box<dyn Editor>> {
     create_egui_editor(
         egui_state,
@@ -184,7 +213,22 @@ pub fn create(
 
             // --- Phase 1: Brief lock to snapshot display state ---
             let snap = {
-                let shared = shared.lock();
+                let mut shared = shared.lock();
+
+                // Fallback: if process() isn't running (JACK error), pick up
+                // the library from the GUI thread so the UI still works.
+                if matches!(shared.scan_status, ScanStatus::Scanning) {
+                    let lib = shared.bg_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+                    if let Some(library) = lib {
+                        tracing::info!(total = library.total, "library received via GUI fallback");
+                        shared.library = Some(library);
+                        populate_kit_from_library(&mut shared);
+                        shared.scan_status = ScanStatus::Ready {
+                            total: shared.library.as_ref().map(|l| l.total).unwrap_or(0),
+                        };
+                    }
+                }
+
                 DisplaySnapshot::from_shared(&shared)
             };
             // Lock is now released — audio thread can proceed freely.
@@ -243,12 +287,27 @@ pub fn create(
             });
 
             // Space bar toggles internal sequencer play/stop
-            if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+            // Gated: ignored when the host transport is actively driving playback
+            // (prevents double-trigger when Space also toggles the DAW transport)
+            if ctx.input(|i| i.key_pressed(egui::Key::Space))
+                && !seq_host_playing.load(Ordering::Relaxed)
+            {
                 let current = seq_internal_play.load(Ordering::Relaxed);
                 seq_internal_play.store(!current, Ordering::Relaxed);
             }
 
             // Collect any actions triggered during rendering.
+            // Auto-open setup dialog on first frame if no config
+            if let ScanStatus::NeedsSetup { ref suggested_path } = snap.scan_status {
+                if !state.show_setup_dialog && state.frame_count == 1 {
+                    state.setup_path = suggested_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    state.show_setup_dialog = true;
+                }
+            }
+
             let mut pending_actions: Vec<GuiAction> = Vec::new();
 
             egui::CentralPanel::default()
@@ -257,6 +316,10 @@ pub fn create(
                     // Toolbar (uses snapshot data, no mutex held)
                     let all_locked = snap.pads.iter().all(|p| p.locked);
                     let shortcut_info = state.map_shortcut_pad.map(|i| (i + 1, snap.pads[i].category.label()));
+                    let logo = state.logo_texture.get_or_insert_with(|| {
+                        toolbar::load_logo_texture(ctx)
+                    });
+                    let is_standalone = !seq_is_daw.load(Ordering::Relaxed);
                     let toolbar_action = toolbar::draw_toolbar_snapshot(
                         ui,
                         &snap.scan_status,
@@ -268,6 +331,11 @@ pub fn create(
                         state.scale,
                         state.view_mode,
                         shortcut_info,
+                        logo,
+                        snap.scan_processed,
+                        snap.scan_total,
+                        is_standalone,
+                        &seq_standalone_tempo,
                     );
 
                     match toolbar_action {
@@ -301,6 +369,16 @@ pub fn create(
                         }
                         ToolbarAction::SetView(mode) => {
                             state.view_mode = mode;
+                        }
+                        ToolbarAction::OpenSetup => {
+                            // Pre-fill with discovered path if empty
+                            if state.setup_path.is_empty() {
+                                if let Some(discovered) = config::discover_sample_root() {
+                                    state.setup_path = discovered.to_string_lossy().into_owned();
+                                }
+                            }
+                            state.show_setup_dialog = true;
+                            state.folder_browser = None;
                         }
                         ToolbarAction::None => {}
                     }
@@ -745,6 +823,121 @@ pub fn create(
                 }
             }
 
+            // --- Sample folder setup dialog ---
+            if state.show_setup_dialog {
+                // If folder browser is active, show it
+                if let Some(browser) = &mut state.folder_browser {
+                    match browser.show(ctx) {
+                        folder_browser::BrowserAction::Selected(path) => {
+                            state.setup_path = path.to_string_lossy().into_owned();
+                            state.folder_browser = None;
+                        }
+                        folder_browser::BrowserAction::Cancelled => {
+                            state.folder_browser = None;
+                        }
+                        folder_browser::BrowserAction::None => {}
+                    }
+                } else {
+                    // Show the setup dialog
+                    let mut open = true;
+                    egui::Window::new("Sample Library")
+                        .collapsible(false)
+                        .resizable(false)
+                        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                        .fixed_size([400.0, 0.0])
+                        .open(&mut open)
+                        .show(ctx, |ui| {
+                            ui.label(
+                                egui::RichText::new("Select your samples folder:")
+                                    .font(egui::FontId::new(11.0, egui::FontFamily::Monospace))
+                                    .color(theme::TEXT_DIM),
+                            );
+                            ui.add_space(6.0);
+
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut state.setup_path)
+                                        .font(egui::FontId::new(11.0, egui::FontFamily::Monospace))
+                                        .desired_width(300.0),
+                                );
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new("BROWSE")
+                                                .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                                .color(theme::ACCENT),
+                                        )
+                                        .fill(theme::ACCENT_DIM)
+                                        .min_size(egui::vec2(60.0, 22.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    let start = if state.setup_path.is_empty() {
+                                        config::home_dir()
+                                    } else {
+                                        PathBuf::from(&state.setup_path)
+                                    };
+                                    state.folder_browser = Some(FolderBrowser::new(&start));
+                                }
+                            });
+
+                            // Validation hint
+                            let path = PathBuf::from(&state.setup_path);
+                            let path_valid = !state.setup_path.is_empty() && path.is_dir();
+                            if !state.setup_path.is_empty() && !path_valid {
+                                ui.label(
+                                    egui::RichText::new("folder not found")
+                                        .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                        .color(egui::Color32::from_rgb(0xff, 0x6b, 0x6b)),
+                                );
+                            }
+
+                            ui.add_space(8.0);
+
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add_enabled(
+                                        path_valid,
+                                        egui::Button::new(
+                                            egui::RichText::new("SCAN")
+                                                .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
+                                                .color(if path_valid { theme::ACCENT } else { theme::TEXT_DISABLED })
+                                                .strong(),
+                                        )
+                                        .fill(if path_valid { theme::ACCENT_DIM } else { theme::BG_ROW })
+                                        .min_size(egui::vec2(60.0, 24.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    // Save config and trigger scan
+                                    let cfg = config::Config::new(&state.setup_path);
+                                    cfg.save();
+                                    pending_actions.push(GuiAction::StartScan(path));
+                                    state.show_setup_dialog = false;
+                                }
+
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new("CANCEL")
+                                                .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
+                                                .color(theme::TEXT_DIM),
+                                        )
+                                        .fill(theme::BG_ROW)
+                                        .min_size(egui::vec2(60.0, 24.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    state.show_setup_dialog = false;
+                                }
+                            });
+                        });
+                    if !open {
+                        state.show_setup_dialog = false;
+                    }
+                }
+            }
+
             // --- Phase 2: Brief lock to apply any mutation ---
             if !pending_actions.is_empty() {
                 let mut needs_waveform_update = false;
@@ -1063,8 +1256,10 @@ pub fn create(
                         seq_fill_active.store(active, Ordering::Relaxed);
                     }
                     GuiAction::SeqToggleInternalPlay => {
-                        let current = seq_internal_play.load(Ordering::Relaxed);
-                        seq_internal_play.store(!current, Ordering::Relaxed);
+                        if !seq_host_playing.load(Ordering::Relaxed) {
+                            let current = seq_internal_play.load(Ordering::Relaxed);
+                            seq_internal_play.store(!current, Ordering::Relaxed);
+                        }
                     }
                     GuiAction::SeqExportMidi => {
                         match export_pattern_to_midi(&shared.pattern_bank, &shared.kit) {
@@ -1079,6 +1274,10 @@ pub fn create(
                                 state.status_message_frame = state.frame_count;
                             }
                         }
+                    }
+                    GuiAction::StartScan(path) => {
+                        shared.scan_status = ScanStatus::Scanning;
+                        shared.pending_scan_path = Some(path);
                     }
                 }
                 } // end for action in pending_actions
@@ -1134,6 +1333,7 @@ enum GuiAction {
     SeqExportMidi,
     SeqResetLane { lane: usize },
     SeqResetStep { lane: usize, step: usize },
+    StartScan(PathBuf),
 }
 
 /// Export the active pattern from a PatternBank as a Standard MIDI File (Type 0).

@@ -1,6 +1,7 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::analysis::library::SampleLibrary;
+use crate::analysis::library::{SampleLibrary, ScanProgress};
 use crate::engine::kit::{DrumKit, NUM_PADS};
 use crate::engine::sequencer::PatternBank;
 use crate::util::history::History;
@@ -8,6 +9,8 @@ use crate::util::history::History;
 /// Scan progress for the toolbar display.
 #[derive(Clone, Debug)]
 pub enum ScanStatus {
+    /// No config yet — show setup dialog. `suggested_path` is auto-discovered.
+    NeedsSetup { suggested_path: Option<PathBuf> },
     Scanning,
     Ready { total: usize },
 }
@@ -65,6 +68,12 @@ pub struct SharedState {
     pub pattern_bank: PatternBank,
     /// Pattern clipboard for copy/paste.
     pub pattern_clipboard: Option<crate::engine::sequencer::Pattern>,
+    /// GUI sets this to trigger a (re)scan from a new path. Audio thread reads + clears.
+    pub pending_scan_path: Option<PathBuf>,
+    /// Shared scan progress (read by GUI, written by scanner thread).
+    pub scan_progress: Option<Arc<ScanProgress>>,
+    /// Background scan receiver — GUI thread polls this as fallback when process() is dead.
+    pub bg_rx: Option<crossbeam_channel::Receiver<SampleLibrary>>,
 }
 
 impl SharedState {
@@ -78,6 +87,9 @@ impl SharedState {
             preview_sample: None,
             pattern_bank: PatternBank::new(),
             pattern_clipboard: None,
+            pending_scan_path: None,
+            scan_progress: None,
+            bg_rx: None,
         }
     }
 

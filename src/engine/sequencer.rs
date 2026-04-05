@@ -223,6 +223,15 @@ impl Sequencer {
         }
     }
 
+    /// Reset playback position to step 0 for a clean start.
+    pub fn reset_position(&mut self) {
+        self.current_step = 0;
+        self.last_host_step = 0;
+        self.tick_accumulator = 0.0;
+        self.last_pos_beats = 0.0;
+        self.playing = false;
+    }
+
     /// Access lanes of the active pattern (convenience for existing code).
     pub fn lanes(&self) -> &[Lane] {
         &self.bank.active_pattern().lanes

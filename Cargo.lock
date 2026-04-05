@@ -233,7 +233,7 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "autokit"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "basedrop",
  "crossbeam-channel",
@@ -250,6 +250,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "walkdir",
+ "winres",
 ]
 
 [[package]]
@@ -1602,7 +1603,7 @@ dependencies = [
  "goblin",
  "reflink",
  "serde",
- "toml",
+ "toml 0.7.8",
 ]
 
 [[package]]
@@ -2715,7 +2716,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.4",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2798,6 +2799,15 @@ checksum = "2e70e4c5a0e0a8a4823ad65dfe1a6930e4f4d756dcd9dd7939022b5e8c501215"
 dependencies = [
  "num-conv",
  "time-core",
+]
+
+[[package]]
+name = "toml"
+version = "0.5.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4f7f0dd8d50a853a531c426359045b1998f04219d88799810762cd4ad314234"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -3430,6 +3440,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09dac053f1cd375980747450bfc7250c264eaae0583872e845c0c7cd578872b5"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "winres"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b68db261ef59e9e52806f688020631e987592bd83619edccda9c47d42cde4f6c"
+dependencies = [
+ "toml 0.5.11",
 ]
 
 [[package]]

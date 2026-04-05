@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Autokit
+Comment=Drum machine
+Exec=/home/natalia/.local/bin/autokit-launch
+Icon=autokit
+Type=Application
+Categories=Audio;Music;

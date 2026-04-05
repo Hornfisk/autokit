@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use nih_plug::prelude::*;
 use nih_plug_egui::egui;
 
@@ -5,6 +8,9 @@ use crate::plugin::AutokitParams;
 use crate::ui::editor::ViewMode;
 use crate::ui::state::ScanStatus;
 use crate::ui::theme;
+
+const ICON_SIZE: usize = 64;
+const ICON_RGBA: &[u8] = include_bytes!("../../assets/icon_64_rgba.bin");
 
 /// Actions the toolbar can trigger.
 pub enum ToolbarAction {
@@ -18,6 +24,16 @@ pub enum ToolbarAction {
     OpenLoadDialog,
     ToggleView,
     SetView(ViewMode),
+    OpenSetup,
+}
+
+/// Load the logo texture (call once, cache the handle).
+pub fn load_logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    ctx.load_texture(
+        "autokit_logo",
+        egui::ColorImage::from_rgba_unmultiplied([ICON_SIZE, ICON_SIZE], ICON_RGBA),
+        egui::TextureOptions::LINEAR,
+    )
 }
 
 /// Draw the toolbar from snapshot data (no mutex held).
@@ -32,6 +48,11 @@ pub fn draw_toolbar_snapshot(
     current_scale: f32,
     view_mode: ViewMode,
     shortcut_info: Option<(usize, &str)>,
+    logo_texture: &egui::TextureHandle,
+    scan_processed: u32,
+    scan_total: u32,
+    is_standalone: bool,
+    standalone_tempo: &Arc<AtomicU32>,
 ) -> ToolbarAction {
     let mut action = ToolbarAction::None;
 
@@ -43,11 +64,13 @@ pub fn draw_toolbar_snapshot(
                 ui.set_height(28.0);
                 ui.spacing_mut().item_spacing.x = 8.0;
 
-                // Left: logo + scan status
+                // Left: logo icon + "AUTOKIT" text + version
+                let sized = egui::load::SizedTexture::new(logo_texture.id(), egui::vec2(22.0, 22.0));
+                ui.image(sized);
                 ui.label(
                     egui::RichText::new("AUTOKIT")
-                        .font(egui::FontId::new(15.0, egui::FontFamily::Monospace))
-                        .color(theme::ACCENT)
+                        .font(egui::FontId::new(18.0, egui::FontFamily::Monospace))
+                        .color(egui::Color32::from_rgb(0xe6, 0x58, 0x8c))
                         .strong(),
                 );
                 ui.label(
@@ -83,19 +106,72 @@ pub fn draw_toolbar_snapshot(
                 }
 
                 match scan_status {
+                    ScanStatus::NeedsSetup { .. } => {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("set sample folder...")
+                                        .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                        .color(theme::TEXT_DIM),
+                                )
+                                .fill(egui::Color32::TRANSPARENT)
+                                .frame(false),
+                            )
+                            .clicked()
+                        {
+                            action = ToolbarAction::OpenSetup;
+                        }
+                    }
                     ScanStatus::Scanning => {
-                        ui.label(
-                            egui::RichText::new("scanning...")
-                                .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                                .color(theme::TEXT_DIM),
-                        );
+                        if scan_total > 0 {
+                            let pct = (scan_processed as f32 / scan_total as f32).clamp(0.0, 1.0);
+                            let label = format!("scanning... {}/{}", scan_processed, scan_total);
+                            ui.label(
+                                egui::RichText::new(&label)
+                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                    .color(theme::TEXT_DIM),
+                            );
+                            let bar_width = 80.0;
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(bar_width, 8.0),
+                                egui::Sense::hover(),
+                            );
+                            ui.painter().rect_filled(
+                                rect,
+                                2.0,
+                                theme::BG_ROW,
+                            );
+                            let mut fill_rect = rect;
+                            fill_rect.set_right(rect.left() + bar_width * pct);
+                            ui.painter().rect_filled(
+                                fill_rect,
+                                2.0,
+                                theme::ACCENT,
+                            );
+                        } else {
+                            ui.label(
+                                egui::RichText::new("scanning...")
+                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                    .color(theme::TEXT_DIM),
+                            );
+                        }
                     }
                     ScanStatus::Ready { total } => {
-                        ui.label(
-                            egui::RichText::new(format!("{total} samples"))
-                                .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                                .color(theme::ACCENT),
-                        );
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(format!("{total} samples"))
+                                        .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                        .color(theme::ACCENT),
+                                )
+                                .fill(egui::Color32::TRANSPARENT)
+                                .frame(false),
+                            )
+                            .on_hover_text("Click to change sample folder")
+                            .clicked()
+                        {
+                            action = ToolbarAction::OpenSetup;
+                        }
                     }
                 }
 
@@ -103,6 +179,21 @@ pub fn draw_toolbar_snapshot(
                     ui.label(egui::RichText::new(format!("\u{2192} pad {}: {}", pad_num, cat_label))
                         .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
                         .color(theme::ACCENT));
+                }
+
+                // Tempo control — standalone only (plugin tempo is owned by host)
+                if is_standalone {
+                    ui.add(egui::Separator::default().vertical().spacing(4.0));
+                    let mut bpm = standalone_tempo.load(Ordering::Relaxed) as f32 / 10.0;
+                    let drag = egui::DragValue::new(&mut bpm)
+                        .range(30.0..=300.0)
+                        .speed(0.5)
+                        .fixed_decimals(1)
+                        .suffix(" BPM");
+                    if ui.add_sized(egui::vec2(72.0, 22.0), drag).changed() {
+                        standalone_tempo.store((bpm * 10.0) as u32, Ordering::Relaxed);
+                    }
+                    ui.add(egui::Separator::default().vertical().spacing(4.0));
                 }
 
                 // Right-aligned toolbar items — anchored to the right edge

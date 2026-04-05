@@ -2,6 +2,22 @@
 
 All notable changes to Autokit are documented here.
 
+## [0.2.2] — 2026-04-05
+
+### Added
+
+- **Per-track LVL knob** — each track in seq and pads view has a 16px inline LVL knob wired to pad volume. Double-click resets to 100%. VOL knob removed from expanded pads panel (redundant).
+- **Configurable sample library path** — new setup dialog with folder browser; config persisted to `~/.config/autokit/config.json`. Auto-discovers `~/Music/Samples` on first run.
+- **Tempo control (standalone)** — editable BPM field in toolbar (range 30–300, drag or type). Not shown in plugin mode where host owns tempo.
+- **Transport logging** — `tracing::debug!` logs at transport decision point and sequencer trigger for diagnostics.
+
+### Fixed
+
+- **Space-bar double-trigger in DAW** — pressing Space while the plugin GUI is focused in Renoise no longer fires both DAW transport AND internal play simultaneously. Internal play is gated: ignored when the host transport is actively driving playback.
+- **Tempo change position jump** — changing BPM in standalone no longer resets the sequencer to step 1. Beat position is now accumulated incrementally instead of derived from `samples * tempo`.
+- **Internal play clean start** — toggling internal play on now resets the sequencer to step 0 and clears the beat accumulator, preventing stale position jumps.
+- **Standalone audio backend** — switched from JACK to ALSA backend in launch script, fixing silent `process()` failure under PipeWire's JACK emulation.
+
 ## [0.2.1] — 2026-04-05
 
 ### Fixed

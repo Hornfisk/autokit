@@ -5,22 +5,19 @@ use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 
-use crossbeam_channel::Receiver;
 use crate::engine::kit::NUM_PADS;
 
-use crate::analysis::library::SampleLibrary;
+use crate::analysis::library::{SampleLibrary, ScanProgress};
 use crate::engine::echo_detect::EchoDetector;
 use crate::engine::sampler::VoicePool;
 use crate::engine::sequencer::Sequencer;
 use crate::logging;
 use crate::ui::state::{ScanStatus, SharedState};
+use crate::util::config;
 use crate::util::history::HistorySnapshot;
 use crate::util::preset;
-
-/// Hard-coded sample library root — folder picker comes in GUI phase.
-const SAMPLE_LIBRARY_ROOT: &str = "/home/natalia/Music/Samples";
 
 /// Number of waveform display points per pad.
 const WAVEFORM_POINTS: usize = 200;
@@ -58,12 +55,6 @@ impl Default for AutokitParams {
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
         }
     }
-}
-
-/// Messages from background thread to audio thread.
-enum BgMessage {
-    /// Library scan complete — assign samples to kit.
-    LibraryReady(SampleLibrary),
 }
 
 /// Lightweight preview voice — separate from VoicePool.
@@ -113,8 +104,6 @@ pub struct Autokit {
     /// State shared with the GUI thread.
     pub shared: Arc<Mutex<SharedState>>,
     voices: Option<VoicePool>,
-    /// Receive messages from background thread (checked in process()).
-    bg_rx: Option<Receiver<BgMessage>>,
     sequencer: Sequencer,
     /// Lockfree trigger counters — incremented each time a pad fires.
     /// Shared with the GUI thread which reads them each frame for activity animation.
@@ -138,8 +127,18 @@ pub struct Autokit {
     echo_detector: EchoDetector,
     /// Whether echo suppression is active — read by GUI for "EXT" indicator.
     pub seq_ext_mode: Arc<AtomicBool>,
-    /// Internal beat counter for free-running mode (samples elapsed).
-    seq_internal_samples: u64,
+    /// Whether the host transport is actively driving playback — read by GUI to gate Space bar.
+    pub seq_host_playing: Arc<AtomicBool>,
+    /// Current tempo (BPM * 10) — written by audio thread, read by GUI for display.
+    pub seq_tempo: Arc<AtomicU32>,
+    /// Standalone tempo override (BPM * 10) — written by GUI, read by audio thread.
+    pub seq_standalone_tempo: Arc<AtomicU32>,
+    /// Whether we're running inside a real DAW (host has ever stopped transport).
+    /// Standalone backends never stop, so this stays false. Read by GUI to show/hide tempo control.
+    pub seq_is_daw: Arc<AtomicBool>,
+    /// Internal beat accumulator for free-running mode.
+    /// Tracks beats directly (not samples) so tempo changes don't cause position jumps.
+    seq_internal_beats: f64,
     /// Counter for periodic state persistence (~1s intervals).
     persist_counter: u64,
     /// Whether initial state restoration is complete — blocks persist until then.
@@ -148,6 +147,8 @@ pub struct Autokit {
     /// Used to distinguish real DAW transport (which stops/starts) from
     /// standalone backends that always report `playing = true`.
     host_ever_stopped: bool,
+    /// Whether internal play was active on the previous buffer — for edge detection.
+    seq_internal_play_prev: bool,
     /// Debug: counts process() calls to log periodic status.
     #[cfg(debug_assertions)]
     process_count: u64,
@@ -160,7 +161,6 @@ impl Default for Autokit {
             sample_rate: 44100.0,
             shared: Arc::new(Mutex::new(SharedState::new())),
             voices: None,
-            bg_rx: None,
             sequencer: Sequencer::new(),
             trigger_flags: Arc::new(core::array::from_fn(|_| AtomicU8::new(0))),
             gui_triggers: Arc::new(core::array::from_fn(|_| AtomicU8::new(0))),
@@ -172,10 +172,15 @@ impl Default for Autokit {
             seq_internal_play: Arc::new(AtomicBool::new(false)),
             echo_detector: EchoDetector::new(),
             seq_ext_mode: Arc::new(AtomicBool::new(false)),
-            seq_internal_samples: 0,
+            seq_host_playing: Arc::new(AtomicBool::new(false)),
+            seq_tempo: Arc::new(AtomicU32::new(1200)), // 120.0 BPM
+            seq_standalone_tempo: Arc::new(AtomicU32::new(1200)), // 120.0 BPM
+            seq_is_daw: Arc::new(AtomicBool::new(false)),
+            seq_internal_beats: 0.0,
             persist_counter: 0,
             state_restored: false,
             host_ever_stopped: false,
+            seq_internal_play_prev: false,
             #[cfg(debug_assertions)]
             process_count: 0,
         }
@@ -184,7 +189,7 @@ impl Default for Autokit {
 
 /// Populate the kit from the library using the default layout, then update waveforms.
 /// Ensures each pad receives a unique sample (best-effort when category has fewer samples than pads).
-fn populate_kit_from_library(shared: &mut SharedState) {
+pub fn populate_kit_from_library(shared: &mut SharedState) {
     let layout = shared.library.as_ref().expect("library must be set before populate").generate_kit();
     let mut assigned = 0u32;
 
@@ -221,6 +226,46 @@ fn populate_kit_from_library(shared: &mut SharedState) {
     tracing::info!(assigned, total_pads = shared.kit.pads.len(), "kit populated from library");
 
     shared.update_all_waveforms(WAVEFORM_POINTS);
+}
+
+impl Autokit {
+    /// Handle a completed library scan — populate kit, restore state, update status.
+    fn receive_library(&mut self, library: SampleLibrary) {
+        tracing::info!(total = library.total, "library received — populating kit");
+        let mut shared = self.shared.lock();
+        // Push snapshot before first population for undo support
+        let snapshot = HistorySnapshot {
+            pads: shared.kit.snapshot(),
+            sequencer: self.sequencer.snapshot(),
+        };
+        shared.history.push(snapshot);
+        shared.library = Some(library);
+
+        // Check for persisted state from DAW save/load
+        let persisted = self.params.plugin_state.lock().clone();
+        tracing::info!(persisted_len = persisted.len(), "checking for persisted plugin state");
+        if !persisted.is_empty() {
+            match serde_json::from_str::<preset::Preset>(&persisted) {
+                Ok(p) => {
+                    tracing::info!("restoring persisted kit+patterns");
+                    let s = &mut *shared;
+                    preset::apply_to_kit(&p, &mut s.kit, &mut s.pattern_bank);
+                    shared.update_all_waveforms(WAVEFORM_POINTS);
+                }
+                Err(e) => {
+                    tracing::warn!("failed to parse persisted state: {e}");
+                    populate_kit_from_library(&mut shared);
+                }
+            }
+        } else {
+            populate_kit_from_library(&mut shared);
+        }
+
+        shared.scan_status = ScanStatus::Ready {
+            total: shared.library.as_ref().map(|l| l.total).unwrap_or(0),
+        };
+        self.state_restored = true;
+    }
 }
 
 impl Plugin for Autokit {
@@ -265,6 +310,10 @@ impl Plugin for Autokit {
             Arc::clone(&self.seq_fill_active),
             Arc::clone(&self.seq_internal_play),
             Arc::clone(&self.seq_ext_mode),
+            Arc::clone(&self.seq_host_playing),
+            Arc::clone(&self.seq_tempo),
+            Arc::clone(&self.seq_standalone_tempo),
+            Arc::clone(&self.seq_is_daw),
         );
         tracing::info!("editor() result: {}", if result.is_some() { "Some" } else { "None" });
         result
@@ -287,23 +336,52 @@ impl Plugin for Autokit {
 
         self.voices = Some(VoicePool::new(self.sample_rate));
 
-        // Spawn background thread to scan sample library
-        let (tx, rx) = crossbeam_channel::bounded::<BgMessage>(1);
-        self.bg_rx = Some(rx);
-
+        // Load config and decide whether to scan or show setup dialog
+        let cfg = config::Config::load();
         let sample_rate = self.sample_rate;
-        let root = PathBuf::from(SAMPLE_LIBRARY_ROOT);
 
-        std::thread::Builder::new()
-            .name("autokit-scanner".to_string())
-            .spawn(move || {
-                tracing::info!("background scan starting");
-                let library = SampleLibrary::build(&root, sample_rate);
-                if tx.send(BgMessage::LibraryReady(library)).is_err() {
-                    tracing::warn!("plugin dropped before scan completed");
+        if let Some(ref cfg) = cfg {
+            let root = PathBuf::from(&cfg.sample_library_root);
+            if root.is_dir() {
+                // Config exists and path is valid — scan immediately
+                let (tx, rx) = crossbeam_channel::bounded::<SampleLibrary>(1);
+
+                let progress = Arc::new(ScanProgress {
+                    processed: AtomicU32::new(0),
+                    total: AtomicU32::new(0),
+                });
+                {
+                    let mut shared = self.shared.lock();
+                    shared.scan_progress = Some(Arc::clone(&progress));
+                    shared.bg_rx = Some(rx);
                 }
-            })
-            .expect("failed to spawn scanner thread");
+
+                std::thread::Builder::new()
+                    .name("autokit-scanner".to_string())
+                    .spawn(move || {
+                        tracing::info!("background scan starting");
+                        let library = SampleLibrary::build_with_progress(&root, sample_rate, Some(&progress));
+                        if tx.send(library).is_err() {
+                            tracing::warn!("plugin dropped before scan completed");
+                        }
+                    })
+                    .expect("failed to spawn scanner thread");
+            } else {
+                tracing::warn!(path = %cfg.sample_library_root, "configured sample path not found");
+                let mut shared = self.shared.lock();
+                shared.scan_status = ScanStatus::NeedsSetup {
+                    suggested_path: config::discover_sample_root(),
+                };
+            }
+        } else {
+            // No config — check if default path exists for auto-discovery
+            let discovered = config::discover_sample_root();
+            let mut shared = self.shared.lock();
+            shared.scan_status = ScanStatus::NeedsSetup {
+                suggested_path: discovered,
+            };
+            tracing::info!("no config found — showing setup dialog");
+        }
 
         true
     }
@@ -315,53 +393,44 @@ impl Plugin for Autokit {
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         // Check for background thread messages (non-blocking)
-        if let Some(rx) = &self.bg_rx {
-            if let Ok(msg) = rx.try_recv() {
+        {
+            let library = self.shared.try_lock().and_then(|s| {
+                s.bg_rx.as_ref().and_then(|rx| rx.try_recv().ok())
+            });
+            if let Some(library) = library {
                 permit_alloc(|| {
-                    match msg {
-                        BgMessage::LibraryReady(library) => {
-                            tracing::info!(
-                                total = library.total,
-                                "library received — populating kit"
-                            );
-                            let mut shared = self.shared.lock();
-                            // Push snapshot before first population for undo support
-                            let snapshot = HistorySnapshot {
-                                pads: shared.kit.snapshot(),
-                                sequencer: self.sequencer.snapshot(),
-                            };
-                            shared.history.push(snapshot);
-                            shared.library = Some(library);
+                    self.receive_library(library);
+                });
+            }
+        }
 
-                            // Check for persisted state from DAW save/load
-                            let persisted = self.params.plugin_state.lock().clone();
-                            tracing::info!(
-                                persisted_len = persisted.len(),
-                                "checking for persisted plugin state"
-                            );
-                            if !persisted.is_empty() {
-                                match serde_json::from_str::<preset::Preset>(&persisted) {
-                                    Ok(p) => {
-                                        tracing::info!("restoring persisted kit+patterns");
-                                        let s = &mut *shared;
-                                        preset::apply_to_kit(&p, &mut s.kit, &mut s.pattern_bank);
-                                        shared.update_all_waveforms(WAVEFORM_POINTS);
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("failed to parse persisted state: {e}");
-                                        populate_kit_from_library(&mut shared);
-                                    }
-                                }
-                            } else {
-                                populate_kit_from_library(&mut shared);
-                            }
+        // Check if GUI requested a (re)scan
+        {
+            let scan_path = self.shared.try_lock().and_then(|mut s| s.pending_scan_path.take());
+            if let Some(root) = scan_path {
+                permit_alloc(|| {
+                    let (tx, rx) = crossbeam_channel::bounded::<SampleLibrary>(1);
+                    let sample_rate = self.sample_rate;
 
-                            shared.scan_status = ScanStatus::Ready {
-                                total: shared.library.as_ref().map(|l| l.total).unwrap_or(0),
-                            };
-                            self.state_restored = true;
-                        }
+                    let progress = Arc::new(ScanProgress {
+                        processed: AtomicU32::new(0),
+                        total: AtomicU32::new(0),
+                    });
+                    if let Some(mut s) = self.shared.try_lock() {
+                        s.scan_progress = Some(Arc::clone(&progress));
+                        s.bg_rx = Some(rx);
                     }
+
+                    std::thread::Builder::new()
+                        .name("autokit-scanner".to_string())
+                        .spawn(move || {
+                            tracing::info!(path = %root.display(), "background scan starting (from GUI)");
+                            let library = SampleLibrary::build_with_progress(&root, sample_rate, Some(&progress));
+                            if tx.send(library).is_err() {
+                                tracing::warn!("plugin dropped before scan completed");
+                            }
+                        })
+                        .expect("failed to spawn scanner thread");
                 });
             }
         }
@@ -432,21 +501,51 @@ impl Plugin for Autokit {
             if !transport.playing {
                 self.host_ever_stopped = true;
             }
+            self.seq_is_daw.store(self.host_ever_stopped, Ordering::Relaxed);
             let internal_play = self.seq_internal_play.load(Ordering::Relaxed);
+            let host_driving = self.host_ever_stopped && transport.playing && !internal_play;
+            self.seq_host_playing.store(host_driving, Ordering::Relaxed);
+
+            // Edge detection: reset internal counter when internal play is toggled on
+            if internal_play && !self.seq_internal_play_prev {
+                self.seq_internal_beats = 0.0;
+                self.sequencer.reset_position();
+            }
+            self.seq_internal_play_prev = internal_play;
+
             let (playing, tempo, pos_beats) = if internal_play {
-                // Free-running at host tempo (or 120 BPM default)
-                let t = transport.tempo.unwrap_or(120.0);
-                let beats = self.seq_internal_samples as f64 / self.sample_rate as f64 * (t / 60.0);
-                self.seq_internal_samples += num_samples as u64;
+                // Free-running — use standalone tempo if no host, otherwise host tempo
+                let t = if !self.host_ever_stopped {
+                    self.seq_standalone_tempo.load(Ordering::Relaxed) as f64 / 10.0
+                } else {
+                    transport.tempo.unwrap_or(120.0)
+                };
+                // Accumulate beats incrementally so tempo changes don't jump position
+                let beats = self.seq_internal_beats;
+                self.seq_internal_beats += num_samples as f64 / self.sample_rate as f64 * (t / 60.0);
                 (true, Some(t), Some(beats))
-            } else if self.host_ever_stopped && transport.playing {
-                // Follow host transport (DAW started playback after being stopped)
-                self.seq_internal_samples = 0;
+            } else if host_driving {
+                self.seq_internal_beats = 0.0;
                 (true, transport.tempo, transport.pos_beats())
             } else {
-                self.seq_internal_samples = 0;
+                self.seq_internal_beats = 0.0;
                 (false, transport.tempo, None)
             };
+
+            // Store current tempo for GUI display
+            let display_tempo = tempo.unwrap_or(120.0);
+            self.seq_tempo.store((display_tempo * 10.0) as u32, Ordering::Relaxed);
+
+            tracing::debug!(
+                internal_play,
+                host_playing = transport.playing,
+                host_ever_stopped = self.host_ever_stopped,
+                host_driving,
+                ?tempo,
+                ?pos_beats,
+                internal_beats = self.seq_internal_beats,
+                "transport decision"
+            );
 
             // --- Sequencer fires FIRST so echo detector can record outgoing notes ---
             // Capture trigger counts before sequencer runs
@@ -457,7 +556,7 @@ impl Plugin for Autokit {
             // Run sequencer with pattern data from SharedState
             // Split borrow: kit (immutable) and pattern_bank (mutable) are separate fields
             let shared_ref = &mut *shared;
-            self.sequencer.process_buffer_with_patterns(
+            let triggered = self.sequencer.process_buffer_with_patterns(
                 num_samples,
                 playing,
                 tempo,
@@ -468,6 +567,9 @@ impl Plugin for Autokit {
                 &mut shared_ref.pattern_bank,
                 &self.trigger_flags,
             );
+            if triggered > 0 {
+                tracing::debug!(triggered, step = self.sequencer.current_step(), "sequencer fired");
+            }
 
             // Send MIDI output and record in echo detector BEFORE processing incoming MIDI
             for i in 0..NUM_PADS {

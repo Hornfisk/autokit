@@ -19,6 +19,7 @@ mod analysis {
 
 mod ui {
     pub mod editor;
+    pub mod folder_browser;
     pub mod knob;
     pub mod pad_row;
     pub mod sample_map;
@@ -31,6 +32,7 @@ mod ui {
 
 mod util {
     pub mod audio_file;
+    pub mod config;
     pub mod history;
     pub mod preset;
 }

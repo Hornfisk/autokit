@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use rand::prelude::IndexedRandom;
 
@@ -9,6 +10,12 @@ use crate::analysis::features;
 use crate::analysis::scanner::{self, SampleEntry};
 use crate::engine::kit::SampleCategory;
 use crate::util::audio_file;
+
+/// Shared scan progress counters, readable from the UI thread.
+pub struct ScanProgress {
+    pub processed: AtomicU32,
+    pub total: AtomicU32,
+}
 
 /// Maximum sample duration in seconds — longer samples are filtered out.
 const MAX_DURATION_SECS: f32 = 4.0;
@@ -37,6 +44,10 @@ impl SampleLibrary {
     /// Uses a persistent cache to skip DSP analysis for unchanged files.
     /// This is expensive — run on a background thread.
     pub fn build(root: &Path, sample_rate: f32) -> Self {
+        Self::build_with_progress(root, sample_rate, None)
+    }
+
+    pub fn build_with_progress(root: &Path, sample_rate: f32, progress: Option<&Arc<ScanProgress>>) -> Self {
         tracing::info!(root = %root.display(), "starting library scan");
 
         // Load existing cache (if present, valid, and for the same root)
@@ -44,6 +55,10 @@ impl SampleLibrary {
 
         let entries = scanner::scan_folder(root);
         let max_samples = (MAX_DURATION_SECS * sample_rate) as usize;
+
+        if let Some(p) = &progress {
+            p.total.store(entries.len() as u32, Ordering::Relaxed);
+        }
 
         let mut by_category: HashMap<SampleCategory, Vec<AnalyzedSample>> = HashMap::new();
         let mut loaded = 0u32;
@@ -63,6 +78,7 @@ impl SampleLibrary {
                 Err(e) => {
                     tracing::trace!(path = path_str, error = %e, "skipping unloadable file");
                     skipped += 1;
+                    if let Some(p) = &progress { p.processed.store(loaded + skipped, Ordering::Relaxed); }
                     continue;
                 }
             };
@@ -70,12 +86,14 @@ impl SampleLibrary {
             // Filter by duration
             if data.len() > max_samples {
                 skipped += 1;
+                if let Some(p) = &progress { p.processed.store(loaded + skipped, Ordering::Relaxed); }
                 continue;
             }
 
             // Filter by oneshot heuristic: must have a clear transient
             if !looks_like_oneshot(&data) {
                 skipped += 1;
+                if let Some(p) = &progress { p.processed.store(loaded + skipped, Ordering::Relaxed); }
                 continue;
             }
 
@@ -127,7 +145,15 @@ impl SampleLibrary {
             };
 
             by_category.entry(category).or_default().push(analyzed);
+            if let Some(p) = &progress {
+                p.processed.store(loaded + skipped, Ordering::Relaxed);
+            }
             loaded += 1;
+        }
+
+        // Mark progress complete before post-loop work (cache save)
+        if let Some(p) = &progress {
+            p.processed.store(p.total.load(Ordering::Relaxed), Ordering::Relaxed);
         }
 
         // Purge stale cache entries for files no longer on disk
