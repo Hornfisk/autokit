@@ -3,4 +3,4 @@
 # CoreAudio may deliver buffers larger than 512, which crashes
 # nih-plug's CPAL backend. Using 1024 avoids this.
 DIR="$(cd "$(dirname "$0")" && pwd)"
-exec "$DIR/autokit-standalone" --buffer-size 1024 "$@"
+exec "$DIR/autokit-standalone" --period-size 1024 "$@"
