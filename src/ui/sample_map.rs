@@ -144,6 +144,7 @@ pub fn draw_map(
     hovered_index: &mut Option<usize>,
     shortcut_pad: Option<usize>,
     shortcut_category: Option<SampleCategory>,
+    tooltips_on: bool,
 ) -> MapAction {
     let mut action = MapAction::None;
     let available = ui.available_size();
@@ -260,38 +261,40 @@ pub fn draw_map(
     if let Some(cursor) = response.hover_pos() {
         if let Some(hit) = hit_test(cursor, points, view, rect, 8.0) {
             *hovered_index = Some(hit.point_index);
-            let p = &points[hit.point_index];
-            let color = theme::category_color(p.category);
+            if tooltips_on {
+                let p = &points[hit.point_index];
+                let color = theme::category_color(p.category);
 
-            let mut tooltip_pos = egui::pos2(cursor.x + 15.0, cursor.y - 10.0);
-            if tooltip_pos.x + 150.0 > rect.right() {
-                tooltip_pos.x = cursor.x - 165.0;
-            }
-            if tooltip_pos.y < rect.top() + 10.0 {
-                tooltip_pos.y = cursor.y + 15.0;
-            }
+                let mut tooltip_pos = egui::pos2(cursor.x + 15.0, cursor.y - 10.0);
+                if tooltip_pos.x + 150.0 > rect.right() {
+                    tooltip_pos.x = cursor.x - 165.0;
+                }
+                if tooltip_pos.y < rect.top() + 10.0 {
+                    tooltip_pos.y = cursor.y + 15.0;
+                }
 
-            let tooltip_rect =
-                egui::Rect::from_min_size(tooltip_pos, egui::vec2(150.0, 32.0));
-            painter.rect_filled(
-                tooltip_rect,
-                4.0,
-                egui::Color32::from_rgba_premultiplied(0x11, 0x11, 0x26, 0xee),
-            );
-            painter.text(
-                tooltip_rect.min + egui::vec2(6.0, 4.0),
-                egui::Align2::LEFT_TOP,
-                &p.name,
-                egui::FontId::new(9.0, egui::FontFamily::Monospace),
-                color.to_egui(),
-            );
-            painter.text(
-                tooltip_rect.min + egui::vec2(6.0, 17.0),
-                egui::Align2::LEFT_TOP,
-                format!("{} \u{00b7} {:.0}Hz \u{00b7} {:.2}s", p.category.label(), p.centroid_hz, p.decay_secs),
-                egui::FontId::new(8.0, egui::FontFamily::Monospace),
-                theme::TEXT_DIM,
-            );
+                let tooltip_rect =
+                    egui::Rect::from_min_size(tooltip_pos, egui::vec2(150.0, 32.0));
+                painter.rect_filled(
+                    tooltip_rect,
+                    4.0,
+                    egui::Color32::from_rgba_premultiplied(0x11, 0x11, 0x26, 0xee),
+                );
+                painter.text(
+                    tooltip_rect.min + egui::vec2(6.0, 4.0),
+                    egui::Align2::LEFT_TOP,
+                    &p.name,
+                    egui::FontId::new(9.0, egui::FontFamily::Monospace),
+                    color.to_egui(),
+                );
+                painter.text(
+                    tooltip_rect.min + egui::vec2(6.0, 17.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("{} \u{00b7} {:.0}Hz \u{00b7} {:.2}s", p.category.label(), p.centroid_hz, p.decay_secs),
+                    egui::FontId::new(8.0, egui::FontFamily::Monospace),
+                    theme::TEXT_DIM,
+                );
+            }
         } else {
             *hovered_index = None;
         }

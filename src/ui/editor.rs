@@ -520,6 +520,7 @@ pub fn create(
                                 &mut state.map_hovered,
                                 state.map_shortcut_pad,
                                 shortcut_category,
+                                state.tooltips_on,
                             );
 
                             match map_action {
