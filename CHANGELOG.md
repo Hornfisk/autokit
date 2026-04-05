@@ -2,6 +2,36 @@
 
 All notable changes to Autokit are documented here.
 
+## [0.4.1] — 2026-04-05
+
+### Added
+
+- **Toggleable mouseover tooltips** — `[?]` button in the toolbar enables/disables short help tooltips on all interactive controls. Default: on. Covers toolbar (CMP, DRV, LIM, VOL, view tabs, undo/redo, dice/lock, presets, BPM), pad row (play, dice, lock, LVL knob, category tag), sequencer (M/S/L, step cells, pattern slots, shift, dice, fill, copy/paste/clear/save/load/export), and sample map.
+- **Pattern shift left/right** — `◀`/`▶` buttons in the sequencer bottom bar rotate all lanes circularly by one step. All step data (velocity, p-locks, conditions) travels with the step. Undo supported.
+
+## [0.4.0] — 2026-04-05
+
+### Added
+
+- **Pattern save/load/delete** — individual patterns to `~/.local/share/autokit/patterns/`. Load dialog with delete (x) button.
+- **Preset delete** — x button in the load preset dialog.
+- **Standalone state recall** — auto-saves kit + patterns on exit, restores on next launch from `~/.local/share/autokit/standalone_state.json`.
+- **Master bus compressor** — RMS compressor (4:1, auto makeup gain), tanh soft-clipping saturator, brickwall limiter. Toolbar knobs: CMP (threshold), DRV (drive), LIM (on/off toggle). All DAW-automatable.
+
+### Removed
+
+- Broken scale selector.
+
+### Fixed
+
+- Knob smoother feedback — GUI knobs now read `unmodulated_plain_value()` to avoid fighting the parameter smoother.
+
+## [0.3.0] — 2026-04-04
+
+### Changed
+
+- **Major refactor for maintainability and audio-thread safety** — separated GUI rendering from shared-state mutation, introduced snapshot-based rendering, improved lock discipline.
+
 ## [0.2.2] — 2026-04-05
 
 ### Added
