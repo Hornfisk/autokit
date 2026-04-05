@@ -54,15 +54,49 @@ Get-Content SHA256SUMS.txt | ForEach-Object {
 
 You can also upload binaries to [VirusTotal](https://www.virustotal.com/) to scan before running.
 
-### macOS note
+### macOS setup
 
-The binaries are not codesigned or notarized. macOS will block them on first launch. To bypass, run this in the extracted folder before installing:
+The binaries are not codesigned or notarized, so macOS will block them on first launch. Here's how to get running:
+
+**1. Extract the archive**
+
+Double-click the `.tar.gz` file in Finder — it extracts automatically. Or in Terminal:
 
 ```bash
-xattr -dr com.apple.quarantine autokit-standalone libautokit.dylib
+tar xzf autokit-macos-arm64.tar.gz
+cd autokit-macos-arm64
 ```
 
-Or right-click the binary and select **Open**.
+**2. Remove the quarantine flag**
+
+macOS marks downloaded files as untrusted. Remove that flag from everything in the folder:
+
+```bash
+xattr -dr com.apple.quarantine .
+```
+
+**3. Run the standalone**
+
+Use the included launch script — it configures the audio buffer size for macOS compatibility:
+
+```bash
+./autokit-macos.sh
+```
+
+If macOS still blocks it, go to **System Settings → Privacy & Security**, scroll down, and click **Open Anyway** next to the Autokit warning. You only need to do this once.
+
+**4. Install plugins for your DAW**
+
+Copy the plugin bundles to the standard macOS locations:
+
+```bash
+cp -r autokit.vst3 ~/Library/Audio/Plug-Ins/VST3/
+cp -r autokit.clap ~/Library/Audio/Plug-Ins/CLAP/
+```
+
+Then rescan plugins in your DAW.
+
+**Note:** The standalone uses `--period-size 4096` via the launch script to work around a CoreAudio buffer size issue ([nih-plug#266](https://github.com/robbert-vdh/nih-plug/issues/266)). This adds slight latency in standalone mode. VST3/CLAP in DAWs are unaffected.
 
 Audio Unit (AU) is not supported. Most macOS DAWs (Ableton, Bitwig, REAPER, Renoise) support VST3 or CLAP. Logic Pro is AU-only and will not see Autokit.
 
