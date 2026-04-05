@@ -124,10 +124,11 @@ pub fn draw_collapsed_from_snapshot(
                                 egui::Id::new(("pad_lvl", _index)),
                                 &mut vol,
                                 0.0, 1.0, 1.0,
-                                "LVL",
+                                "Pad volume",
                                 |v| format!("{}", (v * 100.0) as u32),
                                 cat_egui,
                                 16.0,
+                                tooltips_on,
                             )
                         })
                     });

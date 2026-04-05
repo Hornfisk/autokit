@@ -128,6 +128,7 @@ pub fn knob_inline(
     format_value: impl Fn(f32) -> String,
     ring_color: egui::Color32,
     diameter: f32,
+    tooltips_on: bool,
 ) -> KnobResponse {
     let mut result = KnobResponse {
         changed: false,
@@ -137,7 +138,7 @@ pub fn knob_inline(
     let size = egui::vec2(diameter, diameter);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
     let response = response.on_hover_cursor(egui::CursorIcon::ResizeVertical);
-    response.clone().on_hover_text(tooltip);
+    crate::ui::theme::tip(response.clone(), tooltip, tooltips_on);
 
     // Double-click detection (egui-baseview workaround)
     let dbl_id = id.with("last_press_inline");

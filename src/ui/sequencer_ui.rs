@@ -315,10 +315,11 @@ fn draw_grid(
                             egui::Id::new(("seq_lvl", lane_idx)),
                             &mut vol,
                             0.0, 1.0, 1.0,
-                            "LVL",
+                            "Lane volume",
                             |v| format!("{}", (v * 100.0) as u32),
                             cat_color,
                             16.0,
+                            false,
                         )
                     })
                 });

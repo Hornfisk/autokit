@@ -232,9 +232,10 @@ pub fn draw_toolbar_snapshot(
                         let resp = crate::ui::knob::knob_inline(
                             ui, egui::Id::new("master_vol_knob"),
                             &mut gain_db, -60.0, 6.0, 0.0,
-                            "Master volume (dB)",
+                            "Master volume (dB). Double-click to reset",
                             |v| format!("{v:.1}"),
                             theme::ACCENT, 20.0,
+                            tooltips_on,
                         );
                         if resp.changed {
                             setter.begin_set_parameter(&params.master_volume);
@@ -281,9 +282,10 @@ pub fn draw_toolbar_snapshot(
                         let resp = crate::ui::knob::knob_inline(
                             ui, egui::Id::new("comp_drive_knob"),
                             &mut drive, 0.0, 1.0, 0.0,
-                            "Saturation drive",
+                            "Saturation drive. Double-click to reset",
                             |v| format!("{:.0}%", v * 100.0),
                             theme::TEXT_DIM, 20.0,
+                            tooltips_on,
                         );
                         if resp.changed {
                             setter.begin_set_parameter(&params.comp_drive);
@@ -303,9 +305,10 @@ pub fn draw_toolbar_snapshot(
                         let resp = crate::ui::knob::knob_inline(
                             ui, egui::Id::new("comp_threshold_knob"),
                             &mut thr, -40.0, 0.0, -12.0,
-                            "Compressor threshold (dB)",
+                            "Master compressor threshold (dB). Double-click to reset",
                             |v| format!("{:.0}", v),
                             theme::ACCENT, 20.0,
+                            tooltips_on,
                         );
                         if resp.changed {
                             setter.begin_set_parameter(&params.comp_threshold);
