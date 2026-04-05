@@ -2,6 +2,12 @@
 
 All notable changes to Autokit are documented here.
 
+## [0.2.1] — 2026-04-05
+
+### Fixed
+
+- **Standalone auto-play from PipeWire/JACK transport** — the sequencer no longer auto-starts when the standalone backend reports `playing=true` without a real DAW transport. Only plays when the user presses PLAY (Space / button). DAW transport sync still works after the host stops and restarts playback.
+
 ## [0.2.0] — 2026-04-05
 
 ### Added

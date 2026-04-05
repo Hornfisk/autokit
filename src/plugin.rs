@@ -144,6 +144,10 @@ pub struct Autokit {
     persist_counter: u64,
     /// Whether initial state restoration is complete — blocks persist until then.
     state_restored: bool,
+    /// Whether the host transport has ever reported `playing = false`.
+    /// Used to distinguish real DAW transport (which stops/starts) from
+    /// standalone backends that always report `playing = true`.
+    host_ever_stopped: bool,
     /// Debug: counts process() calls to log periodic status.
     #[cfg(debug_assertions)]
     process_count: u64,
@@ -171,6 +175,7 @@ impl Default for Autokit {
             seq_internal_samples: 0,
             persist_counter: 0,
             state_restored: false,
+            host_ever_stopped: false,
             #[cfg(debug_assertions)]
             process_count: 0,
         }
@@ -415,9 +420,18 @@ impl Plugin for Autokit {
             // 1. Internal PLAY button / Space bar: free-run using internal sample counter
             // 2. Host transport playing: follow host position (works in DAWs)
             // 3. Neither: sequencer stopped
-            // In standalone mode, host transport.playing is always true but pos_beats
-            // is always None, so the user must use the internal PLAY button.
+            // Sequencer play state — two modes:
+            // 1. Internal PLAY (Space / button): free-run using internal sample counter.
+            // 2. Host transport: follow DAW position when the host is playing.
+            //
+            // Standalone backends (CPAL, JACK via PipeWire) report playing=true even
+            // when nothing is driving the transport.  To avoid auto-playing the
+            // sequencer we track whether the host has ever reported playing=false.
+            // Real DAW hosts toggle transport on/off; standalone backends never stop.
             let transport = context.transport();
+            if !transport.playing {
+                self.host_ever_stopped = true;
+            }
             let internal_play = self.seq_internal_play.load(Ordering::Relaxed);
             let (playing, tempo, pos_beats) = if internal_play {
                 // Free-running at host tempo (or 120 BPM default)
@@ -425,8 +439,8 @@ impl Plugin for Autokit {
                 let beats = self.seq_internal_samples as f64 / self.sample_rate as f64 * (t / 60.0);
                 self.seq_internal_samples += num_samples as u64;
                 (true, Some(t), Some(beats))
-            } else if transport.playing {
-                // Follow host transport (DAW provides position)
+            } else if self.host_ever_stopped && transport.playing {
+                // Follow host transport (DAW started playback after being stopped)
                 self.seq_internal_samples = 0;
                 (true, transport.tempo, transport.pos_beats())
             } else {
