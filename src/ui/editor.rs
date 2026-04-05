@@ -387,20 +387,20 @@ pub fn create(
                                             PadRowAction::ToggleLock => {
                                                 pending_actions.push(GuiAction::ToggleLock(i));
                                             }
+                                            PadRowAction::SetVolume(v) => {
+                                                pending_actions.push(GuiAction::SetPadVolume(i, v));
+                                            }
                                             _ => {}
                                         }
 
                                         // Expanded detail (knobs + dice category)
                                         if is_selected {
                                             let detail_action = pad_row::draw_expanded_from_snapshot(
-                                                ui, i, pad.category, pad.volume, pad.pan,
+                                                ui, i, pad.category, pad.pan,
                                                 pad.pitch, pad.decay,
                                             );
 
                                             match detail_action {
-                                                PadRowAction::SetVolume(v) => {
-                                                    pending_actions.push(GuiAction::SetPadVolume(i, v));
-                                                }
                                                 PadRowAction::SetPan(v) => {
                                                     pending_actions.push(GuiAction::SetPadPan(i, v));
                                                 }

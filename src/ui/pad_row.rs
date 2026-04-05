@@ -119,6 +119,30 @@ pub fn draw_collapsed_from_snapshot(
                 });
 
                 ui.add_space(4.0);
+
+                // LVL knob — inline, vertically centered
+                {
+                    let mut vol = volume;
+                    let knob_resp = ui.allocate_ui(egui::vec2(16.0, row_height), |ui| {
+                        ui.centered_and_justified(|ui| {
+                            crate::ui::knob::knob_inline(
+                                ui,
+                                egui::Id::new(("pad_lvl", _index)),
+                                &mut vol,
+                                0.0, 1.0, 1.0,
+                                "LVL",
+                                |v| format!("{}", (v * 100.0) as u32),
+                                cat_egui,
+                                16.0,
+                            )
+                        })
+                    });
+                    if knob_resp.inner.inner.changed {
+                        action = PadRowAction::SetVolume(vol);
+                    }
+                }
+
+                ui.add_space(4.0);
                 ui.spacing_mut().item_spacing.x = 6.0;
 
                 // Play button (▶)
@@ -161,7 +185,8 @@ pub fn draw_collapsed_from_snapshot(
                 // Waveform — compute from total width minus all fixed elements.
                 // Fixed: strip(3) + space(8) + tag(46) + spacing(6) + play(18+6)
                 //        + name(140+6) + dice(46+6) + lock(46+6)
-                const FIXED_W: f32 = 3.0 + 8.0 + 46.0 + 6.0 + 24.0 + 146.0 + 52.0 + 52.0 + 6.0 + 12.0;
+                // Added: 16px knob + 4px space = 20px
+                const FIXED_W: f32 = 3.0 + 8.0 + 46.0 + 4.0 + 16.0 + 4.0 + 6.0 + 24.0 + 146.0 + 52.0 + 52.0 + 6.0 + 12.0;
                 let waveform_width = (total_w - FIXED_W).max(40.0);
                 let wf_color = cat_color.to_egui_alpha((waveform_opacity * 255.0) as u8);
                 waveform::paint_waveform(
@@ -238,7 +263,6 @@ pub fn draw_expanded_from_snapshot(
     ui: &mut egui::Ui,
     index: usize,
     category: SampleCategory,
-    volume: f32,
     pan: f32,
     pitch: f32,
     decay: f32,
@@ -270,22 +294,6 @@ pub fn draw_expanded_from_snapshot(
 
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 16.0;
-
-                    // Volume knob
-                    let mut vol = volume;
-                    let vol_result = knob::knob(
-                        ui,
-                        egui::Id::new(("vol", index)),
-                        &mut vol,
-                        0.0, 1.0, 1.0,
-                        "VOL",
-                        |v| format!("{}", (v * 100.0) as u32),
-                        cat_egui,
-                        34.0,
-                    );
-                    if vol_result.changed {
-                        action = PadRowAction::SetVolume(vol);
-                    }
 
                     // Pan knob
                     let mut p = pan;
