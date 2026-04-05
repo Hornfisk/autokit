@@ -6,9 +6,9 @@ A sample-based drum machine plugin that scans your library, classifies oneshots 
 **Platforms:** Linux, macOS, Windows
 **License:** GPL-3.0-or-later
 
-![Pads view](assets/screenshot1.webp)
-![Sample map](assets/screenshot2.webp)
-![Sequencer view](assets/screenshot3.webp)
+![Pads view](assets/screenshot-pads.png)
+![Sample map](assets/screenshot-map.png)
+![Sequencer view](assets/screenshot-seq.png)
 
 ## Quick start
 
@@ -171,7 +171,7 @@ Run `./install.sh` (Linux/macOS) or `install.bat` (Windows) to copy plugins to s
 
 ## Known limitations
 
-- Sample library path is hardcoded to `~/Music/Samples`. Configurable path is planned.
+- Sample library path defaults to `~/Music/Samples` but can be changed via the setup dialog.
 - No Audio Unit (AU) support (nih-plug limitation).
 - Window is not dynamically resizable (egui-baseview limitation).
 
