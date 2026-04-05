@@ -43,6 +43,7 @@ pub fn draw_collapsed_from_snapshot(
     play_brightness: f32,
     locked: bool,
     row_height: f32,
+    tooltips_on: bool,
 ) -> PadRowAction {
     let mut action = PadRowAction::None;
     let cat_color = category_color(category);
@@ -148,6 +149,7 @@ pub fn draw_collapsed_from_snapshot(
                     .fill(egui::Color32::TRANSPARENT)
                     .min_size(egui::vec2(18.0, row_height)),
                 );
+                theme::tip(play_response.clone(), "Preview this pad (or press keyboard key)", tooltips_on);
                 if play_response.clicked() {
                     action = PadRowAction::PlayPad;
                 }
@@ -169,7 +171,7 @@ pub fn draw_collapsed_from_snapshot(
                     .sense(egui::Sense::click()),
                 );
                 if has_sample && name.chars().count() > 20 {
-                    name_response.clone().on_hover_text(name);
+                    theme::tip(name_response.clone(), name, tooltips_on);
                 }
                 if name_response.clicked() {
                     action = PadRowAction::ToggleExpand;
@@ -207,7 +209,7 @@ pub fn draw_collapsed_from_snapshot(
                 if dice_response.clicked() {
                     action = PadRowAction::DicePad;
                 }
-                dice_response.on_hover_text("Randomize pad");
+                theme::tip(dice_response, "Randomize this pad", tooltips_on);
 
                 // LOCK button — boxed text, inverted when locked
                 let lock_label = if locked { "LOCK" } else { "LOCK" };
@@ -233,7 +235,7 @@ pub fn draw_collapsed_from_snapshot(
                 if lock_response.clicked() {
                     action = PadRowAction::ToggleLock;
                 }
-                lock_response.on_hover_text(if locked { "Unlock pad" } else { "Lock pad" });
+                theme::tip(lock_response, if locked { "Unlock pad (sample will change on dice)" } else { "Lock pad (keep sample on dice)" }, tooltips_on);
             });
         });
 
@@ -259,6 +261,7 @@ pub fn draw_expanded_from_snapshot(
     pan: f32,
     pitch: f32,
     decay: f32,
+    tooltips_on: bool,
 ) -> PadRowAction {
     let mut action = PadRowAction::None;
     let cat_color = category_color(category);
@@ -348,18 +351,17 @@ pub fn draw_expanded_from_snapshot(
 
                     // Dice category button
                     let cat_label = format!("DICE {}S", category.label());
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new(&cat_label)
-                                    .font(egui::FontId::new(8.0, egui::FontFamily::Monospace))
-                                    .color(cat_egui),
-                            )
-                            .fill(cat_color.to_egui_alpha(0x11))
-                            .corner_radius(3),
+                    let resp = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new(&cat_label)
+                                .font(egui::FontId::new(8.0, egui::FontFamily::Monospace))
+                                .color(cat_egui),
                         )
-                        .clicked()
-                    {
+                        .fill(cat_color.to_egui_alpha(0x11))
+                        .corner_radius(3),
+                    );
+                    theme::tip(resp.clone(), "Randomize within this category only", tooltips_on);
+                    if resp.clicked() {
                         action = PadRowAction::DiceCategory;
                     }
                 });

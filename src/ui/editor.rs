@@ -442,7 +442,7 @@ pub fn create(
                                         let row_action = pad_row::draw_collapsed_from_snapshot(
                                             ui, i, pad.has_sample, &pad.name, pad.category,
                                             pad.volume, wf, is_selected, state.brightness[i],
-                                            pad.locked, pad_row_height,
+                                            pad.locked, pad_row_height, state.tooltips_on,
                                         );
 
                                         match row_action {
@@ -471,7 +471,7 @@ pub fn create(
                                         if is_selected {
                                             let detail_action = pad_row::draw_expanded_from_snapshot(
                                                 ui, i, pad.category, pad.pan,
-                                                pad.pitch, pad.decay,
+                                                pad.pitch, pad.decay, state.tooltips_on,
                                             );
 
                                             match detail_action {
