@@ -22,6 +22,7 @@ pub enum ToolbarAction {
     OpenLoadDialog,
     ToggleView,
     SetView(ViewMode),
+    ToggleTooltips,
     OpenSetup,
 }
 
@@ -50,6 +51,7 @@ pub fn draw_toolbar_snapshot(
     scan_total: u32,
     is_standalone: bool,
     standalone_tempo: &AtomicU32,
+    tooltips_on: bool,
 ) -> ToolbarAction {
     let mut action = ToolbarAction::None;
 
@@ -99,6 +101,27 @@ pub fn draw_toolbar_snapshot(
                     }
                     if ui.add(tab("SEQ", ViewMode::Sequencer)).clicked() && view_mode != ViewMode::Sequencer {
                         action = ToolbarAction::SetView(ViewMode::Sequencer);
+                    }
+                }
+
+                // Help tooltips toggle
+                {
+                    let tip_color = if tooltips_on { theme::ACCENT } else { theme::TEXT_DIM };
+                    let tip_bg = if tooltips_on { theme::ACCENT_DIM } else { theme::BG_ROW };
+                    let tip_btn = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new("?")
+                                .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                .color(tip_color)
+                                .strong(),
+                        )
+                        .fill(tip_bg)
+                        .min_size(egui::vec2(22.0, 22.0)),
+                    );
+                    // Always shown so users can discover the toggle
+                    let tip_btn = tip_btn.on_hover_text("Toggle help tooltips");
+                    if tip_btn.clicked() {
+                        action = ToolbarAction::ToggleTooltips;
                     }
                 }
 

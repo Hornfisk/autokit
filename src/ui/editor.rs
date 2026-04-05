@@ -333,6 +333,7 @@ pub fn create(
                         snap.scan_total,
                         is_standalone,
                         &seq_standalone_tempo,
+                        state.tooltips_on,
                     );
 
                     match toolbar_action {
@@ -372,6 +373,9 @@ pub fn create(
                             }
                             state.dialogs.show_setup = true;
                             state.dialogs.folder_browser = None;
+                        }
+                        ToolbarAction::ToggleTooltips => {
+                            state.tooltips_on = !state.tooltips_on;
                         }
                         ToolbarAction::None => {}
                     }
