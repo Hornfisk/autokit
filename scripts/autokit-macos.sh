@@ -1,6 +1,7 @@
 #!/bin/bash
 # Launch Autokit standalone on macOS with a safe buffer size.
-# CoreAudio may deliver buffers larger than 512, which crashes
-# nih-plug's CPAL backend. Using 1024 avoids this.
+# CoreAudio delivers variable-sized buffers that can exceed the
+# configured size, crashing nih-plug's CPAL backend assertion.
+# 4096 is large enough to accommodate CoreAudio's actual delivery.
 DIR="$(cd "$(dirname "$0")" && pwd)"
-exec "$DIR/autokit-standalone" --period-size 1024 "$@"
+exec "$DIR/autokit-standalone" --period-size 4096 "$@"
