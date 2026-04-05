@@ -45,6 +45,7 @@ pub struct LaneDisplay {
     pub muted: bool,
     pub solo: bool,
     pub locked: bool,
+    pub volume: f32,
     pub steps: [StepDisplay; NUM_STEPS],
 }
 
@@ -71,6 +72,7 @@ pub enum SeqAction {
     ToggleLaneMute { lane: usize },
     ToggleLaneSolo { lane: usize },
     ToggleLaneLock { lane: usize },
+    SetLaneVolume { lane: usize, volume: f32 },
     SelectPattern { index: usize },
     SetSwing { value: f32 },
     CopyPattern,
@@ -204,8 +206,8 @@ fn draw_grid(
 ) -> (Vec<SeqAction>, GridLayout) {
     let mut actions: Vec<SeqAction> = Vec::new();
 
-    // Label area: 3px strip + 8px space + 46px tag + 4px space = 61px
-    let label_width = 61.0;
+    // Label area: 3px strip + 8px space + 46px tag + 4px space + 16px knob + 4px space = 81px
+    let label_width = 81.0;
     // M S L buttons: 3 x (13px + 2px spacing) = 45px
     let controls_width = 45.0;
     let cell_spacing = 2.0;
@@ -299,6 +301,30 @@ fn draw_grid(
             let label_interact = ui.interact(label_rect, egui::Id::new(("lane_label_dblclick", lane_idx)), egui::Sense::click());
             if label_interact.double_clicked() {
                 actions.push(SeqAction::ResetLane { lane: lane_idx });
+            }
+
+            ui.add_space(4.0);
+
+            // LVL knob — inline, vertically centered
+            {
+                let mut vol = lane.volume;
+                let knob_resp = ui.allocate_ui(Vec2::new(16.0, row_height), |ui| {
+                    ui.centered_and_justified(|ui| {
+                        knob::knob_inline(
+                            ui,
+                            egui::Id::new(("seq_lvl", lane_idx)),
+                            &mut vol,
+                            0.0, 1.0, 1.0,
+                            "LVL",
+                            |v| format!("{}", (v * 100.0) as u32),
+                            cat_color,
+                            16.0,
+                        )
+                    })
+                });
+                if knob_resp.inner.inner.changed {
+                    actions.push(SeqAction::SetLaneVolume { lane: lane_idx, volume: vol });
+                }
             }
 
             ui.add_space(4.0);

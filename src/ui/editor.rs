@@ -512,6 +512,7 @@ pub fn create(
                                             muted: lane.muted,
                                             solo: lane.solo,
                                             locked: snap.pads[i].locked,
+                                            volume: snap.pads[i].volume,
                                             steps: core::array::from_fn(|j| crate::ui::sequencer_ui::StepDisplay {
                                                 enabled: lane.steps[j].enabled,
                                                 velocity: lane.steps[j].velocity,
@@ -560,6 +561,7 @@ pub fn create(
                                         SeqAction::ToggleLaneMute { lane } => GuiAction::SeqToggleLaneMute { lane },
                                         SeqAction::ToggleLaneSolo { lane } => GuiAction::SeqToggleLaneSolo { lane },
                                         SeqAction::ToggleLaneLock { lane } => GuiAction::SeqToggleLaneLock { lane },
+                                        SeqAction::SetLaneVolume { lane, volume } => GuiAction::SeqSetLaneVolume { lane, volume },
                                         SeqAction::SelectPattern { index } => GuiAction::SeqSelectPattern { index },
                                         SeqAction::SetSwing { value } => GuiAction::SeqSetSwing { value },
                                         SeqAction::CopyPattern => GuiAction::SeqCopyPattern,
@@ -955,6 +957,9 @@ pub fn create(
                     GuiAction::SeqToggleLaneLock { lane } => {
                         shared.kit.toggle_lock(lane);
                     }
+                    GuiAction::SeqSetLaneVolume { lane, volume } => {
+                        shared.kit.pads[lane].volume = volume;
+                    }
                     GuiAction::SeqResetLane { lane } => {
                         let snap = HistorySnapshot {
                             pads: shared.kit.snapshot(),
@@ -1117,6 +1122,7 @@ enum GuiAction {
     SeqToggleLaneMute { lane: usize },
     SeqToggleLaneSolo { lane: usize },
     SeqToggleLaneLock { lane: usize },
+    SeqSetLaneVolume { lane: usize, volume: f32 },
     SeqSelectPattern { index: usize },
     SeqSetSwing { value: f32 },
     SeqCopyPattern,
