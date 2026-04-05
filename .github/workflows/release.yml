@@ -19,23 +19,15 @@ jobs:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             artifact: autokit-linux-x86_64
-            standalone: autokit-standalone
-            plugin: libautokit.so
           - os: macos-14
             target: aarch64-apple-darwin
             artifact: autokit-macos-arm64
-            standalone: autokit-standalone
-            plugin: libautokit.dylib
           - os: macos-15
             target: x86_64-apple-darwin
             artifact: autokit-macos-x86_64
-            standalone: autokit-standalone
-            plugin: libautokit.dylib
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: autokit-windows-x86_64
-            standalone: autokit-standalone.exe
-            plugin: autokit.dll
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -54,27 +46,35 @@ jobs:
             libx11-dev libx11-xcb-dev libxcb1-dev libxcb-icccm4-dev libxcb-keysyms1-dev \
             libxcursor-dev libxkbcommon-dev libgl-dev libasound2-dev libjack-dev
 
-      - name: Build release
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Bundle plugins
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+        run: cargo xtask bundle autokit --release --target "$BUILD_TARGET"
 
       - name: Package artifacts (Unix)
         if: runner.os != 'Windows'
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+          ARTIFACT_NAME: ${{ matrix.artifact }}
         run: |
           mkdir -p staging
-          cp target/${{ matrix.target }}/release/${{ matrix.standalone }} staging/
-          cp target/${{ matrix.target }}/release/${{ matrix.plugin }} staging/
-          cp install.sh staging/
-          cd staging && tar czf ../${{ matrix.artifact }}.tar.gz * && cd ..
+          cp -r target/bundled/autokit.vst3 staging/
+          cp target/bundled/autokit.clap staging/
+          cp "target/${BUILD_TARGET}/release/autokit-standalone" staging/ || true
+          cd staging && tar czf "../${ARTIFACT_NAME}.tar.gz" * && cd ..
 
       - name: Package artifacts (Windows)
         if: runner.os == 'Windows'
         shell: bash
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+          ARTIFACT_NAME: ${{ matrix.artifact }}
         run: |
           mkdir -p staging
-          cp target/${{ matrix.target }}/release/${{ matrix.standalone }} staging/
-          cp target/${{ matrix.target }}/release/${{ matrix.plugin }} staging/
-          cp install.bat staging/
-          cd staging && 7z a ../${{ matrix.artifact }}.zip * && cd ..
+          cp -r target/bundled/autokit.vst3 staging/
+          cp target/bundled/autokit.clap staging/
+          cp "target/${BUILD_TARGET}/release/autokit-standalone.exe" staging/ || true
+          cd staging && 7z a "../${ARTIFACT_NAME}.zip" * && cd ..
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
