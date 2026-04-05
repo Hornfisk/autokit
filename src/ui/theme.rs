@@ -126,6 +126,16 @@ pub fn setup_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// Conditionally attach a tooltip to a response.
+/// When `on` is false, returns the response unchanged.
+pub fn tip(response: egui::Response, text: &str, on: bool) -> egui::Response {
+    if on {
+        response.on_hover_text(text)
+    } else {
+        response
+    }
+}
+
 /// Configure the egui visual style for Autokit's dark theme.
 pub fn setup_style(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();

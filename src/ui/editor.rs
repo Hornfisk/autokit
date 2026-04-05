@@ -135,6 +135,8 @@ pub struct EditorState {
     pub frame_count: u64,
     /// Cached logo texture handle.
     pub logo_texture: Option<egui::TextureHandle>,
+    /// Whether mouseover tooltips are shown.
+    pub tooltips_on: bool,
 }
 
 impl Default for EditorState {
@@ -156,6 +158,7 @@ impl Default for EditorState {
             status_message_frame: 0,
             frame_count: 0,
             logo_texture: None,
+            tooltips_on: true,
         }
     }
 }
