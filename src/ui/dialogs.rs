@@ -14,6 +14,10 @@ pub struct DialogState {
     pub show_setup: bool,
     pub setup_path: String,
     pub folder_browser: Option<FolderBrowser>,
+    pub show_save_pattern: bool,
+    pub save_pattern_name: String,
+    pub show_load_pattern: bool,
+    pub pattern_list: Vec<(String, PathBuf)>,
 }
 
 impl Default for DialogState {
@@ -26,6 +30,10 @@ impl Default for DialogState {
             show_setup: false,
             setup_path: String::new(),
             folder_browser: None,
+            show_save_pattern: false,
+            save_pattern_name: String::new(),
+            show_load_pattern: false,
+            pattern_list: Vec::new(),
         }
     }
 }
@@ -35,6 +43,10 @@ pub enum DialogAction {
     None,
     SavePreset(String),
     LoadPreset(PathBuf),
+    DeletePreset(PathBuf),
+    SavePattern(String),
+    LoadPattern(PathBuf),
+    DeletePattern(PathBuf),
     StartScan(PathBuf),
 }
 
@@ -113,7 +125,7 @@ pub fn show_save_dialog(ctx: &egui::Context, state: &mut DialogState) -> DialogA
     action
 }
 
-/// Show the load-preset dialog. Returns an action if the user selects a preset.
+/// Show the load-preset dialog. Returns an action if the user selects or deletes a preset.
 pub fn show_load_dialog(ctx: &egui::Context, state: &mut DialogState) -> DialogAction {
     let mut action = DialogAction::None;
     let mut open = true;
@@ -134,26 +146,43 @@ pub fn show_load_dialog(ctx: &egui::Context, state: &mut DialogState) -> DialogA
                 egui::ScrollArea::vertical()
                     .max_height(260.0)
                     .show(ui, |ui| {
-                        let list: Vec<(String, PathBuf)> = state.preset_list.clone();
-                        for (name, path) in &list {
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        egui::RichText::new(name)
-                                            .font(egui::FontId::new(
-                                                11.0,
-                                                egui::FontFamily::Monospace,
-                                            ))
-                                            .color(theme::ACCENT),
+                        let mut delete_idx = None;
+                        for (idx, (name, path)) in state.preset_list.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new(name)
+                                                .font(egui::FontId::new(11.0, egui::FontFamily::Monospace))
+                                                .color(theme::ACCENT),
+                                        )
+                                        .fill(theme::BG_ROW)
+                                        .min_size(egui::vec2(230.0, 24.0)),
                                     )
-                                    .fill(theme::BG_ROW)
-                                    .min_size(egui::vec2(260.0, 24.0)),
-                                )
-                                .clicked()
-                            {
-                                action = DialogAction::LoadPreset(path.clone());
-                                state.show_load = false;
-                            }
+                                    .clicked()
+                                {
+                                    action = DialogAction::LoadPreset(path.clone());
+                                    state.show_load = false;
+                                }
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new("\u{00d7}")
+                                                .font(egui::FontId::new(12.0, egui::FontFamily::Monospace))
+                                                .color(theme::MUTE_RED),
+                                        )
+                                        .fill(theme::BG_ROW)
+                                        .min_size(egui::vec2(24.0, 24.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    action = DialogAction::DeletePreset(path.clone());
+                                    delete_idx = Some(idx);
+                                }
+                            });
+                        }
+                        if let Some(idx) = delete_idx {
+                            state.preset_list.remove(idx);
                         }
                     });
             }
@@ -294,6 +323,165 @@ pub fn show_setup_dialog(ctx: &egui::Context, state: &mut DialogState) -> Dialog
         });
     if !open {
         state.show_setup = false;
+    }
+    action
+}
+
+/// Show the save-pattern dialog. Returns an action if the user confirms.
+pub fn show_save_pattern_dialog(ctx: &egui::Context, state: &mut DialogState) -> DialogAction {
+    let mut action = DialogAction::None;
+    let mut open = true;
+    egui::Window::new("Save Pattern")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .fixed_size([240.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new("Pattern name:")
+                    .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
+                    .color(theme::TEXT_DIM),
+            );
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut state.save_pattern_name)
+                    .font(egui::FontId::new(11.0, egui::FontFamily::Monospace))
+                    .desired_width(220.0),
+            );
+            if response.gained_focus() || state.save_pattern_name.is_empty() {
+                response.request_focus();
+            }
+
+            ui.add_space(6.0);
+
+            let name_valid = !state.save_pattern_name.trim().is_empty();
+            let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        name_valid,
+                        egui::Button::new(
+                            egui::RichText::new("SAVE")
+                                .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
+                                .color(if name_valid {
+                                    egui::Color32::from_rgb(0x74, 0xb9, 0xff)
+                                } else {
+                                    theme::TEXT_DISABLED
+                                }),
+                        )
+                        .fill(theme::BG_ROW)
+                        .min_size(egui::vec2(60.0, 22.0)),
+                    )
+                    .clicked()
+                    || (enter_pressed && name_valid)
+                {
+                    action = DialogAction::SavePattern(state.save_pattern_name.trim().to_string());
+                    state.show_save_pattern = false;
+                }
+
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new("CANCEL")
+                                .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
+                                .color(theme::TEXT_DIM),
+                        )
+                        .fill(theme::BG_ROW)
+                        .min_size(egui::vec2(60.0, 22.0)),
+                    )
+                    .clicked()
+                {
+                    state.show_save_pattern = false;
+                }
+            });
+        });
+    if !open {
+        state.show_save_pattern = false;
+    }
+    action
+}
+
+/// Show the load-pattern dialog. Returns an action if the user selects or deletes a pattern.
+pub fn show_load_pattern_dialog(ctx: &egui::Context, state: &mut DialogState) -> DialogAction {
+    let mut action = DialogAction::None;
+    let mut open = true;
+    egui::Window::new("Load Pattern")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .fixed_size([280.0, 300.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            if state.pattern_list.is_empty() {
+                ui.label(
+                    egui::RichText::new("No patterns found.")
+                        .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
+                        .color(theme::TEXT_DIM),
+                );
+            } else {
+                egui::ScrollArea::vertical()
+                    .max_height(260.0)
+                    .show(ui, |ui| {
+                        let mut delete_idx = None;
+                        for (idx, (name, path)) in state.pattern_list.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new(name)
+                                                .font(egui::FontId::new(11.0, egui::FontFamily::Monospace))
+                                                .color(theme::ACCENT),
+                                        )
+                                        .fill(theme::BG_ROW)
+                                        .min_size(egui::vec2(230.0, 24.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    action = DialogAction::LoadPattern(path.clone());
+                                    state.show_load_pattern = false;
+                                }
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new("\u{00d7}")
+                                                .font(egui::FontId::new(12.0, egui::FontFamily::Monospace))
+                                                .color(theme::MUTE_RED),
+                                        )
+                                        .fill(theme::BG_ROW)
+                                        .min_size(egui::vec2(24.0, 24.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    action = DialogAction::DeletePattern(path.clone());
+                                    delete_idx = Some(idx);
+                                }
+                            });
+                        }
+                        if let Some(idx) = delete_idx {
+                            state.pattern_list.remove(idx);
+                        }
+                    });
+            }
+
+            ui.add_space(4.0);
+            if ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("CANCEL")
+                            .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
+                            .color(theme::TEXT_DIM),
+                    )
+                    .fill(theme::BG_ROW)
+                    .min_size(egui::vec2(60.0, 22.0)),
+                )
+                .clicked()
+            {
+                state.show_load_pattern = false;
+            }
+        });
+    if !open {
+        state.show_load_pattern = false;
     }
     action
 }

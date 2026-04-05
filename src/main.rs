@@ -6,6 +6,7 @@ mod logging;
 mod engine {
     pub mod echo_detect;
     pub mod kit;
+    pub mod master_bus;
     pub mod sampler;
     pub mod sequencer;
 }

@@ -105,8 +105,6 @@ pub enum ViewMode {
 pub struct EditorState {
     /// Which pad is expanded (None = all collapsed).
     pub selected_pad: Option<usize>,
-    /// Current UI scale factor (75%-150%).
-    pub scale: f32,
     /// Last-seen trigger counter values — used to detect new triggers.
     pub last_trigger: [u8; NUM_PADS],
     /// Per-pad flash brightness for play animation (0.0 = dark, 1.0 = full flash).
@@ -143,7 +141,6 @@ impl Default for EditorState {
     fn default() -> Self {
         Self {
             selected_pad: None,
-            scale: 1.0,
             last_trigger: [0u8; NUM_PADS],
             brightness: [0.0f32; NUM_PADS],
             dialogs: DialogState::default(),
@@ -214,10 +211,16 @@ pub fn create(
                     }
                 }
 
-                // Persist state for DAW save/load if audio thread flagged it dirty.
+                // Persist state if audio thread flagged it dirty.
                 if seq_sync.persist_dirty.swap(false, Ordering::Relaxed) {
-                    if let Some(json) = preset::serialize_state(&shared.kit, &shared.pattern_bank) {
-                        *params.plugin_state.lock() = json;
+                    if seq_is_daw.load(Ordering::Relaxed) {
+                        // DAW mode: write to plugin param for host save/load
+                        if let Some(json) = preset::serialize_state(&shared.kit, &shared.pattern_bank) {
+                            *params.plugin_state.lock() = json;
+                        }
+                    } else {
+                        // Standalone mode: write to disk
+                        preset::save_standalone_state(&shared.kit, &shared.pattern_bank);
                     }
                 }
 
@@ -320,7 +323,6 @@ pub fn create(
                         all_locked,
                         &params,
                         setter,
-                        state.scale,
                         state.view_mode,
                         shortcut_info,
                         logo,
@@ -339,10 +341,6 @@ pub fn create(
                             }
                         }
                         ToolbarAction::LockAll => pending_actions.push(GuiAction::LockAll),
-                        ToolbarAction::SetScale(s) => {
-                            state.scale = s;
-                            ctx.set_pixels_per_point(s);
-                        }
                         ToolbarAction::OpenSaveDialog => {
                             state.dialogs.show_save = true;
                             state.dialogs.show_load = false;
@@ -640,6 +638,16 @@ pub fn create(
                                         SeqAction::SetFillActive { active } => GuiAction::SeqSetFillActive { active },
                                         SeqAction::ToggleInternalPlay => GuiAction::SeqToggleInternalPlay,
                                         SeqAction::ExportMidi => GuiAction::SeqExportMidi,
+                                        SeqAction::OpenSavePatternDialog => {
+                                            state.dialogs.save_pattern_name.clear();
+                                            state.dialogs.show_save_pattern = true;
+                                            GuiAction::None
+                                        }
+                                        SeqAction::OpenLoadPatternDialog => {
+                                            state.dialogs.pattern_list = preset::list_patterns();
+                                            state.dialogs.show_load_pattern = true;
+                                            GuiAction::None
+                                        }
                                         SeqAction::ResetLane { lane } => GuiAction::SeqResetLane { lane },
                                         SeqAction::ResetStep { lane, step } => GuiAction::SeqResetStep { lane, step },
                                     });
@@ -680,12 +688,26 @@ pub fn create(
             if state.dialogs.show_load {
                 match dialogs::show_load_dialog(ctx, &mut state.dialogs) {
                     DialogAction::LoadPreset(path) => pending_actions.push(GuiAction::LoadPreset(path)),
+                    DialogAction::DeletePreset(path) => pending_actions.push(GuiAction::DeletePreset(path)),
                     _ => {}
                 }
             }
             if state.dialogs.show_setup {
                 match dialogs::show_setup_dialog(ctx, &mut state.dialogs) {
                     DialogAction::StartScan(path) => pending_actions.push(GuiAction::StartScan(path)),
+                    _ => {}
+                }
+            }
+            if state.dialogs.show_save_pattern {
+                match dialogs::show_save_pattern_dialog(ctx, &mut state.dialogs) {
+                    DialogAction::SavePattern(name) => pending_actions.push(GuiAction::SavePattern(name)),
+                    _ => {}
+                }
+            }
+            if state.dialogs.show_load_pattern {
+                match dialogs::show_load_pattern_dialog(ctx, &mut state.dialogs) {
+                    DialogAction::LoadPattern(path) => pending_actions.push(GuiAction::LoadPattern(path)),
+                    DialogAction::DeletePattern(path) => pending_actions.push(GuiAction::DeletePattern(path)),
                     _ => {}
                 }
             }
@@ -814,6 +836,63 @@ pub fn create(
                                 tracing::error!("Failed to load preset: {e}");
                                 state.status_message =
                                     Some(format!("Load failed: {e}"));
+                            }
+                        }
+                    }
+                    GuiAction::DeletePreset(path) => {
+                        match preset::delete_file(&path) {
+                            Ok(()) => {
+                                let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+                                tracing::info!("Deleted preset: {name}");
+                                state.status_message = Some(format!("Deleted: {name}"));
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to delete preset: {e}");
+                                state.status_message = Some(format!("Delete failed: {e}"));
+                            }
+                        }
+                    }
+                    GuiAction::SavePattern(name) => {
+                        match preset::save_pattern(&name, shared.pattern_bank.active_pattern()) {
+                            Ok(path) => {
+                                tracing::info!("Saved pattern to {}", path.display());
+                                state.status_message = Some(format!("Pattern saved: {name}"));
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to save pattern: {e}");
+                                state.status_message = Some(format!("Save failed: {e}"));
+                            }
+                        }
+                    }
+                    GuiAction::LoadPattern(path) => {
+                        match preset::load_pattern(&path) {
+                            Ok(pat) => {
+                                let snap = HistorySnapshot {
+                                    pads: shared.kit.snapshot(),
+                                    sequencer: shared.pattern_bank.snapshot(),
+                                };
+                                shared.history.push(snap);
+                                *shared.pattern_bank.active_pattern_mut() = pat;
+                                let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+                                tracing::info!("Loaded pattern: {name}");
+                                state.status_message = Some(format!("Pattern loaded: {name}"));
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to load pattern: {e}");
+                                state.status_message = Some(format!("Load failed: {e}"));
+                            }
+                        }
+                    }
+                    GuiAction::DeletePattern(path) => {
+                        match preset::delete_file(&path) {
+                            Ok(()) => {
+                                let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+                                tracing::info!("Deleted pattern: {name}");
+                                state.status_message = Some(format!("Deleted: {name}"));
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to delete pattern: {e}");
+                                state.status_message = Some(format!("Delete failed: {e}"));
                             }
                         }
                     }
@@ -1057,6 +1136,10 @@ enum GuiAction {
     SetPadParam(usize, PadParam, f32),
     SavePreset(String),
     LoadPreset(PathBuf),
+    DeletePreset(PathBuf),
+    SavePattern(String),
+    LoadPattern(PathBuf),
+    DeletePattern(PathBuf),
     PreviewSample(usize),
     AssignFromMap { pad_index: usize, library_index: usize },
     // Sequencer actions

@@ -82,6 +82,8 @@ pub enum SeqAction {
     SetFillActive { active: bool },
     ToggleInternalPlay,
     ExportMidi,
+    OpenSavePatternDialog,
+    OpenLoadPatternDialog,
     ResetLane { lane: usize },
     ResetStep { lane: usize, step: usize },
 }
@@ -795,6 +797,12 @@ fn draw_bottom_bar(ui: &mut egui::Ui, display: &SeqDisplay) -> Option<SeqAction>
             }
             if ui.add(btn_style("COPY")).clicked() {
                 action = Some(SeqAction::CopyPattern);
+            }
+            if ui.add(btn_style("LOAD")).clicked() {
+                action = Some(SeqAction::OpenLoadPatternDialog);
+            }
+            if ui.add(btn_style("SAVE")).clicked() {
+                action = Some(SeqAction::OpenSavePatternDialog);
             }
 
             // EXPORT button — write active pattern to .mid file

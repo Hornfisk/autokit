@@ -18,7 +18,6 @@ pub enum ToolbarAction {
     Redo,
     DiceAll,
     LockAll,
-    SetScale(f32),
     OpenSaveDialog,
     OpenLoadDialog,
     ToggleView,
@@ -44,7 +43,6 @@ pub fn draw_toolbar_snapshot(
     all_locked: bool,
     params: &AutokitParams,
     setter: &ParamSetter,
-    current_scale: f32,
     view_mode: ViewMode,
     shortcut_info: Option<(usize, &str)>,
     logo_texture: &egui::TextureHandle,
@@ -199,51 +197,96 @@ pub fn draw_toolbar_snapshot(
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
 
-                    // Scale selector (rightmost)
-                    let scale_label = format!("{}%", (current_scale * 100.0) as u32);
-                    egui::ComboBox::from_id_salt("scale")
-                        .selected_text(
-                            egui::RichText::new(&scale_label)
-                                .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                                .color(theme::TEXT_DIM),
-                        )
-                        .width(50.0)
-                        .show_ui(ui, |ui| {
-                            for &s in &[0.75f32, 1.0, 1.25, 1.5] {
-                                let label = format!("{}%", (s * 100.0) as u32);
-                                if ui
-                                    .selectable_label((current_scale - s).abs() < 0.01, &label)
-                                    .clicked()
-                                {
-                                    action = ToolbarAction::SetScale(s);
-                                }
-                            }
-                        });
-
-                    // Master volume dB label
-                    let gain_db_display = util::gain_to_db(params.master_volume.value());
-                    ui.label(
-                        egui::RichText::new(format!("{gain_db_display:.1}dB"))
-                            .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                            .color(theme::ACCENT),
-                    );
-
-                    // Master volume slider
-                    let mut gain_db = gain_db_display;
-                    let slider = egui::Slider::new(&mut gain_db, -60.0..=6.0)
-                        .show_value(false)
-                        .trailing_fill(true);
-                    if ui.add(slider).changed() {
-                        setter.begin_set_parameter(&params.master_volume);
-                        setter.set_parameter(&params.master_volume, util::db_to_gain(gain_db));
-                        setter.end_set_parameter(&params.master_volume);
+                    // Master volume knob
+                    {
+                        let mut gain_db = util::gain_to_db(params.master_volume.unmodulated_plain_value());
+                        let resp = crate::ui::knob::knob_inline(
+                            ui, egui::Id::new("master_vol_knob"),
+                            &mut gain_db, -60.0, 6.0, 0.0,
+                            "Master volume (dB)",
+                            |v| format!("{v:.1}"),
+                            theme::ACCENT, 20.0,
+                        );
+                        if resp.changed {
+                            setter.begin_set_parameter(&params.master_volume);
+                            setter.set_parameter(&params.master_volume, util::db_to_gain(gain_db));
+                            setter.end_set_parameter(&params.master_volume);
+                        }
+                        ui.label(
+                            egui::RichText::new("VOL")
+                                .font(egui::FontId::new(7.0, egui::FontFamily::Monospace))
+                                .color(theme::TEXT_DISABLED),
+                        );
                     }
 
-                    ui.label(
-                        egui::RichText::new("MASTER")
-                            .font(egui::FontId::new(8.0, egui::FontFamily::Monospace))
-                            .color(theme::TEXT_DISABLED),
-                    );
+                    ui.add(egui::Separator::default().vertical().spacing(4.0));
+
+                    // ── Compressor / Drive / Limiter controls ──
+
+                    // LIM toggle
+                    {
+                        let lim_val = params.limiter_on.value();
+                        let lim_color = if lim_val { theme::ACCENT } else { theme::TEXT_DIM };
+                        let lim_bg = if lim_val { theme::ACCENT_DIM } else { theme::BG_ROW };
+                        if ui.add(
+                            egui::Button::new(
+                                egui::RichText::new("LIM")
+                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                    .color(lim_color)
+                                    .strong(),
+                            )
+                            .fill(lim_bg)
+                            .min_size(egui::vec2(32.0, 22.0)),
+                        ).clicked() {
+                            setter.begin_set_parameter(&params.limiter_on);
+                            setter.set_parameter(&params.limiter_on, !lim_val);
+                            setter.end_set_parameter(&params.limiter_on);
+                        }
+                    }
+
+                    // DRIVE knob
+                    {
+                        let mut drive = params.comp_drive.unmodulated_plain_value();
+                        let resp = crate::ui::knob::knob_inline(
+                            ui, egui::Id::new("comp_drive_knob"),
+                            &mut drive, 0.0, 1.0, 0.0,
+                            "Saturation drive",
+                            |v| format!("{:.0}%", v * 100.0),
+                            theme::TEXT_DIM, 20.0,
+                        );
+                        if resp.changed {
+                            setter.begin_set_parameter(&params.comp_drive);
+                            setter.set_parameter(&params.comp_drive, drive);
+                            setter.end_set_parameter(&params.comp_drive);
+                        }
+                        ui.label(
+                            egui::RichText::new("DRV")
+                                .font(egui::FontId::new(7.0, egui::FontFamily::Monospace))
+                                .color(theme::TEXT_DISABLED),
+                        );
+                    }
+
+                    // COMP threshold knob
+                    {
+                        let mut thr = params.comp_threshold.unmodulated_plain_value();
+                        let resp = crate::ui::knob::knob_inline(
+                            ui, egui::Id::new("comp_threshold_knob"),
+                            &mut thr, -40.0, 0.0, -12.0,
+                            "Compressor threshold (dB)",
+                            |v| format!("{:.0}", v),
+                            theme::ACCENT, 20.0,
+                        );
+                        if resp.changed {
+                            setter.begin_set_parameter(&params.comp_threshold);
+                            setter.set_parameter(&params.comp_threshold, thr);
+                            setter.end_set_parameter(&params.comp_threshold);
+                        }
+                        ui.label(
+                            egui::RichText::new("CMP")
+                                .font(egui::FontId::new(7.0, egui::FontFamily::Monospace))
+                                .color(theme::TEXT_DISABLED),
+                        );
+                    }
 
                     ui.add(egui::Separator::default().vertical().spacing(4.0));
 
@@ -253,14 +296,15 @@ pub fn draw_toolbar_snapshot(
                     if ui
                         .add(
                             egui::Button::new(
-                                egui::RichText::new("LOAD")
+                                egui::RichText::new("L")
                                     .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
                                     .color(load_color)
                                     .strong(),
                             )
                             .fill(load_dim)
-                            .min_size(egui::vec2(44.0, 22.0)),
+                            .min_size(egui::vec2(22.0, 22.0)),
                         )
+                        .on_hover_text("Load preset")
                         .clicked()
                     {
                         action = ToolbarAction::OpenLoadDialog;
@@ -272,14 +316,15 @@ pub fn draw_toolbar_snapshot(
                     if ui
                         .add(
                             egui::Button::new(
-                                egui::RichText::new("SAVE")
+                                egui::RichText::new("S")
                                     .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
                                     .color(save_color)
                                     .strong(),
                             )
                             .fill(save_dim)
-                            .min_size(egui::vec2(44.0, 22.0)),
+                            .min_size(egui::vec2(22.0, 22.0)),
                         )
+                        .on_hover_text("Save preset")
                         .clicked()
                     {
                         action = ToolbarAction::OpenSaveDialog;

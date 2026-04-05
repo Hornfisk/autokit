@@ -109,6 +109,87 @@ pub fn list_presets() -> Vec<(String, PathBuf)> {
     presets
 }
 
+// --- Pattern persistence (individual patterns) ---
+
+/// Returns `~/.local/share/autokit/patterns/`, creating it if missing.
+pub fn pattern_dir() -> PathBuf {
+    let base = dirs_next().join("autokit").join("patterns");
+    if !base.exists() {
+        let _ = std::fs::create_dir_all(&base);
+    }
+    base
+}
+
+/// Save a single pattern to `{pattern_dir}/{name}.json`.
+pub fn save_pattern(name: &str, pattern: &crate::engine::sequencer::Pattern) -> Result<PathBuf, String> {
+    let dir = pattern_dir();
+    let filename = sanitize_name(name);
+    if filename.is_empty() {
+        return Err("Pattern name is empty".to_string());
+    }
+    let path = dir.join(format!("{filename}.json"));
+    let json = serde_json::to_string_pretty(pattern)
+        .map_err(|e| format!("serialize: {e}"))?;
+    std::fs::write(&path, json).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(path)
+}
+
+/// Load a single pattern from a JSON file.
+pub fn load_pattern(path: &Path) -> Result<crate::engine::sequencer::Pattern, String> {
+    let data = std::fs::read_to_string(path)
+        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    serde_json::from_str(&data).map_err(|e| format!("parse {}: {e}", path.display()))
+}
+
+/// List all `.json` patterns in the pattern directory, sorted alphabetically.
+pub fn list_patterns() -> Vec<(String, PathBuf)> {
+    let dir = pattern_dir();
+    let mut patterns = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                let name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("?")
+                    .to_string();
+                patterns.push((name, path));
+            }
+        }
+    }
+
+    patterns.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    patterns
+}
+
+/// Delete a file (preset or pattern) from disk.
+pub fn delete_file(path: &Path) -> Result<(), String> {
+    std::fs::remove_file(path).map_err(|e| format!("delete {}: {e}", path.display()))
+}
+
+/// Path for standalone session state: `~/.local/share/autokit/standalone_state.json`.
+pub fn standalone_state_path() -> PathBuf {
+    dirs_next().join("autokit").join("standalone_state.json")
+}
+
+/// Save standalone session state to disk.
+pub fn save_standalone_state(kit: &DrumKit, pattern_bank: &crate::engine::sequencer::PatternBank) {
+    let p = from_kit("_standalone", kit, pattern_bank);
+    match serde_json::to_string(&p) {
+        Ok(json) => { let _ = std::fs::write(standalone_state_path(), json); }
+        Err(e) => tracing::warn!("standalone state serialize failed: {e}"),
+    }
+}
+
+/// Load standalone session state from disk, if it exists.
+pub fn load_standalone_state() -> Option<Preset> {
+    let path = standalone_state_path();
+    let data = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
 /// Create a `Preset` from the current kit state.
 pub fn from_kit(name: &str, kit: &DrumKit, pattern_bank: &crate::engine::sequencer::PatternBank) -> Preset {
     let pads = kit

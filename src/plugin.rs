@@ -33,6 +33,15 @@ pub struct AutokitParams {
 
     #[id = "master_vol"]
     pub master_volume: FloatParam,
+
+    #[id = "comp_threshold"]
+    pub comp_threshold: FloatParam,
+
+    #[id = "comp_drive"]
+    pub comp_drive: FloatParam,
+
+    #[id = "limiter_on"]
+    pub limiter_on: BoolParam,
 }
 
 impl Default for AutokitParams {
@@ -53,6 +62,25 @@ impl Default for AutokitParams {
             .with_unit(" dB")
             .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            comp_threshold: FloatParam::new(
+                "Comp Threshold",
+                -12.0,
+                FloatRange::Linear { min: -40.0, max: 0.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(20.0))
+            .with_unit(" dB")
+            .with_value_to_string(Arc::new(|v| format!("{v:.1}")))
+            .with_string_to_value(Arc::new(|s| s.trim().trim_end_matches(" dB").trim().parse().ok())),
+            comp_drive: FloatParam::new(
+                "Drive",
+                0.0,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(20.0))
+            .with_unit("%")
+            .with_value_to_string(Arc::new(|v| format!("{:.0}", v * 100.0)))
+            .with_string_to_value(Arc::new(|s| s.trim().trim_end_matches('%').trim().parse::<f32>().ok().map(|v| v / 100.0))),
+            limiter_on: BoolParam::new("Limiter", true),
         }
     }
 }
@@ -176,6 +204,8 @@ pub struct Autokit {
     host_ever_stopped: bool,
     /// Whether internal play was active on the previous buffer — for edge detection.
     seq_internal_play_prev: bool,
+    /// Master bus DSP chain (compressor + saturator + limiter).
+    master_bus: crate::engine::master_bus::MasterBus,
     /// Debug: counts process() calls to log periodic status.
     #[cfg(debug_assertions)]
     process_count: u64,
@@ -199,6 +229,7 @@ impl Default for Autokit {
             state_restored: false,
             host_ever_stopped: false,
             seq_internal_play_prev: false,
+            master_bus: crate::engine::master_bus::MasterBus::new(),
             #[cfg(debug_assertions)]
             process_count: 0,
         }
@@ -275,6 +306,12 @@ impl Autokit {
                     populate_kit_from_library(&mut shared);
                 }
             }
+        } else if let Some(p) = preset::load_standalone_state() {
+            // Standalone mode: restore last session from disk
+            tracing::info!("restoring standalone session state");
+            let s = &mut *shared;
+            preset::apply_to_kit(&p, &mut s.kit, &mut s.pattern_bank);
+            shared.update_all_waveforms(WAVEFORM_POINTS);
         } else {
             populate_kit_from_library(&mut shared);
         }
@@ -335,6 +372,7 @@ impl Plugin for Autokit {
         _context: &mut impl InitContext<Self>,
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
+        self.master_bus.prepare(self.sample_rate);
 
         logging::init();
         tracing::info!(
@@ -674,17 +712,21 @@ impl Plugin for Autokit {
             output_left.fill(0.0);
             output_right.fill(0.0);
             voices.process(output_left, output_right);
-            // Mix preview voice
             self.preview_voice.process(output_left, output_right);
-        }
 
-        // Apply master volume per-sample for smooth transitions
-        let channels = buffer.as_slice();
-        if channels.len() >= 2 {
+            // Master bus chain + volume: single per-sample loop
+            let lim_on = self.params.limiter_on.value();
             for i in 0..num_samples {
-                let gain = self.params.master_volume.smoothed.next();
-                channels[0][i] *= gain;
-                channels[1][i] *= gain;
+                let threshold_db = self.params.comp_threshold.smoothed.next();
+                let drive = self.params.comp_drive.smoothed.next();
+                let master_gain = self.params.master_volume.smoothed.next();
+
+                let (l, r) = self.master_bus.process_sample(
+                    output_left[i], output_right[i],
+                    threshold_db, drive, lim_on,
+                );
+                output_left[i] = l * master_gain;
+                output_right[i] = r * master_gain;
             }
         }
 
