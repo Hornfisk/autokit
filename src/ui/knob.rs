@@ -114,3 +114,76 @@ pub fn knob(
 
     result
 }
+
+/// Draw a compact inline knob — no label below, just the ring + value text.
+/// Designed for use in track row headers where vertical space is tight.
+pub fn knob_inline(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    value: &mut f32,
+    min: f32,
+    max: f32,
+    default: f32,
+    tooltip: &str,
+    format_value: impl Fn(f32) -> String,
+    ring_color: egui::Color32,
+    diameter: f32,
+) -> KnobResponse {
+    let mut result = KnobResponse {
+        changed: false,
+        reset: false,
+    };
+
+    let size = egui::vec2(diameter, diameter);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+    let response = response.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+    response.clone().on_hover_text(tooltip);
+
+    // Double-click detection (egui-baseview workaround)
+    let dbl_id = id.with("last_press_inline");
+    let pointer_pressed_on_knob = ui.input(|i| {
+        i.events.iter().any(|e| matches!(
+            e,
+            egui::Event::PointerButton { pressed: true, button: egui::PointerButton::Primary, .. }
+        ))
+    }) && response.contains_pointer();
+    let is_double_click = if pointer_pressed_on_knob {
+        let now = ui.input(|i| i.time);
+        let prev: f64 = ui.data(|d| d.get_temp(dbl_id).unwrap_or(0.0));
+        ui.data_mut(|d| d.insert_temp(dbl_id, now));
+        now - prev < 0.4
+    } else {
+        false
+    };
+
+    if is_double_click || (response.clicked() && ui.input(|i| i.modifiers.ctrl)) {
+        *value = default;
+        result.changed = true;
+        result.reset = true;
+    }
+
+    if response.dragged() && !is_double_click {
+        let delta = -response.drag_delta().y;
+        let speed = if ui.input(|i| i.modifiers.shift) { 0.001 } else { 0.005 };
+        *value = (*value + delta * speed * (max - min)).clamp(min, max);
+        result.changed = true;
+    }
+
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let center = rect.center();
+        let radius = diameter / 2.0 - 1.5;
+        painter.circle_stroke(center, radius, egui::Stroke::new(1.5, ring_color));
+        let text = format_value(*value);
+        let font_size = if diameter < 20.0 { 7.0 } else { 8.0 };
+        painter.text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            &text,
+            egui::FontId::new(font_size, egui::FontFamily::Monospace),
+            ring_color,
+        );
+    }
+
+    result
+}
