@@ -14,6 +14,7 @@ env:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-22.04
@@ -47,6 +48,7 @@ jobs:
             libxcursor-dev libxkbcommon-dev libgl-dev libasound2-dev libjack-dev
 
       - name: Bundle plugins
+        shell: bash
         env:
           BUILD_TARGET: ${{ matrix.target }}
         run: cargo xtask bundle autokit --release --target "$BUILD_TARGET"
