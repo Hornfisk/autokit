@@ -621,7 +621,7 @@ pub fn create(
                             {
                                 use crate::ui::sequencer_ui::SeqAction;
                                 for seq_action in crate::ui::sequencer_ui::draw_sequencer_view(
-                                    ui, &seq_display, &mut state.seq_view, shared_avail_h,
+                                    ui, &seq_display, &mut state.seq_view, shared_avail_h, state.tooltips_on,
                                 ) {
                                     pending_actions.push(match seq_action {
                                         SeqAction::ToggleStep { lane, step } => GuiAction::SeqToggleStep { lane, step },

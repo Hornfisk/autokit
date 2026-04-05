@@ -94,11 +94,12 @@ pub fn draw_sequencer_view(
     display: &SeqDisplay,
     view_state: &mut SeqViewState,
     available_height: f32,
+    tooltips_on: bool,
 ) -> Vec<SeqAction> {
     let mut actions: Vec<SeqAction> = Vec::new();
 
     // Step grid at top (may return multiple actions from drag-paint)
-    let (grid_actions, grid_layout) = draw_grid(ui, display, available_height, view_state);
+    let (grid_actions, grid_layout) = draw_grid(ui, display, available_height, view_state, tooltips_on);
     actions.extend(grid_actions);
     let grid_right = grid_layout.grid_right_x;
 
@@ -113,7 +114,7 @@ pub fn draw_sequencer_view(
             if lane_idx < display.lanes.len() {
                 let step = &display.lanes[lane_idx].steps[step_idx];
                 let cat = display.lanes[lane_idx].category;
-                actions.extend(draw_param_controls(ui, lane_idx, step_idx, step, cat));
+                actions.extend(draw_param_controls(ui, lane_idx, step_idx, step, cat, tooltips_on));
             }
         }
 
@@ -160,6 +161,7 @@ pub fn draw_sequencer_view(
             .corner_radius(3.0);
 
             let response = ui.add(btn);
+            theme::tip(response.clone(), &format!("Pattern {:02}", i + 1), tooltips_on);
 
             if is_queued {
                 let t = ui.input(|i| i.time) as f32;
@@ -186,7 +188,7 @@ pub fn draw_sequencer_view(
     }
 
     // Bottom bar
-    if let Some(a) = draw_bottom_bar(ui, display) {
+    if let Some(a) = draw_bottom_bar(ui, display, tooltips_on) {
         actions.push(a);
     }
 
@@ -205,6 +207,7 @@ fn draw_grid(
     display: &SeqDisplay,
     available_height: f32,
     view_state: &mut SeqViewState,
+    tooltips_on: bool,
 ) -> (Vec<SeqAction>, GridLayout) {
     let mut actions: Vec<SeqAction> = Vec::new();
 
@@ -319,7 +322,7 @@ fn draw_grid(
                             |v| format!("{}", (v * 100.0) as u32),
                             cat_color,
                             16.0,
-                            false,
+                            tooltips_on,
                         )
                     })
                 });
@@ -337,7 +340,9 @@ fn draw_grid(
                 .fill(if is_muted { theme::MUTE_RED } else { theme::STEP_BG })
                 .min_size(Vec2::new(13.0, 13.0))
                 .corner_radius(2.0);
-            if ui.add(mute_btn).clicked() {
+            let resp = ui.add(mute_btn);
+            theme::tip(resp.clone(), "Mute this lane", tooltips_on);
+            if resp.clicked() {
                 actions.push(SeqAction::ToggleLaneMute { lane: lane_idx });
             }
 
@@ -347,7 +352,9 @@ fn draw_grid(
                 .fill(if lane.solo { theme::SOLO_YELLOW } else { theme::STEP_BG })
                 .min_size(Vec2::new(13.0, 13.0))
                 .corner_radius(2.0);
-            if ui.add(solo_btn).clicked() {
+            let resp = ui.add(solo_btn);
+            theme::tip(resp.clone(), "Solo this lane", tooltips_on);
+            if resp.clicked() {
                 actions.push(SeqAction::ToggleLaneSolo { lane: lane_idx });
             }
 
@@ -357,7 +364,9 @@ fn draw_grid(
                 .fill(if lane.locked { theme::LOCK_ORANGE } else { theme::STEP_BG })
                 .min_size(Vec2::new(13.0, 13.0))
                 .corner_radius(2.0);
-            if ui.add(lock_btn).clicked() {
+            let resp = ui.add(lock_btn);
+            theme::tip(resp.clone(), "Lock pad (keep sample on dice)", tooltips_on);
+            if resp.clicked() {
                 actions.push(SeqAction::ToggleLaneLock { lane: lane_idx });
             }
 
@@ -576,6 +585,7 @@ fn draw_param_controls(
     step_idx: usize,
     step: &StepDisplay,
     category: SampleCategory,
+    _tooltips_on: bool,
 ) -> Vec<SeqAction> {
     let mut actions = Vec::new();
     let cat_color = theme::category_color32(category);
@@ -709,7 +719,7 @@ fn draw_param_controls(
     actions
 }
 
-fn draw_bottom_bar(ui: &mut egui::Ui, display: &SeqDisplay) -> Option<SeqAction> {
+fn draw_bottom_bar(ui: &mut egui::Ui, display: &SeqDisplay, tooltips_on: bool) -> Option<SeqAction> {
     let mut action = None;
 
     ui.horizontal(|ui| {
@@ -719,14 +729,16 @@ fn draw_bottom_bar(ui: &mut egui::Ui, display: &SeqDisplay) -> Option<SeqAction>
         let play_label = if display.playing { "\u{25A0} STOP" } else { "\u{25B6} PLAY" };
         let play_color = if display.playing { Color32::BLACK } else { theme::ACCENT };
         let play_bg = if display.playing { theme::ACCENT } else { theme::STEP_BG };
-        if ui.add(
+        let resp = ui.add(
             egui::Button::new(
                 egui::RichText::new(play_label).font(FontId::monospace(10.0)).color(play_color).strong(),
             )
             .fill(play_bg)
             .min_size(Vec2::new(60.0, 22.0))
             .corner_radius(3.0),
-        ).clicked() {
+        );
+        theme::tip(resp.clone(), "Play/stop sequencer (Space)", tooltips_on);
+        if resp.clicked() {
             action = Some(SeqAction::ToggleInternalPlay);
         }
 
@@ -755,7 +767,9 @@ fn draw_bottom_bar(ui: &mut egui::Ui, display: &SeqDisplay) -> Option<SeqAction>
         .stroke(Stroke::new(1.0, dice_color))
         .min_size(Vec2::new(60.0, 22.0))
         .corner_radius(3.0);
-        if ui.add(dice_btn).clicked() {
+        let resp = ui.add(dice_btn);
+        theme::tip(resp.clone(), "Randomize pattern steps", tooltips_on);
+        if resp.clicked() {
             action = Some(SeqAction::DicePattern);
         }
 
@@ -772,6 +786,7 @@ fn draw_bottom_bar(ui: &mut egui::Ui, display: &SeqDisplay) -> Option<SeqAction>
         .min_size(Vec2::new(46.0, 22.0))
         .corner_radius(3.0);
         let fill_resp = ui.add(fill_btn);
+        theme::tip(fill_resp.clone(), "Hold to trigger fill steps", tooltips_on);
         if fill_resp.is_pointer_button_down_on() && !display.fill_active {
             action = Some(SeqAction::SetFillActive { active: true });
         }
@@ -790,21 +805,25 @@ fn draw_bottom_bar(ui: &mut egui::Ui, display: &SeqDisplay) -> Option<SeqAction>
                 .corner_radius(3.0)
             };
 
-            if ui.add(btn_style("CLEAR")).clicked() {
-                action = Some(SeqAction::ClearPattern);
-            }
-            if ui.add(btn_style("PASTE")).clicked() {
-                action = Some(SeqAction::PastePattern);
-            }
-            if ui.add(btn_style("COPY")).clicked() {
-                action = Some(SeqAction::CopyPattern);
-            }
-            if ui.add(btn_style("LOAD")).clicked() {
-                action = Some(SeqAction::OpenLoadPatternDialog);
-            }
-            if ui.add(btn_style("SAVE")).clicked() {
-                action = Some(SeqAction::OpenSavePatternDialog);
-            }
+            let resp = ui.add(btn_style("CLEAR"));
+            theme::tip(resp.clone(), "Clear all steps in pattern", tooltips_on);
+            if resp.clicked() { action = Some(SeqAction::ClearPattern); }
+
+            let resp = ui.add(btn_style("PASTE"));
+            theme::tip(resp.clone(), "Paste copied pattern", tooltips_on);
+            if resp.clicked() { action = Some(SeqAction::PastePattern); }
+
+            let resp = ui.add(btn_style("COPY"));
+            theme::tip(resp.clone(), "Copy current pattern", tooltips_on);
+            if resp.clicked() { action = Some(SeqAction::CopyPattern); }
+
+            let resp = ui.add(btn_style("LOAD"));
+            theme::tip(resp.clone(), "Load saved pattern", tooltips_on);
+            if resp.clicked() { action = Some(SeqAction::OpenLoadPatternDialog); }
+
+            let resp = ui.add(btn_style("SAVE"));
+            theme::tip(resp.clone(), "Save current pattern", tooltips_on);
+            if resp.clicked() { action = Some(SeqAction::OpenSavePatternDialog); }
 
             // EXPORT button — write active pattern to .mid file
             let export_btn = egui::Button::new(
@@ -814,9 +833,9 @@ fn draw_bottom_bar(ui: &mut egui::Ui, display: &SeqDisplay) -> Option<SeqAction>
             .stroke(Stroke::new(1.0, theme::ACCENT))
             .min_size(Vec2::new(52.0, 22.0))
             .corner_radius(3.0);
-            if ui.add(export_btn).clicked() {
-                action = Some(SeqAction::ExportMidi);
-            }
+            let resp = ui.add(export_btn);
+            theme::tip(resp.clone(), "Export pattern as MIDI file", tooltips_on);
+            if resp.clicked() { action = Some(SeqAction::ExportMidi); }
         });
     });
 
