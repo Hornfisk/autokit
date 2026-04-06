@@ -203,11 +203,25 @@ pub fn create(
                 // Fallback: if process() isn't running (JACK error), pick up
                 // the library from the GUI thread so the UI still works.
                 if matches!(shared.scan_status, ScanStatus::Scanning) {
-                    let lib = shared.bg_rx.as_ref().and_then(|rx| rx.try_recv().ok());
-                    if let Some(library) = lib {
-                        tracing::info!(total = library.total, "library received via GUI fallback");
+                    let result = shared.bg_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+                    if let Some(result) = result {
+                        let crate::analysis::library::ScanResult { library, restored } = result;
+                        tracing::info!(
+                            total = library.total,
+                            restored_present = restored.is_some(),
+                            "scan result received via GUI fallback"
+                        );
                         shared.library = Some(library);
-                        populate_kit_from_library(&mut shared);
+                        if let Some(restored) = restored {
+                            // Pre-loaded state from the scanner thread — install
+                            // it directly. All file I/O already happened off
+                            // the audio thread, so this is just a swap.
+                            shared.kit = restored.kit;
+                            shared.pattern_bank = restored.patterns;
+                            shared.update_all_waveforms(WAVEFORM_POINTS);
+                        } else {
+                            populate_kit_from_library(&mut shared);
+                        }
                         shared.scan_status = ScanStatus::Ready {
                             total: shared.library.as_ref().map(|l| l.total).unwrap_or(0),
                         };

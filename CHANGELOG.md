@@ -2,6 +2,17 @@
 
 All notable changes to Autokit are documented here.
 
+## [0.4.2] — 2026-04-06
+
+### Fixed
+
+- **Host freeze when loading projects with missing samples** — loading a saved DAW project (e.g. a Renoise song) whose persisted state referenced sample files that don't exist on the host could freeze the host process. Persisted-state restoration ran on the audio thread and synchronously opened/decoded each sample via symphonia under the shared-state lock; on missing files (different machine, removed folder) or stale network/FUSE mounts, the audio thread blocked on disk I/O long enough to starve the host's audio engine. Restoration now runs on the existing background scanner thread and ships pre-loaded `kit + patterns` back through the scan-result channel; the audio thread does a brief lock-and-swap with no I/O. Pads with missing samples come back empty (`sample = None`) but keep their original metadata and `sample_path` so the user can see what's broken and relocate them. Added a defensive parent-directory probe in `apply_to_kit` that short-circuits dead paths before attempting `open()`. Six new tests cover the missing-sample restoration paths.
+
+### Notes
+
+- macOS standalone still requires the 4096-frame buffer workaround introduced in 0.4.1, due to upstream nih-plug Apple Silicon CoreAudio issue [robbert-vdh/nih-plug#266](https://github.com/robbert-vdh/nih-plug/issues/266) (CoreAudio delivers more samples than the configured buffer). Plugin (VST3/CLAP) hosting is unaffected by this fix.
+- macOS binaries remain unsigned/unnotarized — see the Gatekeeper bypass section in the README.
+
 ## [0.4.1] — 2026-04-05
 
 ### Added

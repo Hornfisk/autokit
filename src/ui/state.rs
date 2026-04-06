@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::analysis::library::{SampleLibrary, ScanProgress};
+use crate::analysis::library::{SampleLibrary, ScanProgress, ScanResult};
 use crate::engine::kit::{DrumKit, NUM_PADS};
 use crate::engine::sequencer::PatternBank;
 use crate::util::history::History;
@@ -73,7 +73,7 @@ pub struct SharedState {
     /// Shared scan progress (read by GUI, written by scanner thread).
     pub scan_progress: Option<Arc<ScanProgress>>,
     /// Background scan receiver — GUI thread polls this as fallback when process() is dead.
-    pub bg_rx: Option<crossbeam_channel::Receiver<SampleLibrary>>,
+    pub bg_rx: Option<crossbeam_channel::Receiver<ScanResult>>,
 }
 
 impl SharedState {

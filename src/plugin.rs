@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 
 use crate::engine::kit::NUM_PADS;
 
-use crate::analysis::library::{SampleLibrary, ScanProgress};
+use crate::analysis::library::{SampleLibrary, ScanProgress, ScanResult};
 use crate::engine::echo_detect::EchoDetector;
 use crate::engine::sampler::VoicePool;
 use crate::engine::sequencer::Sequencer;
@@ -278,10 +278,29 @@ pub fn populate_kit_from_library(shared: &mut SharedState) {
 }
 
 impl Autokit {
-    /// Handle a completed library scan — populate kit, restore state, update status.
-    fn receive_library(&mut self, library: SampleLibrary) {
-        tracing::info!(total = library.total, "library received — populating kit");
+    /// Handle a completed library scan — install pre-built state, update status.
+    ///
+    /// CRITICAL: This runs on the audio thread. It must not perform any disk
+    /// I/O. The scanner thread (see `initialize` and `process`) is responsible
+    /// for loading sample audio off-thread; here we only swap pre-built data
+    /// into shared state under a brief lock.
+    ///
+    /// Background: previously this method called `preset::apply_to_kit`, which
+    /// opens and decodes every persisted sample file synchronously. Loading a
+    /// host project whose samples were missing (different machine, removed
+    /// folder, stale automount) would block the audio thread on filesystem
+    /// I/O long enough to freeze the host. The fix is to do all I/O upstream,
+    /// in `ScanResult::restored`, so this routine is allocation- and I/O-free.
+    fn receive_scan_result(&mut self, result: ScanResult) {
+        let ScanResult { library, restored } = result;
+        tracing::info!(
+            total = library.total,
+            restored_present = restored.is_some(),
+            "scan result received — installing"
+        );
+
         let mut shared = self.shared.lock();
+
         // Push snapshot before first population for undo support
         let snapshot = HistorySnapshot {
             pads: shared.kit.snapshot(),
@@ -290,29 +309,22 @@ impl Autokit {
         shared.history.push(snapshot);
         shared.library = Some(library);
 
-        // Check for persisted state from DAW save/load
-        let persisted = self.params.plugin_state.lock().clone();
-        tracing::info!(persisted_len = persisted.len(), "checking for persisted plugin state");
-        if !persisted.is_empty() {
-            match serde_json::from_str::<preset::Preset>(&persisted) {
-                Ok(p) => {
-                    tracing::info!("restoring persisted kit+patterns");
-                    let s = &mut *shared;
-                    preset::apply_to_kit(&p, &mut s.kit, &mut s.pattern_bank);
-                    shared.update_all_waveforms(WAVEFORM_POINTS);
-                }
-                Err(e) => {
-                    tracing::warn!("failed to parse persisted state: {e}");
-                    populate_kit_from_library(&mut shared);
-                }
-            }
-        } else if let Some(p) = preset::load_standalone_state() {
-            // Standalone mode: restore last session from disk
-            tracing::info!("restoring standalone session state");
-            let s = &mut *shared;
-            preset::apply_to_kit(&p, &mut s.kit, &mut s.pattern_bank);
+        if let Some(restored) = restored {
+            tracing::info!(
+                missing = restored.missing_paths.len(),
+                "installing pre-loaded restored kit+patterns"
+            );
+            // Move pre-built kit and pattern bank into shared state. Sample
+            // audio is already loaded; we only need to recompute waveform
+            // summaries from the in-memory data (no I/O).
+            shared.kit = restored.kit;
+            shared.pattern_bank = restored.patterns;
             shared.update_all_waveforms(WAVEFORM_POINTS);
+            // TODO: surface `restored.missing_paths` in the GUI so the user
+            // knows which samples need to be relocated.
         } else {
+            // No persisted state — fall back to a fresh kit picked from the
+            // newly built library.
             populate_kit_from_library(&mut shared);
         }
 
@@ -391,7 +403,7 @@ impl Plugin for Autokit {
             let root = PathBuf::from(&cfg.sample_library_root);
             if root.is_dir() {
                 // Config exists and path is valid — scan immediately
-                let (tx, rx) = crossbeam_channel::bounded::<SampleLibrary>(1);
+                let (tx, rx) = crossbeam_channel::bounded::<ScanResult>(1);
 
                 let progress = Arc::new(ScanProgress {
                     processed: AtomicU32::new(0),
@@ -403,12 +415,22 @@ impl Plugin for Autokit {
                     shared.bg_rx = Some(rx);
                 }
 
+                // Clone the persisted-state Arc into the worker so it can do
+                // preset deserialization + sample loading off the audio thread.
+                // This is the critical fix for the host-freeze bug when the
+                // saved project references samples missing on this machine.
+                let plugin_state = Arc::clone(&self.params.plugin_state);
+
                 if let Err(e) = std::thread::Builder::new()
                     .name("autokit-scanner".to_string())
                     .spawn(move || {
                         tracing::info!("background scan starting");
                         let library = SampleLibrary::build_with_progress(&root, sample_rate, Some(&progress));
-                        if tx.send(library).is_err() {
+                        // After the library is built, do the heavy state
+                        // restoration here — never on the audio thread.
+                        let persisted = plugin_state.lock().clone();
+                        let restored = preset::restore_persisted_off_thread(&persisted);
+                        if tx.send(ScanResult { library, restored }).is_err() {
                             tracing::warn!("plugin dropped before scan completed");
                         }
                     })
@@ -445,12 +467,12 @@ impl Plugin for Autokit {
     ) -> ProcessStatus {
         // Check for background thread messages (non-blocking)
         {
-            let library = self.shared.try_lock().and_then(|s| {
+            let result = self.shared.try_lock().and_then(|s| {
                 s.bg_rx.as_ref().and_then(|rx| rx.try_recv().ok())
             });
-            if let Some(library) = library {
+            if let Some(result) = result {
                 permit_alloc(|| {
-                    self.receive_library(library);
+                    self.receive_scan_result(result);
                 });
             }
         }
@@ -460,7 +482,7 @@ impl Plugin for Autokit {
             let scan_path = self.shared.try_lock().and_then(|mut s| s.pending_scan_path.take());
             if let Some(root) = scan_path {
                 permit_alloc(|| {
-                    let (tx, rx) = crossbeam_channel::bounded::<SampleLibrary>(1);
+                    let (tx, rx) = crossbeam_channel::bounded::<ScanResult>(1);
                     let sample_rate = self.sample_rate;
 
                     let progress = Arc::new(ScanProgress {
@@ -477,7 +499,10 @@ impl Plugin for Autokit {
                         .spawn(move || {
                             tracing::info!(path = %root.display(), "background scan starting (from GUI)");
                             let library = SampleLibrary::build_with_progress(&root, sample_rate, Some(&progress));
-                            if tx.send(library).is_err() {
+                            // GUI-triggered rescan: kit/patterns are already
+                            // live in memory; do not re-restore from persisted
+                            // JSON (which would clobber unsaved edits).
+                            if tx.send(ScanResult { library, restored: None }).is_err() {
                                 tracing::warn!("plugin dropped before scan completed");
                             }
                         })

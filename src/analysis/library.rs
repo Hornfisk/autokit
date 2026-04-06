@@ -10,6 +10,20 @@ use crate::analysis::features;
 use crate::analysis::scanner::{self, SampleEntry};
 use crate::engine::kit::SampleCategory;
 use crate::util::audio_file;
+use crate::util::preset::RestoredState;
+
+/// Output of the background scanner thread.
+///
+/// Carries the freshly built sample library plus, if applicable, the
+/// pre-loaded restored state from persisted DAW data. Bundling these two
+/// together lets the audio thread install everything in a single brief
+/// critical section without performing any disk I/O.
+pub struct ScanResult {
+    pub library: SampleLibrary,
+    /// `Some` only when this scan also restored persisted plugin state.
+    /// All sample audio is already loaded into the contained `DrumKit`.
+    pub restored: Option<RestoredState>,
+}
 
 /// Shared scan progress counters, readable from the UI thread.
 pub struct ScanProgress {

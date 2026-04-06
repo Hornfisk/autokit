@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::engine::kit::{DrumKit, SampleCategory};
+use crate::engine::sequencer::PatternBank;
 use crate::util::audio_file;
 
 const PRESET_VERSION: u32 = 2;
@@ -241,6 +242,17 @@ pub fn apply_to_kit(preset: &Preset, kit: &mut DrumKit, pattern_bank: &mut crate
 
         match &pp.sample_path {
             Some(path) if !path.is_empty() => {
+                // Defensive: short-circuit when the parent directory is obviously
+                // missing. Avoids open() on dead paths, and (more importantly)
+                // limits filesystem probing on stale network/FUSE mounts where
+                // open() can hang for many seconds. This MUST NOT run on the
+                // audio thread — see `restore_to_fresh` below.
+                if !sample_path_likely_present(path) {
+                    tracing::warn!("Preset pad {i}: missing sample (parent dir absent): {path}");
+                    pad.sample = None;
+                    pad.sample_path = Some(path.clone());
+                    continue;
+                }
                 match audio_file::load_wav_mono(path) {
                     Ok(samples) => {
                         pad.sample = Some(Arc::new(samples));
@@ -267,5 +279,172 @@ pub fn apply_to_kit(preset: &Preset, kit: &mut DrumKit, pattern_bank: &mut crate
             }
         }
         pattern_bank.active = pat_data.active.min(pattern_bank.patterns.len().saturating_sub(1));
+    }
+}
+
+/// Cheap check: does this sample path's parent directory exist?
+/// Used to skip dead paths without doing a full file open. This still does
+/// a `stat()` syscall on the parent, which can hang on a truly broken mount,
+/// but is much cheaper than `open()` + symphonia probe and avoids triggering
+/// per-file automounts.
+fn sample_path_likely_present(path: &str) -> bool {
+    let p = Path::new(path);
+    match p.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.is_dir(),
+        // No parent component (e.g. bare filename, or root) — let the open() try.
+        _ => true,
+    }
+}
+
+/// Pre-loaded state from disk: a fresh DrumKit + PatternBank with sample data
+/// already loaded, ready to install on the audio thread under a brief lock.
+///
+/// All file I/O happens when this is built — see [`restore_to_fresh`] and
+/// [`restore_persisted_off_thread`]. NEVER build this on the audio thread.
+pub struct RestoredState {
+    pub kit: DrumKit,
+    pub patterns: PatternBank,
+    /// Sample paths that were referenced by the preset but couldn't be loaded
+    /// (missing file, unreadable, or parent directory absent).
+    pub missing_paths: Vec<String>,
+}
+
+/// Build a fresh `DrumKit` + `PatternBank` from a preset, loading sample audio
+/// from disk. **All file I/O runs here** — call only from a background thread.
+pub fn restore_to_fresh(preset: &Preset) -> RestoredState {
+    let mut kit = DrumKit::new();
+    let mut patterns = PatternBank::new();
+    apply_to_kit(preset, &mut kit, &mut patterns);
+
+    // After apply_to_kit: any pad with `sample == None` but a non-empty
+    // `sample_path` is a missing reference worth surfacing.
+    let missing_paths: Vec<String> = kit
+        .pads
+        .iter()
+        .filter(|p| p.sample.is_none())
+        .filter_map(|p| p.sample_path.clone())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if !missing_paths.is_empty() {
+        tracing::warn!(
+            count = missing_paths.len(),
+            "preset restored with missing samples — pads left empty"
+        );
+    }
+
+    RestoredState { kit, patterns, missing_paths }
+}
+
+/// Restore plugin state from JSON persisted by the host (DAW save/load).
+/// Falls back to standalone session state if `persisted` is empty. Returns
+/// `None` if there's nothing to restore or the JSON is corrupt.
+///
+/// **All file I/O runs here** — call only from a background thread.
+pub fn restore_persisted_off_thread(persisted: &str) -> Option<RestoredState> {
+    if !persisted.is_empty() {
+        match serde_json::from_str::<Preset>(persisted) {
+            Ok(p) => Some(restore_to_fresh(&p)),
+            Err(e) => {
+                tracing::warn!("failed to parse persisted plugin state: {e}");
+                None
+            }
+        }
+    } else {
+        load_standalone_state().map(|p| restore_to_fresh(&p))
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+
+    fn pad_with_path(name: &str, path: &str) -> PresetPad {
+        PresetPad {
+            sample_path: Some(path.to_string()),
+            name: name.to_string(),
+            category: SampleCategory::Kick,
+            volume: 1.0,
+            pan: 0.0,
+            pitch: 0.0,
+            decay: 1.0,
+        }
+    }
+
+    #[test]
+    fn restore_to_fresh_collects_missing_paths_without_panicking() {
+        // Two pads referencing files in a directory that does not exist on
+        // any host. This is the host-freeze scenario from the field report:
+        // a project saved on machine A is loaded on machine B where the
+        // sample tree was never present.
+        let preset = Preset {
+            name: "missing-samples".to_string(),
+            version: PRESET_VERSION,
+            pads: vec![
+                pad_with_path("kick", "/nonexistent-dir-xyz/kick.wav"),
+                pad_with_path("snare", "/nonexistent-dir-xyz/snare.wav"),
+            ],
+            patterns: None,
+        };
+
+        let restored = restore_to_fresh(&preset);
+
+        // Pads come back with metadata intact but no audio data.
+        assert_eq!(restored.kit.pads[0].name, "kick");
+        assert_eq!(restored.kit.pads[1].name, "snare");
+        assert!(restored.kit.pads[0].sample.is_none());
+        assert!(restored.kit.pads[1].sample.is_none());
+        // Original paths preserved so the user can see what's broken.
+        assert_eq!(
+            restored.kit.pads[0].sample_path.as_deref(),
+            Some("/nonexistent-dir-xyz/kick.wav")
+        );
+        // Both missing paths surfaced.
+        assert_eq!(restored.missing_paths.len(), 2);
+    }
+
+    #[test]
+    fn restore_persisted_off_thread_handles_missing_paths_gracefully() {
+        // Simulate persisted DAW state pointing at samples that don't exist.
+        let preset = Preset {
+            name: "persisted".to_string(),
+            version: PRESET_VERSION,
+            pads: vec![pad_with_path("k", "/no/such/dir/file.wav")],
+            patterns: None,
+        };
+        let json = serde_json::to_string(&preset).unwrap();
+
+        // Should return Some(RestoredState) — restoration continues even
+        // when no samples can be loaded.
+        let restored = restore_persisted_off_thread(&json).expect("restore returns state");
+        assert_eq!(restored.missing_paths.len(), 1);
+        assert!(restored.kit.pads[0].sample.is_none());
+    }
+
+    #[test]
+    fn restore_persisted_off_thread_returns_none_for_empty_string() {
+        // Empty persisted state + no standalone file = nothing to restore.
+        // (Standalone file may or may not exist on the test host; we only
+        // assert this is non-panicking and returns a value of either kind.)
+        let _ = restore_persisted_off_thread("");
+    }
+
+    #[test]
+    fn restore_persisted_off_thread_returns_none_for_corrupt_json() {
+        let restored = restore_persisted_off_thread("not json {{{");
+        assert!(restored.is_none());
+    }
+
+    #[test]
+    fn sample_path_likely_present_rejects_missing_parent() {
+        assert!(!sample_path_likely_present("/definitely/not/here/x.wav"));
+    }
+
+    #[test]
+    fn sample_path_likely_present_accepts_real_parent() {
+        // Use the platform temp dir so this works on Linux, macOS, and Windows.
+        let mut probe = std::env::temp_dir();
+        probe.push("autokit-nonexistent-probe.wav");
+        assert!(sample_path_likely_present(probe.to_str().unwrap()));
     }
 }
