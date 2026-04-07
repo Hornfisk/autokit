@@ -272,8 +272,22 @@ pub fn create(
             // different keyboard layouts (ISO-NOR reports ',' or ';' for
             // the physical key right of M depending on shift state).
             ctx.input(|input| {
+                // Trace all raw events so we can confirm egui is receiving input
+                for event in &input.events {
+                    match event {
+                        egui::Event::Key { key, pressed: true, .. } => {
+                            tracing::info!(?key, "egui key event received");
+                        }
+                        egui::Event::Text(text) => {
+                            tracing::info!(text, "egui text event received");
+                        }
+                        _ => {}
+                    }
+                }
+
                 for (i, &key) in PAD_KEYS.iter().enumerate() {
                     if input.key_pressed(key) {
+                        tracing::info!(pad = i, ?key, "pad key triggered");
                         gui_triggers[i].store(1, Ordering::Relaxed);
                     }
                 }
@@ -301,11 +315,15 @@ pub fn create(
             // Space bar toggles internal sequencer play/stop
             // Gated: ignored when the host transport is actively driving playback
             // (prevents double-trigger when Space also toggles the DAW transport)
-            if ctx.input(|i| i.key_pressed(egui::Key::Space))
-                && !seq_host_playing.load(Ordering::Relaxed)
-            {
+            let space_pressed = ctx.input(|i| i.key_pressed(egui::Key::Space));
+            let host_playing = seq_host_playing.load(Ordering::Relaxed);
+            if space_pressed {
+                tracing::info!(host_playing, "Space pressed — gate check");
+            }
+            if space_pressed && !host_playing {
                 let current = seq_internal_play.load(Ordering::Relaxed);
                 seq_internal_play.store(!current, Ordering::Relaxed);
+                tracing::info!(now_playing = !current, "sequencer toggled via Space");
             }
 
             // Collect any actions triggered during rendering.
