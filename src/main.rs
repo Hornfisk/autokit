@@ -40,23 +40,33 @@ mod util {
 }
 
 fn main() {
-    // WASAPI shared mode delivers variable buffer sizes that can exceed nih-plug's
-    // default configured size (512), causing a panic in cpal.rs on startup.
-    // If --period-size wasn't explicitly supplied, relaunch with 2048 as a safe
-    // default that accommodates observed WASAPI delivery sizes (1056–1266 samples).
+    let args = build_args();
+    nih_plug::wrapper::standalone::nih_export_standalone_with_args::<plugin::Autokit>(
+        args.into_iter(),
+    );
+}
+
+/// Build the CLI args to pass to nih-plug's standalone runner.
+///
+/// On Windows, WASAPI shared mode delivers buffers in the audio device's native
+/// period (observed: 1056–1266 samples on Windows 11), which exceeds nih-plug's
+/// default configured size of 512. The CPAL backend panics on any mismatch,
+/// killing the audio thread before playback starts.
+///
+/// We inject `--period-size 2048` unless the user already passed it explicitly,
+/// so the binary works correctly on Windows without wrapper scripts or manual flags.
+fn build_args() -> Vec<String> {
+    let args: Vec<String> = std::env::args().collect();
+
     #[cfg(target_os = "windows")]
-    if !std::env::args().any(|a| a == "--period-size") {
-        let exe = std::env::current_exe()
-            .expect("could not determine executable path");
-        let extra: Vec<String> = std::env::args().skip(1).collect();
-        let status = std::process::Command::new(exe)
-            .arg("--period-size")
-            .arg("2048")
-            .args(&extra)
-            .status()
-            .expect("failed to relaunch with WASAPI buffer workaround");
-        std::process::exit(status.code().unwrap_or(1));
+    if !args.iter().any(|a| a == "--period-size") {
+        let mut patched = Vec::with_capacity(args.len() + 2);
+        patched.push(args[0].clone());
+        patched.push("--period-size".to_string());
+        patched.push("2048".to_string());
+        patched.extend_from_slice(&args[1..]);
+        return patched;
     }
 
-    nih_export_standalone::<plugin::Autokit>();
+    args
 }
