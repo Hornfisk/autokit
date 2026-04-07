@@ -6,7 +6,7 @@ All notable changes to Autokit are documented here.
 
 ### Fixed
 
-- **Windows standalone: no audio / sequencer stuck on step 1** — WASAPI in shared mode delivers buffers in the audio device's native period (observed: 1056 samples on Windows 11), which can exceed nih-plug's configured buffer size (512 default). The CPAL backend asserts exact equality and panics, killing the audio thread before any audio or sequencer callbacks run. Added `scripts/autokit-windows.bat` launch wrapper (mirrors the existing `scripts/autokit-macos.sh`) that passes `--period-size 2048`, large enough to accommodate WASAPI's actual delivery. `install.bat` now generates an `Autokit.bat` launcher at `%LocalAppData%\Autokit\` with the same flag; the raw `autokit-standalone.exe` should not be launched directly on Windows.
+- **Windows standalone: no audio / sequencer stuck on step 1** — WASAPI in shared mode delivers buffers in the audio device's native period (observed: 1056–1266 samples on Windows 11), which can exceed nih-plug's default configured buffer size (512). The CPAL backend asserts exact equality and panics, killing the audio thread before any audio or sequencer callbacks run. `main.rs` now detects Windows at startup and relaunches the process with `--period-size 2048` if the flag was not explicitly supplied, making `autokit-standalone.exe` work correctly out of the box with no wrapper or manual flags required.
 
 ## [0.4.2] — 2026-04-06
 

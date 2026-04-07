@@ -40,5 +40,23 @@ mod util {
 }
 
 fn main() {
+    // WASAPI shared mode delivers variable buffer sizes that can exceed nih-plug's
+    // default configured size (512), causing a panic in cpal.rs on startup.
+    // If --period-size wasn't explicitly supplied, relaunch with 2048 as a safe
+    // default that accommodates observed WASAPI delivery sizes (1056–1266 samples).
+    #[cfg(target_os = "windows")]
+    if !std::env::args().any(|a| a == "--period-size") {
+        let exe = std::env::current_exe()
+            .expect("could not determine executable path");
+        let extra: Vec<String> = std::env::args().skip(1).collect();
+        let status = std::process::Command::new(exe)
+            .arg("--period-size")
+            .arg("2048")
+            .args(&extra)
+            .status()
+            .expect("failed to relaunch with WASAPI buffer workaround");
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
     nih_export_standalone::<plugin::Autokit>();
 }
