@@ -2,7 +2,7 @@
 
 All notable changes to Autokit are documented here.
 
-## [0.4.3] — 2026-04-07
+## [0.4.4] — 2026-04-07
 
 ### Fixed
 
