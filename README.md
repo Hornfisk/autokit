@@ -100,6 +100,32 @@ Then rescan plugins in your DAW.
 
 Audio Unit (AU) is not supported. Most macOS DAWs (Ableton, Bitwig, REAPER, Renoise) support VST3 or CLAP. Logic Pro is AU-only and will not see Autokit.
 
+### Windows setup
+
+The binaries are not code-signed, so Windows Defender SmartScreen will block them on first run. This is expected — signing certificates cost money and Autokit is a free, open-source project. The binary is safe: you can verify it against the SHA256 checksums in the release and scan it on [VirusTotal](https://www.virustotal.com/) before running.
+
+**Getting past SmartScreen**
+
+When you double-click `autokit-standalone.exe` and see "Windows protected your PC":
+
+1. Click **More info**
+2. Click **Run anyway**
+
+That's it — you only need to do this once. Windows remembers the exception.
+
+For the VST3/CLAP plugin, your DAW may show the same prompt when it first loads the plugin. Click through the same way.
+
+**Why it's safe**
+
+- Source code is fully public at [github.com/Hornfisk/autokit](https://github.com/Hornfisk/autokit)
+- Releases are built by GitHub Actions from that source — the workflow is in `.github/workflows/`
+- SHA256 checksums are published with every release so you can verify the file you downloaded matches exactly what CI produced
+- No network access, no telemetry, no installer that touches system paths beyond the standard VST3/CLAP plugin directories
+
+**Why Defender flags it**
+
+SmartScreen uses a reputation system. New or low-download executables from unknown publishers get flagged regardless of content. The warning goes away over time as more users run it. Code-signing would suppress it immediately but requires a paid EV certificate.
+
 ## Features
 
 - **Sample analysis** — recursive library scan with spectral classification. Results are cached for fast startup.
