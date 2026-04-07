@@ -29,11 +29,20 @@ echo   CLAP -^> %CLAP_DIR%\autokit.clap
 if exist "%SCRIPT_DIR%%STANDALONE%" (
     set "BIN_DIR=%LocalAppData%\Autokit"
     if not exist "%BIN_DIR%" mkdir "%BIN_DIR%"
-    copy /y "%SCRIPT_DIR%%STANDALONE%" "%BIN_DIR%\autokit.exe" >nul
-    echo   Standalone -^> %BIN_DIR%\autokit.exe
+    copy /y "%SCRIPT_DIR%%STANDALONE%" "%BIN_DIR%\autokit-standalone.exe" >nul
+    echo   Standalone   -^> %BIN_DIR%\autokit-standalone.exe
+    (
+        echo @echo off
+        echo REM Launcher with safe WASAPI buffer size. Do not run autokit-standalone.exe directly.
+        echo set "DIR=%%~dp0"
+        echo "%%DIR%%autokit-standalone.exe" --period-size 2048 %%*
+    ) > "%BIN_DIR%\Autokit.bat"
+    echo   Launcher     -^> %BIN_DIR%\Autokit.bat
 )
 
 echo.
 echo Done! Rescan plugins in your DAW to find Autokit.
 echo Note: Windows may require running this as Administrator for the VST3/CLAP paths.
+echo Note: To run the standalone app, use Autokit.bat (not autokit-standalone.exe directly).
+echo       The launcher passes --period-size 2048 to avoid a WASAPI buffer size mismatch.
 pause
