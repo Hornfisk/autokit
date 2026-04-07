@@ -41,9 +41,7 @@ mod util {
 
 fn main() {
     let args = build_args();
-    nih_plug::wrapper::standalone::nih_export_standalone_with_args::<plugin::Autokit>(
-        args.into_iter(),
-    );
+    nih_plug::wrapper::standalone::nih_export_standalone_with_args::<plugin::Autokit, _>(args);
 }
 
 /// Build the CLI args to pass to nih-plug's standalone runner.
