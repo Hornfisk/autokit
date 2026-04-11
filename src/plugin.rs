@@ -16,6 +16,7 @@ use crate::engine::sequencer::Sequencer;
 use crate::logging;
 use crate::ui::state::{ScanStatus, SharedState};
 use crate::util::config;
+use crate::util::default_kit;
 use crate::util::history::HistorySnapshot;
 use crate::util::preset;
 
@@ -324,7 +325,9 @@ impl Autokit {
             // knows which samples need to be relocated.
         } else {
             // No persisted state — fall back to a fresh kit picked from the
-            // newly built library.
+            // newly built library. If the library is empty, this is a no-op
+            // and the bundled default kit applied during `initialize()` is
+            // left intact so the pads stay playable.
             populate_kit_from_library(&mut shared);
         }
 
@@ -394,6 +397,20 @@ impl Plugin for Autokit {
         );
 
         self.voices = Some(VoicePool::new(self.sample_rate));
+
+        // Fresh-install fallback: if we have neither DAW-persisted state nor
+        // a saved standalone session, seed the pads with the bundled default
+        // kit so the plugin is immediately playable. This runs BEFORE the
+        // scan; `receive_library` / persist restore will overwrite these
+        // pads once real library samples arrive.
+        {
+            let persist_empty = self.params.plugin_state.lock().is_empty();
+            let standalone_missing = preset::load_standalone_state().is_none();
+            if persist_empty && standalone_missing {
+                let mut shared = self.shared.lock();
+                default_kit::apply_to_kit(&mut shared);
+            }
+        }
 
         // Load config and decide whether to scan or show setup dialog
         let cfg = config::Config::load();

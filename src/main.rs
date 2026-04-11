@@ -35,6 +35,7 @@ mod ui {
 mod util {
     pub mod audio_file;
     pub mod config;
+    pub mod default_kit;
     pub mod history;
     pub mod preset;
 }
