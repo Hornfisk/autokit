@@ -47,6 +47,7 @@ realfft = "3"
 # Utilities
 rand = "0.9"
 walkdir = "2"
+rfd = "0.14"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

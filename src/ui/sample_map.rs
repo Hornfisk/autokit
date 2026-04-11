@@ -136,6 +136,8 @@ impl Default for PopupState {
 }
 
 /// Draw the scatter plot. Returns any action triggered.
+/// `name_filter` is a case-insensitive substring applied to each point's
+/// filename — non-matching points are dimmed and excluded from hit testing.
 pub fn draw_map(
     ui: &mut egui::Ui,
     points: &[MapPoint],
@@ -145,7 +147,13 @@ pub fn draw_map(
     shortcut_pad: Option<usize>,
     shortcut_category: Option<SampleCategory>,
     tooltips_on: bool,
+    name_filter: &str,
 ) -> MapAction {
+    let filter_lc = name_filter.to_lowercase();
+    let filter_active = !filter_lc.is_empty();
+    let matches_filter = |p: &MapPoint| -> bool {
+        !filter_active || p.name.to_lowercase().contains(&filter_lc)
+    };
     let mut action = MapAction::None;
     let available = ui.available_size();
     let (response, painter) = ui.allocate_painter(available, egui::Sense::click_and_drag());
@@ -226,14 +234,18 @@ pub fn draw_map(
             continue; // Kit dots drawn in second pass
         }
 
+        let pt_matches = matches_filter(p);
         let is_hovered = *hovered_index == Some(i);
-        let (radius, alpha) = if is_hovered {
+        let (radius, mut alpha) = if is_hovered {
             (5.0, 0.7)
         } else if let Some(cat) = shortcut_category {
             if p.category == cat { (4.0, 0.5) } else { (3.0, 0.12) }
         } else {
             (3.0, 0.25)
         };
+        if filter_active && !pt_matches {
+            alpha = 0.06; // ghost dim — keeps density context
+        }
         painter.circle_filled(screen, radius, color.to_egui_alpha((alpha * 255.0) as u8));
     }
 
@@ -259,7 +271,9 @@ pub fn draw_map(
 
     // --- Hit test for hover ---
     if let Some(cursor) = response.hover_pos() {
-        if let Some(hit) = hit_test(cursor, points, view, rect, 8.0) {
+        if let Some(hit) = hit_test(cursor, points, view, rect, 8.0)
+            .filter(|h| matches_filter(&points[h.point_index]))
+        {
             *hovered_index = Some(hit.point_index);
             if tooltips_on {
                 let p = &points[hit.point_index];
@@ -305,7 +319,9 @@ pub fn draw_map(
     // --- Click detection ---
     if response.clicked() {
         if let Some(cursor) = response.interact_pointer_pos() {
-            if let Some(hit) = hit_test(cursor, points, view, rect, 8.0) {
+            if let Some(hit) = hit_test(cursor, points, view, rect, 8.0)
+                .filter(|h| matches_filter(&points[h.point_index]))
+            {
                 action = MapAction::ClickedDot { point_index: hit.point_index };
             }
         }

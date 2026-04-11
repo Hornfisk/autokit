@@ -140,6 +140,13 @@ fn extract_folder_hint(path: &Path) -> Option<SampleCategory> {
     None
 }
 
+/// Classify a filename into a `SampleCategory` using only its name (no folder
+/// context). Used by the per-pad file browser / drag-drop path for samples
+/// outside the scanned library. Case-insensitive.
+pub fn guess_category_from_filename(filename: &str) -> Option<SampleCategory> {
+    extract_filename_hint(&filename.to_lowercase())
+}
+
 /// Check filename for category hints using token-based matching.
 /// The filename (without extension) is split on non-alphanumeric boundaries,
 /// and each token is compared against known abbreviations.

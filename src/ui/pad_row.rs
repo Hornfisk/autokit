@@ -14,6 +14,7 @@ pub enum PadRowAction {
     DiceCategory,
     ToggleLock,
     PlayPad,
+    BrowseSample,
     SetVolume(f32),
     SetPan(f32),
     SetPitch(f32),
@@ -44,7 +45,7 @@ pub fn draw_collapsed_from_snapshot(
     locked: bool,
     row_height: f32,
     tooltips_on: bool,
-) -> PadRowAction {
+) -> (PadRowAction, egui::Rect) {
     let mut action = PadRowAction::None;
     let cat_color = category_color(category);
     let cat_egui = cat_color.to_egui();
@@ -180,9 +181,9 @@ pub fn draw_collapsed_from_snapshot(
 
                 // Waveform — compute from total width minus all fixed elements.
                 // Fixed: strip(3) + space(8) + tag(46) + spacing(6) + play(18+6)
-                //        + name(140+6) + dice(46+6) + lock(46+6)
+                //        + name(140+6) + browse(22+6) + dice(46+6) + lock(46+6)
                 // Added: 16px knob + 4px space = 20px
-                const FIXED_W: f32 = 3.0 + 8.0 + 46.0 + 4.0 + 16.0 + 4.0 + 6.0 + 24.0 + 146.0 + 52.0 + 52.0 + 6.0 + 12.0;
+                const FIXED_W: f32 = 3.0 + 8.0 + 46.0 + 4.0 + 16.0 + 4.0 + 6.0 + 24.0 + 146.0 + 28.0 + 52.0 + 52.0 + 6.0 + 12.0;
                 let waveform_width = (total_w - FIXED_W).max(40.0);
                 let wf_color = cat_color.to_egui_alpha((waveform_opacity * 255.0) as u8);
                 waveform::paint_waveform(
@@ -193,6 +194,24 @@ pub fn draw_collapsed_from_snapshot(
                 );
 
                 ui.add_space(6.0);
+
+                // Browse (…) button — open native file dialog for this pad
+                let browse_response = ui.add(
+                    egui::Button::new(
+                        egui::RichText::new("…")
+                            .font(egui::FontId::new(11.0, egui::FontFamily::Monospace))
+                            .color(theme::TEXT_DIM)
+                            .strong(),
+                    )
+                    .fill(theme::BG_DETAIL)
+                    .stroke(egui::Stroke::new(1.0, theme::TEXT_DIM.linear_multiply(0.4)))
+                    .corner_radius(3)
+                    .min_size(egui::vec2(22.0, BTN_H)),
+                );
+                if browse_response.clicked() {
+                    action = PadRowAction::BrowseSample;
+                }
+                theme::tip(browse_response, "Browse for a sample file (or drop one here)", tooltips_on);
 
                 // DICE button — boxed text
                 let dice_response = ui.add(
@@ -251,7 +270,7 @@ pub fn draw_collapsed_from_snapshot(
         );
     }
 
-    action
+    (action, frame_response.response.rect)
 }
 
 /// Draw the expanded detail panel from snapshot data (no mutex held).

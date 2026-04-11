@@ -1,9 +1,20 @@
+use std::io::Cursor;
+
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+
+/// Decode an in-memory audio blob (e.g. `include_bytes!`) to mono f32.
+/// Used for the bundled default sample kit shipped inside the binary.
+pub fn load_wav_mono_from_bytes(bytes: &'static [u8], label: &str) -> Result<Vec<f32>, String> {
+    let mss = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
+    let mut hint = Hint::new();
+    hint.with_extension("wav");
+    decode_mono(mss, hint, label)
+}
 
 /// Load an audio file to mono f32 samples at native sample rate.
 /// No resampling — that comes in Phase 3.
@@ -16,6 +27,10 @@ pub fn load_wav_mono(path: &str) -> Result<Vec<f32>, String> {
         hint.with_extension("wav");
     }
 
+    decode_mono(mss, hint, path)
+}
+
+fn decode_mono(mss: MediaSourceStream, hint: Hint, path: &str) -> Result<Vec<f32>, String> {
     let probed = symphonia::default::get_probe()
         .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
         .map_err(|e| format!("probe {path}: {e}"))?;

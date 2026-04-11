@@ -15,6 +15,11 @@ const CONFIG_VERSION: u32 = 1;
 pub struct Config {
     pub version: u32,
     pub sample_library_root: String,
+    /// Last folder browsed for per-pad sample loading, so the file dialog
+    /// re-opens in the same place on next click. `#[serde(default)]` keeps
+    /// v1 config files loading without a version bump.
+    #[serde(default)]
+    pub last_browse_dir: Option<String>,
 }
 
 impl Config {
@@ -22,6 +27,17 @@ impl Config {
         Config {
             version: CONFIG_VERSION,
             sample_library_root: root.to_owned(),
+            last_browse_dir: None,
+        }
+    }
+
+    /// Load from disk, update `last_browse_dir`, and save. No-op if config
+    /// is missing (i.e. user hasn't finished setup) — browse still works,
+    /// just won't remember across launches until setup is complete.
+    pub fn update_last_browse_dir(dir: &std::path::Path) {
+        if let Some(mut cfg) = Self::load() {
+            cfg.last_browse_dir = Some(dir.to_string_lossy().into_owned());
+            cfg.save();
         }
     }
 

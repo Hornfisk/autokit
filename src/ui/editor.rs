@@ -137,6 +137,16 @@ pub struct EditorState {
     pub logo_texture: Option<egui::TextureHandle>,
     /// Whether mouseover tooltips are shown.
     pub tooltips_on: bool,
+    /// Filename substring filter for the sample map view.
+    pub map_search: String,
+    /// Last-known rect for each pad row, used for drag-and-drop hit testing.
+    pub pad_rects: [Option<egui::Rect>; NUM_PADS],
+    /// Last folder a browse/drop used — seeds the next file dialog.
+    pub last_browse_dir: Option<PathBuf>,
+    /// Channel receiver for async native file dialog results.
+    pub file_dialog_rx: Option<crossbeam_channel::Receiver<(usize, PathBuf)>>,
+    /// Whether we've loaded last_browse_dir from disk yet.
+    pub config_loaded: bool,
 }
 
 impl Default for EditorState {
@@ -159,6 +169,11 @@ impl Default for EditorState {
             frame_count: 0,
             logo_texture: None,
             tooltips_on: true,
+            map_search: String::new(),
+            pad_rects: [None; NUM_PADS],
+            last_browse_dir: None,
+            file_dialog_rx: None,
+            config_loaded: false,
         }
     }
 }
@@ -195,6 +210,14 @@ pub fn create(
             let seq_is_daw = &seq_sync.is_daw;
 
             state.frame_count += 1;
+
+            // One-time: load persisted last-browsed folder from config
+            if !state.config_loaded {
+                state.config_loaded = true;
+                if let Some(cfg) = config::Config::load() {
+                    state.last_browse_dir = cfg.last_browse_dir.map(PathBuf::from);
+                }
+            }
 
             // --- Phase 1: Brief lock to snapshot display state ---
             let snap = {
@@ -340,6 +363,16 @@ pub fn create(
 
             let mut pending_actions: Vec<GuiAction> = Vec::new();
 
+            // Drain native file-dialog results from the background picker thread.
+            if let Some(rx) = state.file_dialog_rx.as_ref() {
+                while let Ok((pad_index, path)) = rx.try_recv() {
+                    pending_actions.push(GuiAction::LoadSampleFromPath { pad_index, path });
+                }
+                // Request repaint while the dialog may still be open so the
+                // result lands promptly after the user picks a file.
+                ctx.request_repaint();
+            }
+
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(theme::BG_MAIN).inner_margin(egui::Margin { left: 8, right: 8, top: 0, bottom: 0 }))
                 .show(ctx, |ui| {
@@ -471,11 +504,12 @@ pub fn create(
                                         let pad = &snap.pads[i];
                                         let wf = snap.waveforms[i].as_ref();
 
-                                        let row_action = pad_row::draw_collapsed_from_snapshot(
+                                        let (row_action, row_rect) = pad_row::draw_collapsed_from_snapshot(
                                             ui, i, pad.has_sample, &pad.name, pad.category,
                                             pad.volume, wf, is_selected, state.brightness[i],
                                             pad.locked, pad_row_height, state.tooltips_on,
                                         );
+                                        state.pad_rects[i] = Some(row_rect);
 
                                         match row_action {
                                             PadRowAction::ToggleExpand => {
@@ -492,6 +526,9 @@ pub fn create(
                                             }
                                             PadRowAction::ToggleLock => {
                                                 pending_actions.push(GuiAction::ToggleLock(i));
+                                            }
+                                            PadRowAction::BrowseSample => {
+                                                spawn_file_dialog(state, i);
                                             }
                                             PadRowAction::SetVolume(v) => {
                                                 pending_actions.push(GuiAction::SetPadParam(i, PadParam::Volume, v));
@@ -544,6 +581,28 @@ pub fn create(
                             }).collect();
 
                             let shortcut_category = state.map_shortcut_pad.map(|i| snap.pads[i].category);
+
+                            // Search textbox — filter sample dots by filename substring
+                            ui.horizontal(|ui| {
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new("SEARCH")
+                                        .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                                        .color(theme::TEXT_DIM),
+                                );
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut state.map_search)
+                                        .hint_text("filename filter…")
+                                        .desired_width(240.0)
+                                        .font(egui::FontId::new(11.0, egui::FontFamily::Monospace)),
+                                );
+                                if !state.map_search.is_empty()
+                                    && ui.small_button("×").clicked()
+                                {
+                                    state.map_search.clear();
+                                }
+                            });
+
                             let map_action = sample_map::draw_map(
                                 ui,
                                 &state.map_points,
@@ -553,6 +612,7 @@ pub fn create(
                                 state.map_shortcut_pad,
                                 shortcut_category,
                                 state.tooltips_on,
+                                &state.map_search,
                             );
 
                             match map_action {
@@ -754,6 +814,63 @@ pub fn create(
                 }
             }
 
+            // --- OS drag-and-drop: files from file manager onto pads ---
+            if state.view_mode == ViewMode::PadStrip {
+                let (hovered, dropped) = ctx.input(|i| {
+                    (
+                        i.raw.hovered_files.clone(),
+                        i.raw.dropped_files.clone(),
+                    )
+                });
+
+                // Hover outline on whichever pad row is under the cursor
+                if !hovered.is_empty() {
+                    if let Some(cursor) = ctx.input(|i| i.pointer.latest_pos()) {
+                        for rect_opt in state.pad_rects.iter() {
+                            if let Some(rect) = rect_opt {
+                                if rect.contains(cursor) {
+                                    ctx.layer_painter(egui::LayerId::new(
+                                        egui::Order::Foreground,
+                                        egui::Id::new("autokit_drop_hint"),
+                                    ))
+                                    .rect_stroke(
+                                        rect.expand(1.0),
+                                        egui::CornerRadius { nw: 0, ne: 3, se: 3, sw: 0 },
+                                        egui::Stroke::new(2.0, theme::ACCENT),
+                                        egui::StrokeKind::Outside,
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+
+                // Actual drop → route to whichever pad contains the cursor
+                if !dropped.is_empty() {
+                    if let Some(cursor) = ctx.input(|i| i.pointer.latest_pos()) {
+                        let mut target_pad: Option<usize> = None;
+                        for (i, rect_opt) in state.pad_rects.iter().enumerate() {
+                            if let Some(rect) = rect_opt {
+                                if rect.contains(cursor) {
+                                    target_pad = Some(i);
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some(pad_index) = target_pad {
+                            if let Some(path) = dropped[0].path.clone() {
+                                pending_actions.push(GuiAction::LoadSampleFromPath {
+                                    pad_index,
+                                    path,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
             // --- Phase 2: Brief lock to apply any mutation ---
             if !pending_actions.is_empty() {
                 let mut needs_waveform_update = false;
@@ -944,6 +1061,50 @@ pub fn create(
                         });
                         if let Some(data) = data {
                             shared.preview_sample = Some(data);
+                        }
+                    }
+                    GuiAction::LoadSampleFromPath { pad_index, path } => {
+                        // Decode outside the lock — blocks the GUI thread briefly
+                        // but is always a single short drum sample, so this is fine.
+                        let decoded = crate::util::audio_file::load_wav_mono(
+                            &path.to_string_lossy(),
+                        );
+                        match decoded {
+                            Ok(samples) => {
+                                let filename = path.file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| "sample".to_string());
+                                let category = crate::analysis::scanner::guess_category_from_filename(&filename)
+                                    .unwrap_or(SampleCategory::Other);
+                                let data = Arc::new(samples);
+                                let path_str = path.to_string_lossy().into_owned();
+
+                                let snap_hist = HistorySnapshot {
+                                    pads: shared.kit.snapshot(),
+                                    sequencer: shared.pattern_bank.snapshot(),
+                                };
+                                shared.history.push(snap_hist);
+                                let pad = &mut shared.kit.pads[pad_index];
+                                pad.sample = Some(Arc::clone(&data));
+                                pad.sample_path = Some(path_str);
+                                pad.name = filename.clone();
+                                pad.category = category;
+                                shared.update_waveform(pad_index, WAVEFORM_POINTS);
+                                shared.preview_sample = Some(data);
+
+                                // Remember this folder for next browse
+                                if let Some(parent) = path.parent() {
+                                    state.last_browse_dir = Some(parent.to_path_buf());
+                                    config::Config::update_last_browse_dir(parent);
+                                }
+                                state.status_message = Some(format!("Loaded: {filename}"));
+                                state.status_message_frame = state.frame_count;
+                            }
+                            Err(e) => {
+                                tracing::warn!("load sample failed: {e}");
+                                state.status_message = Some(format!("Load failed: {e}"));
+                                state.status_message_frame = state.frame_count;
+                            }
                         }
                     }
                     GuiAction::AssignFromMap { pad_index, library_index } => {
@@ -1184,6 +1345,29 @@ pub fn create(
     )
 }
 
+/// Spawn a native file picker on a background thread for the given pad.
+/// Result is delivered via `state.file_dialog_rx` and drained on the next frame.
+fn spawn_file_dialog(state: &mut EditorState, pad_index: usize) {
+    let start_dir = state
+        .last_browse_dir
+        .clone()
+        .unwrap_or_else(|| config::home_dir().join("Music"));
+    let (tx, rx) = crossbeam_channel::bounded::<(usize, PathBuf)>(1);
+    state.file_dialog_rx = Some(rx);
+    std::thread::Builder::new()
+        .name(format!("autokit-filedialog-pad{pad_index}"))
+        .spawn(move || {
+            let picked = rfd::FileDialog::new()
+                .add_filter("Audio", &["wav", "flac", "ogg", "mp3", "aif", "aiff"])
+                .set_directory(&start_dir)
+                .pick_file();
+            if let Some(path) = picked {
+                let _ = tx.send((pad_index, path));
+            }
+        })
+        .ok();
+}
+
 /// Actions that the GUI can trigger, applied in a brief second lock.
 /// Which pad parameter to set.
 enum PadParam { Volume, Pan, Pitch, Decay }
@@ -1206,6 +1390,7 @@ enum GuiAction {
     DeletePattern(PathBuf),
     PreviewSample(usize),
     AssignFromMap { pad_index: usize, library_index: usize },
+    LoadSampleFromPath { pad_index: usize, path: PathBuf },
     // Sequencer actions
     SeqToggleStep { lane: usize, step: usize },
     SeqSetStepEnabled { lane: usize, step: usize, enabled: bool },
