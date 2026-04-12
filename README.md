@@ -6,20 +6,11 @@ A sample-based drum machine plugin that scans your library, classifies oneshots 
 **Platforms:** Linux, macOS, Windows
 **License:** GPL-3.0-or-later
 
-<details>
-<summary><img src="assets/screenshot-seq-thumb.png" alt="Sequencer view" width="400"></summary>
-<img src="assets/screenshot-seq.png" alt="Sequencer view (full)">
-</details>
-
-<details>
-<summary><img src="assets/screenshot-pads-thumb.png" alt="Pads view" width="400"></summary>
-<img src="assets/screenshot-pads.png" alt="Pads view (full)">
-</details>
-
-<details>
-<summary><img src="assets/screenshot-map-thumb.png" alt="Sample map" width="400"></summary>
-<img src="assets/screenshot-map.png" alt="Sample map (full)">
-</details>
+<table><tr>
+<td><details><summary><img src="assets/screenshot-seq-thumb.png" alt="Sequencer" width="280"></summary><img src="assets/screenshot-seq.png" alt="Sequencer (full)"></details></td>
+<td><details><summary><img src="assets/screenshot-pads-thumb.png" alt="Pads" width="280"></summary><img src="assets/screenshot-pads.png" alt="Pads (full)"></details></td>
+<td><details><summary><img src="assets/screenshot-map-thumb.png" alt="Map" width="280"></summary><img src="assets/screenshot-map.png" alt="Map (full)"></details></td>
+</tr></table>
 
 ## Quick start
 
