@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use walkdir::WalkDir;
 use serde::{Deserialize, Serialize};
 
+use crate::analysis::library::ScanProgress;
 use crate::engine::kit::SampleCategory;
 
 const AUDIO_EXTENSIONS: &[&str] = &["wav", "flac", "ogg"];
@@ -14,11 +17,12 @@ const FOLDER_HINTS: &[(&[&str], SampleCategory)] = &[
     (&["hat", "hh", "hihat", "hi-hat", "hi_hat"], SampleCategory::Hihat),
     (&["clap", "clp", "cp"], SampleCategory::Clap),
     (&["tom"], SampleCategory::Tom),
-    (&["perc", "percussion"], SampleCategory::Perc),
+    (&["perc", "percussion", "rimshot", "rim", "clave", "tambourine", "shaker", "conga", "bongo", "woodblock", "triangle", "cowbell"], SampleCategory::Perc),
     (&["cymbal", "crash", "ride"], SampleCategory::Cymbal),
-    (&["bass"], SampleCategory::Bass),
-    (&["synth", "stab", "lead", "pad"], SampleCategory::Synth),
-    (&["fx", "sfx", "effect", "noise"], SampleCategory::Other),
+    (&["bass", "808", "sub"], SampleCategory::Bass),
+    (&["synth", "stab", "lead", "pad", "key", "chord", "arp"], SampleCategory::Synth),
+    (&["vox", "vocal", "voice", "choir", "sing"], SampleCategory::Other),
+    (&["fx", "sfx", "effect", "noise", "riser", "sweep", "impact", "transition"], SampleCategory::Other),
 ];
 
 /// Filename keywords (typically short abbreviations) that hint at a sample category.
@@ -29,9 +33,14 @@ const FILENAME_HINTS: &[(&[&str], SampleCategory)] = &[
     (&["sd", "snare", "snr"], SampleCategory::Snare),
     (&["hh", "hihat", "hat", "oh", "ch"], SampleCategory::Hihat),
     (&["cp", "clap", "clp"], SampleCategory::Clap),
-    (&["tom"], SampleCategory::Tom),
-    (&["perc", "rim", "rs", "cb", "cowbell"], SampleCategory::Perc),
+    (&["tom", "lt", "mt", "ht"], SampleCategory::Tom),
+    (&["perc", "rim", "rimshot", "rs", "cb", "cowbell", "clv", "clave",
+      "tamb", "shk", "shaker", "conga", "bongo", "triangle", "block"], SampleCategory::Perc),
     (&["cy", "cymbal", "crash", "cr", "ride", "rd"], SampleCategory::Cymbal),
+    (&["bass", "808", "sub"], SampleCategory::Bass),
+    (&["synth", "stab", "lead", "pad", "key"], SampleCategory::Synth),
+    (&["vox", "vocal"], SampleCategory::Other),
+    (&["fx", "sfx"], SampleCategory::Other),
 ];
 
 /// Keywords in filename/path that suggest a loop (not a oneshot).
@@ -52,15 +61,49 @@ pub struct SampleEntry {
     pub is_percussive: bool,
 }
 
+/// Maximum directory depth the walker will descend. Guards against
+/// pathological nesting and accidental scans of `/` or `$HOME`.
+const MAX_SCAN_DEPTH: usize = 16;
+
+/// Hard cap on files considered during a scan. Prevents the walker from
+/// getting lost inside an enormous library and never returning.
+const MAX_SCAN_ENTRIES: usize = 200_000;
+
 /// Recursively scan a folder for audio files, filtering out likely loops.
 pub fn scan_folder(root: &Path) -> Vec<SampleEntry> {
-    let mut entries = Vec::new();
+    scan_folder_with_progress(root, None)
+}
 
+/// Same as [`scan_folder`] but reports walker progress via a shared
+/// atomic so the UI can show "walking… N files" during long scans.
+pub fn scan_folder_with_progress(
+    root: &Path,
+    progress: Option<&Arc<ScanProgress>>,
+) -> Vec<SampleEntry> {
+    let mut entries = Vec::new();
+    let mut visited: usize = 0;
+    let mut hit_cap = false;
+
+    // `follow_links(false)`: avoids symlink loops and matches how most
+    // sample managers behave. `max_depth`: bounded recursion.
     for entry in WalkDir::new(root)
-        .follow_links(true)
+        .follow_links(false)
+        .max_depth(MAX_SCAN_DEPTH)
         .into_iter()
         .filter_map(|e| e.ok())
     {
+        visited += 1;
+        if visited > MAX_SCAN_ENTRIES {
+            hit_cap = true;
+            break;
+        }
+        // Surface liveness to the UI every 64 entries so the progress
+        // bar doesn't freeze during the walker phase on huge trees.
+        if let Some(p) = progress {
+            if visited & 0x3F == 0 {
+                p.total.store(visited as u32, Ordering::Relaxed);
+            }
+        }
         if !entry.file_type().is_file() {
             continue;
         }
@@ -107,9 +150,18 @@ pub fn scan_folder(root: &Path) -> Vec<SampleEntry> {
         });
     }
 
+    if hit_cap {
+        tracing::warn!(
+            root = %root.display(),
+            cap = MAX_SCAN_ENTRIES,
+            "folder scan hit entry cap — some files were not considered"
+        );
+    }
+
     tracing::info!(
         root = %root.display(),
         total = entries.len(),
+        visited,
         "folder scan complete"
     );
 

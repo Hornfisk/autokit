@@ -45,6 +45,11 @@ pub const BG_DETAIL: egui::Color32 = egui::Color32::from_rgb(0x0d, 0x0d, 0x22);
 
 // Accent
 pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x00, 0xd4, 0xaa);
+
+// Per-FX identity colors (master knobs + per-lane send widgets share these)
+pub const FX_REVERB: egui::Color32 = egui::Color32::from_rgb(0xb4, 0x78, 0xff); // purple
+pub const FX_DELAY: egui::Color32 = egui::Color32::from_rgb(0x50, 0xc8, 0xdc);  // cyan
+pub const FX_FILTER: egui::Color32 = egui::Color32::from_rgb(0xff, 0xaa, 0x3c); // amber
 pub const ACCENT_DIM: egui::Color32 =
     egui::Color32::from_rgba_premultiplied(0x00, 0x54, 0x44, 0x44);
 
@@ -79,8 +84,10 @@ pub fn category_color32(cat: SampleCategory) -> egui::Color32 {
 
 /// Shared grid layout values used by both pad-strip and sequencer views.
 pub const CELL_SPACING: f32 = 2.0;
-/// Vertical space reserved for toolbar, headers, parameter bars, bottom controls.
-pub const GRID_VERT_RESERVED: f32 = 112.0;
+/// Vertical space reserved for sequencer view (toolbar, headers, SWING/PTRN row, bottom bar).
+pub const GRID_VERT_RESERVED_SEQ: f32 = 126.0;
+/// Vertical space reserved for pad strip view (header + small margin, no bottom bar).
+pub const GRID_VERT_RESERVED_PAD: f32 = 20.0;
 /// Width of the category color strip.
 pub const STRIP_WIDTH: f32 = 3.0;
 /// Width of the category tag badge.

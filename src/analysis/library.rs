@@ -67,7 +67,7 @@ impl SampleLibrary {
         // Load existing cache (if present, valid, and for the same root)
         let mut scan_cache = LibraryCache::load(root).unwrap_or_else(|| LibraryCache::new(root));
 
-        let entries = scanner::scan_folder(root);
+        let entries = scanner::scan_folder_with_progress(root, progress);
         let max_samples = (MAX_DURATION_SECS * sample_rate) as usize;
 
         if let Some(p) = &progress {
@@ -314,6 +314,8 @@ mod tests {
                     decay_time: 0.05,
                     spectral_centroid: 1000.0,
                     spectral_flatness: 0.5,
+                    sub_energy_ratio: 0.1,
+                    high_freq_ratio: 0.1,
                     peak: 1.0,
                     duration: 0.1,
                     is_percussive: true,
@@ -359,19 +361,34 @@ mod tests {
     }
 }
 
+/// Minimum length for a usable oneshot — ~46 ms at 44.1 kHz. Single-cycle
+/// wavetables (typically 32–2048 samples) fall below this; the shortest
+/// legitimate drum transients still sit comfortably above.
+const MIN_ONESHOT_SAMPLES: usize = 2048;
+
 /// Heuristic: a oneshot has a relatively high peak near the start
 /// and decays toward silence. Loops have sustained energy throughout.
+///
+/// Tuning notes:
+/// - Single-cycle waves are rejected outright by `MIN_ONESHOT_SAMPLES`.
+/// - `peak_position_ratio <= 0.6` accepts percussion whose transient is
+///   slightly delayed (ambient kicks, rimshot attack build, etc.).
+/// - `energy_ratio < 0.75` accepts drums with longer tails (808s, snares
+///   with reverb) while still rejecting sustained loops.
+/// - Very short tonal files (<150ms, flatness<0.12) are rejected as likely
+///   rendered single-cycle wavetables that slipped past the length check.
 fn looks_like_oneshot(samples: &[f32]) -> bool {
-    if samples.len() < 100 {
-        return true; // Very short = definitely a oneshot
+    if samples.len() < MIN_ONESHOT_SAMPLES {
+        tracing::trace!(len = samples.len(), "reject: below min oneshot length");
+        return false;
     }
 
     let peak = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
     if peak < 1e-5 {
-        return false; // Silent
+        tracing::trace!("reject: silent file");
+        return false;
     }
 
-    // Find where the peak is (should be in the first 25% for a oneshot)
     let peak_idx = samples
         .iter()
         .enumerate()
@@ -380,20 +397,60 @@ fn looks_like_oneshot(samples: &[f32]) -> bool {
         .unwrap_or(0);
 
     let peak_position_ratio = peak_idx as f32 / samples.len() as f32;
-    if peak_position_ratio > 0.4 {
-        return false; // Peak too late — probably a loop or riser
+    if peak_position_ratio > 0.6 {
+        tracing::trace!(peak_position_ratio, "reject: peak too late");
+        return false;
     }
 
-    // Compare energy in first quarter vs last quarter
     let quarter = samples.len() / 4;
     let first_energy: f32 = samples[..quarter].iter().map(|s| s * s).sum::<f32>() / quarter as f32;
     let last_energy: f32 = samples[samples.len() - quarter..].iter().map(|s| s * s).sum::<f32>() / quarter as f32;
 
     if first_energy < 1e-10 {
+        tracing::trace!("reject: no energy in first quarter");
         return false;
     }
 
-    // Oneshots should decay: last quarter energy should be significantly less
     let energy_ratio = last_energy / first_energy;
-    energy_ratio < 0.5 // Last quarter has less than half the energy of first quarter
+    if energy_ratio >= 0.75 {
+        tracing::trace!(energy_ratio, "reject: sustained energy (loop?)");
+        return false;
+    }
+
+    // Reject very short tonal files — likely rendered single-cycle wavetables
+    // that are slightly longer than MIN_ONESHOT_SAMPLES (e.g. multi-cycle or
+    // with a gentle fade-out that sneaks past the energy decay check).
+    if samples.len() < 8192 {
+        let zcr = zero_crossing_rate(samples);
+        // Very low ZCR (<0.05) = a few cycles of a low-freq pure tone.
+        // Combined with short length → almost certainly a wavetable.
+        if zcr < 0.05 {
+            tracing::trace!(zcr, len = samples.len(), "reject: short tonal file (wavetable?)");
+            return false;
+        }
+        // Mid-range ZCR with very uniform energy (checked between halves,
+        // not just quarters) also suggests a looped waveform.
+        let half = samples.len() / 2;
+        let h1_energy: f32 = samples[..half].iter().map(|s| s * s).sum::<f32>() / half as f32;
+        let h2_energy: f32 = samples[half..].iter().map(|s| s * s).sum::<f32>() / half as f32;
+        if h1_energy > 1e-10 {
+            let half_ratio = h2_energy / h1_energy;
+            if half_ratio > 0.65 && zcr < 0.15 {
+                tracing::trace!(half_ratio, zcr, "reject: sustained tonal short file");
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+/// Fraction of adjacent sample pairs that cross zero. Range 0..0.5.
+/// High values (~0.3+) → noisy/percussive; low values (<0.1) → tonal.
+fn zero_crossing_rate(samples: &[f32]) -> f32 {
+    if samples.len() < 2 { return 0.0; }
+    let crossings = samples.windows(2)
+        .filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0))
+        .count();
+    crossings as f32 / (samples.len() - 1) as f32
 }

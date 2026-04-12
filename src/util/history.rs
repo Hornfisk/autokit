@@ -17,6 +17,8 @@ pub struct PadSnapshot {
     pub pan: f32,
     pub pitch: f32,
     pub decay: f32,
+    pub start: f32,
+    pub end: f32,
 }
 
 /// Snapshot of one sequencer step.
@@ -28,6 +30,9 @@ pub struct StepSnapshot {
     pub pan: Option<f32>,
     pub pitch: Option<f32>,
     pub condition: crate::engine::sequencer::ConditionTrig,
+    pub fx_rvb: Option<f32>,
+    pub fx_dly: Option<f32>,
+    pub fx_filter: Option<bool>,
 }
 
 /// Snapshot of one sequencer lane.
@@ -36,6 +41,9 @@ pub struct LaneSnapshot {
     pub steps: [StepSnapshot; 16],
     pub muted: bool,
     pub solo: bool,
+    pub fx_send_rvb: f32,
+    pub fx_send_dly: f32,
+    pub fx_filter: bool,
 }
 
 /// Snapshot of one pattern.
@@ -43,6 +51,8 @@ pub struct LaneSnapshot {
 pub struct PatternSnapshot {
     pub lanes: [LaneSnapshot; NUM_PADS],
     pub swing: f32,
+    pub master_automation: crate::engine::sequencer::MasterAutomation,
+    pub master_fx_base: crate::engine::sequencer::MasterFxBase,
 }
 
 /// Snapshot of the full sequencer state (all 16 patterns).
@@ -122,6 +132,8 @@ mod tests {
                 pan: 0.0,
                 pitch: 0.0,
                 decay: 1.0,
+                start: 0.0,
+                end: 1.0,
             })
             .collect();
 
@@ -134,11 +146,22 @@ mod tests {
                     pan: None,
                     pitch: None,
                     condition: crate::engine::sequencer::ConditionTrig::Always,
+                    fx_rvb: None,
+                    fx_dly: None,
+                    fx_filter: None,
                 }; 16],
                 muted: false,
                 solo: false,
+                fx_send_rvb: 0.0,
+                fx_send_dly: 0.0,
+                fx_filter: false,
             });
-            PatternSnapshot { lanes, swing: 0.0 }
+            PatternSnapshot {
+                lanes,
+                swing: 0.0,
+                master_automation: crate::engine::sequencer::MasterAutomation::default(),
+                master_fx_base: crate::engine::sequencer::MasterFxBase::default(),
+            }
         }).collect();
 
         HistorySnapshot {
@@ -257,6 +280,8 @@ mod tests {
                 decay_time: 0.05,
                 spectral_centroid: 1000.0,
                 spectral_flatness: 0.5,
+                sub_energy_ratio: 0.1,
+                high_freq_ratio: 0.1,
                 peak: 1.0,
                 duration: 0.1,
                 is_percussive: true,
@@ -317,6 +342,8 @@ mod tests {
                 decay_time: 0.05,
                 spectral_centroid: 1000.0,
                 spectral_flatness: 0.5,
+                sub_energy_ratio: 0.1,
+                high_freq_ratio: 0.1,
                 peak: 1.0,
                 duration: 0.1,
                 is_percussive: true,
@@ -380,6 +407,8 @@ mod tests {
                     decay_time: 0.05,
                     spectral_centroid: 1000.0,
                     spectral_flatness: 0.5,
+                    sub_energy_ratio: 0.1,
+                    high_freq_ratio: 0.1,
                     peak: 1.0,
                     duration: 0.1,
                     is_percussive: true,

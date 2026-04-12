@@ -77,6 +77,10 @@ pub struct DrumPad {
     pub pitch: f32,
     /// Decay / sample length (0.0 = very short, 1.0 = full sample). Default 1.0.
     pub decay: f32,
+    /// Start point (0.0 = beginning, 1.0 = end of sample). Default 0.0.
+    pub start: f32,
+    /// End point (0.0 = beginning, 1.0 = end of sample). Default 1.0.
+    pub end: f32,
 }
 
 impl DrumPad {
@@ -92,6 +96,8 @@ impl DrumPad {
             pan: 0.0,
             pitch: 0.0,
             decay: 1.0,
+            start: 0.0,
+            end: 1.0,
         }
     }
 }
@@ -131,6 +137,8 @@ impl DrumKit {
                 pan: p.pan,
                 pitch: p.pitch,
                 decay: p.decay,
+                start: p.start,
+                end: p.end,
             })
             .collect()
     }
@@ -154,6 +162,8 @@ impl DrumKit {
             pad.pan = snap.pan;
             pad.pitch = snap.pitch;
             pad.decay = snap.decay;
+            pad.start = snap.start;
+            pad.end = snap.end;
         }
     }
 
@@ -253,6 +263,8 @@ mod tests {
                     decay_time: 0.05,
                     spectral_centroid: 1000.0,
                     spectral_flatness: 0.5,
+                    sub_energy_ratio: 0.1,
+                    high_freq_ratio: 0.1,
                     peak: 1.0,
                     duration: 0.1,
                     is_percussive: true,
@@ -291,6 +303,8 @@ mod tests {
                         decay_time: 0.05,
                         spectral_centroid: 1000.0,
                         spectral_flatness: 0.5,
+                        sub_energy_ratio: 0.1,
+                        high_freq_ratio: 0.1,
                         peak: 1.0,
                         duration: 0.1,
                         is_percussive: true,
@@ -346,6 +360,8 @@ mod tests {
                 pan: 0.3,
                 pitch: -1.0,
                 decay: 1.0,
+                start: 0.0,
+                end: 1.0,
             })
             .collect();
 

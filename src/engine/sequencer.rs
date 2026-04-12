@@ -64,6 +64,12 @@ pub struct Step {
     pub pan: Option<f32>,        // None = inherit pad default, Some = p-lock
     pub pitch: Option<f32>,      // None = inherit pad default, Some = p-lock (semitones)
     pub condition: ConditionTrig,
+    #[serde(default)]
+    pub fx_rvb: Option<f32>,     // None = inherit pad fx_send_rvb, Some = override
+    #[serde(default)]
+    pub fx_dly: Option<f32>,     // None = inherit pad fx_send_dly, Some = override
+    #[serde(default)]
+    pub fx_filter: Option<bool>, // None = inherit pad fx_filter, Some = override
 }
 
 impl Default for Step {
@@ -75,6 +81,9 @@ impl Default for Step {
             pan: None,
             pitch: None,
             condition: ConditionTrig::Always,
+            fx_rvb: None,
+            fx_dly: None,
+            fx_filter: None,
         }
     }
 }
@@ -87,6 +96,15 @@ pub struct Lane {
     pub muted: bool,
     #[serde(default)]
     pub solo: bool,
+    /// Per-lane reverb send (0..1). Per-pattern.
+    #[serde(default)]
+    pub fx_send_rvb: f32,
+    /// Per-lane delay send (0..1). Per-pattern.
+    #[serde(default)]
+    pub fx_send_dly: f32,
+    /// Whether this lane is routed through the master DJ filter insert. Per-pattern.
+    #[serde(default)]
+    pub fx_filter: bool,
 }
 
 impl Lane {
@@ -96,6 +114,9 @@ impl Lane {
             steps: [Step::default(); 16],
             muted: false,
             solo: false,
+            fx_send_rvb: 0.0,
+            fx_send_dly: 0.0,
+            fx_filter: false,
         }
     }
 }
@@ -103,11 +124,60 @@ impl Lane {
 pub const NUM_STEPS: usize = 16;
 pub const NUM_PATTERNS: usize = 16;
 
-/// One pattern: 8 lanes + swing setting.
+/// Per-pattern master FX automation. One slot per 16th-note step; `None`
+/// means the live knob value wins. Stored globally per pattern (not
+/// per-lane) so the master FX timing is independent of which lane fires.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct MasterAutomation {
+    pub reverb_mix: [Option<f32>; 16],
+    pub delay_mix: [Option<f32>; 16],
+    pub dj_filter: [Option<f32>; 16],
+}
+
+impl Default for MasterAutomation {
+    fn default() -> Self {
+        Self {
+            reverb_mix: [None; 16],
+            delay_mix: [None; 16],
+            dj_filter: [None; 16],
+        }
+    }
+}
+
+impl MasterAutomation {
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn any_recorded(&self) -> bool {
+        self.reverb_mix.iter().any(|s| s.is_some())
+            || self.delay_mix.iter().any(|s| s.is_some())
+            || self.dj_filter.iter().any(|s| s.is_some())
+    }
+}
+
+/// Per-pattern base values for the three master FX knobs. Captured when
+/// the user switches away from a pattern and re-applied via ParamSetter
+/// when the pattern becomes active. `initialized = false` means this
+/// pattern has never been touched — first activation captures the live
+/// knob values into it (so old presets/fresh projects keep current FX).
+#[derive(Clone, Copy, Serialize, Deserialize, Default)]
+pub struct MasterFxBase {
+    pub reverb_mix: f32,
+    pub delay_mix: f32,
+    pub dj_filter: f32,
+    pub initialized: bool,
+}
+
+/// One pattern: 8 lanes + swing setting + master FX automation.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Pattern {
     pub lanes: Vec<Lane>,
     pub swing: f32,
+    #[serde(default)]
+    pub master_automation: MasterAutomation,
+    #[serde(default)]
+    pub master_fx_base: MasterFxBase,
 }
 
 impl Pattern {
@@ -115,6 +185,8 @@ impl Pattern {
         Self {
             lanes: (0..NUM_PADS).map(Lane::new).collect(),
             swing: 0.0,
+            master_automation: MasterAutomation::default(),
+            master_fx_base: MasterFxBase::default(),
         }
     }
 
@@ -162,12 +234,20 @@ impl PatternBank {
                                 pan: pat.lanes[i].steps[j].pan,
                                 pitch: pat.lanes[i].steps[j].pitch,
                                 condition: pat.lanes[i].steps[j].condition,
+                                fx_rvb: pat.lanes[i].steps[j].fx_rvb,
+                                fx_dly: pat.lanes[i].steps[j].fx_dly,
+                                fx_filter: pat.lanes[i].steps[j].fx_filter,
                             }),
                             muted: pat.lanes[i].muted,
                             solo: pat.lanes[i].solo,
+                            fx_send_rvb: pat.lanes[i].fx_send_rvb,
+                            fx_send_dly: pat.lanes[i].fx_send_dly,
+                            fx_filter: pat.lanes[i].fx_filter,
                         }
                     }),
                     swing: pat.swing,
+                    master_automation: pat.master_automation,
+                    master_fx_base: pat.master_fx_base,
                 }
             }).collect(),
             active_pattern: self.active,
@@ -184,11 +264,19 @@ impl PatternBank {
                     step.pan = snap_step.pan;
                     step.pitch = snap_step.pitch;
                     step.condition = snap_step.condition;
+                    step.fx_rvb = snap_step.fx_rvb;
+                    step.fx_dly = snap_step.fx_dly;
+                    step.fx_filter = snap_step.fx_filter;
                 }
                 lane.muted = snap_lane.muted;
                 lane.solo = snap_lane.solo;
+                lane.fx_send_rvb = snap_lane.fx_send_rvb;
+                lane.fx_send_dly = snap_lane.fx_send_dly;
+                lane.fx_filter = snap_lane.fx_filter;
             }
             pat.swing = snap_pat.swing;
+            pat.master_automation = snap_pat.master_automation;
+            pat.master_fx_base = snap_pat.master_fx_base;
         }
         self.active = snapshot.active_pattern;
     }
@@ -309,8 +397,8 @@ impl Sequencer {
                 return 0;
             }
             let sixteenths = beats * 4.0;
-            let host_step = (sixteenths.floor() as usize) % 16;
-            let frac = sixteenths.fract();
+            let swing = self.bank.active_pattern().swing as f64;
+            let (host_step, frac) = Self::beats_to_swung_step(sixteenths, swing);
 
             self.current_step = host_step;
             let step_dur = self.step_duration_samples(host_step, tempo, sample_rate);
@@ -402,20 +490,17 @@ impl Sequencer {
                 return 0;
             }
             let sixteenths = beats * 4.0;
-            let host_step = (sixteenths.floor() as usize) % 16;
-            let frac = sixteenths.fract();
+            let swing = bank.active_pattern().swing as f64;
+            let (host_step, frac) = Self::beats_to_swung_step(sixteenths, swing);
 
             self.current_step = host_step;
             let step_dur = self.step_duration_with_swing(host_step, tempo, sample_rate, bank.active_pattern().swing);
             self.tick_accumulator = frac * step_dur;
 
             if !self.playing {
-                // Fresh start — fire the step we land on
                 fire_steps[fire_count] = host_step;
                 fire_count += 1;
             } else if host_step != self.last_host_step {
-                // Host step changed — fire any steps we may have missed
-                // (e.g. due to GUI lock contention skipping a buffer)
                 let prev = self.last_host_step;
                 let mut s = (prev + 1) % 16;
                 loop {
@@ -481,6 +566,21 @@ impl Sequencer {
         }
     }
 
+    /// Map a host beat position to a swing-adjusted (step, fractional_position) pair.
+    /// Without this, `sixteenths.floor()` snaps to a straight grid and ignores swing.
+    fn beats_to_swung_step(sixteenths: f64, swing: f64) -> (usize, f64) {
+        let bar_pos = sixteenths.rem_euclid(16.0);
+        let pair = (bar_pos / 2.0).floor() as usize;
+        let pos_in_pair = bar_pos - pair as f64 * 2.0;
+        let even_len = 1.0 + swing * 0.5;
+        if pos_in_pair < even_len {
+            (pair * 2, pos_in_pair / even_len)
+        } else {
+            let odd_len = 2.0 - even_len;
+            (pair * 2 + 1, (pos_in_pair - even_len) / odd_len)
+        }
+    }
+
     fn fire_step_from_bank(
         &mut self,
         sample_offset: usize,
@@ -511,7 +611,11 @@ impl Sequencer {
 
             let velocity = step.velocity;
             let pad_index = lane.pad_index;
-            voices.trigger(pad_index, velocity, kit, sample_offset, step.pan, step.pitch);
+            voices.trigger(
+                pad_index, velocity, kit, sample_offset,
+                step.pan, step.pitch, step.fx_rvb, step.fx_dly, step.fx_filter,
+                lane.fx_send_rvb, lane.fx_send_dly, lane.fx_filter,
+            );
             trigger_flags[pad_index].fetch_add(1, Ordering::Relaxed);
             count += 1;
         }
@@ -529,16 +633,24 @@ impl Sequencer {
                     pan: pat.lanes[i].steps[j].pan,
                     pitch: pat.lanes[i].steps[j].pitch,
                     condition: pat.lanes[i].steps[j].condition,
+                    fx_rvb: pat.lanes[i].steps[j].fx_rvb,
+                    fx_dly: pat.lanes[i].steps[j].fx_dly,
+                    fx_filter: pat.lanes[i].steps[j].fx_filter,
                 });
                 LaneSnapshot {
                     steps,
                     muted: pat.lanes[i].muted,
                     solo: pat.lanes[i].solo,
+                    fx_send_rvb: pat.lanes[i].fx_send_rvb,
+                    fx_send_dly: pat.lanes[i].fx_send_dly,
+                    fx_filter: pat.lanes[i].fx_filter,
                 }
             });
             PatternSnapshot {
                 lanes,
                 swing: pat.swing,
+                master_automation: pat.master_automation,
+                master_fx_base: pat.master_fx_base,
             }
         }).collect();
 
@@ -559,11 +671,19 @@ impl Sequencer {
                     step.pan = snap_step.pan;
                     step.pitch = snap_step.pitch;
                     step.condition = snap_step.condition;
+                    step.fx_rvb = snap_step.fx_rvb;
+                    step.fx_dly = snap_step.fx_dly;
+                    step.fx_filter = snap_step.fx_filter;
                 }
                 lane.muted = snap_lane.muted;
                 lane.solo = snap_lane.solo;
+                lane.fx_send_rvb = snap_lane.fx_send_rvb;
+                lane.fx_send_dly = snap_lane.fx_send_dly;
+                lane.fx_filter = snap_lane.fx_filter;
             }
             pat.swing = snap_pat.swing;
+            pat.master_automation = snap_pat.master_automation;
+            pat.master_fx_base = snap_pat.master_fx_base;
         }
         self.bank.active = snapshot.active_pattern;
     }
@@ -615,7 +735,14 @@ impl Sequencer {
 
             let velocity = step.velocity;
             let pad_index = lane.pad_index;
-            voices.trigger(pad_index, velocity, kit, sample_offset, step.pan, step.pitch);
+            let lane_rvb = lane.fx_send_rvb;
+            let lane_dly = lane.fx_send_dly;
+            let lane_flt = lane.fx_filter;
+            voices.trigger(
+                pad_index, velocity, kit, sample_offset,
+                step.pan, step.pitch, step.fx_rvb, step.fx_dly, step.fx_filter,
+                lane_rvb, lane_dly, lane_flt,
+            );
             if pad_index < trigger_flags.len() {
                 trigger_flags[pad_index].fetch_add(1, Ordering::Relaxed);
             }
@@ -811,6 +938,39 @@ mod tests {
     }
 
     #[test]
+    fn beats_to_swung_step_no_swing_is_straight() {
+        for i in 0..16 {
+            let sixteenths = i as f64 + 0.5;
+            let (step, frac) = Sequencer::beats_to_swung_step(sixteenths, 0.0);
+            assert_eq!(step, i, "step at sixteenth {sixteenths}");
+            assert!((frac - 0.5).abs() < 0.001, "frac at sixteenth {sixteenths}");
+        }
+    }
+
+    #[test]
+    fn beats_to_swung_step_shifts_odd_steps() {
+        let swing = 0.5;
+        let even_len = 1.0 + swing * 0.5; // 1.25
+        // At sixteenth 1.0 (straight grid odd step boundary), swing pushes it later
+        let (step, _frac) = Sequencer::beats_to_swung_step(1.0, swing);
+        assert_eq!(step, 0, "sixteenth 1.0 is still in even step with swing 0.5");
+        // At the swung boundary (1.25), odd step begins
+        let (step, frac) = Sequencer::beats_to_swung_step(even_len, swing);
+        assert_eq!(step, 1, "odd step begins at {even_len}");
+        assert!(frac.abs() < 0.001, "frac should be ~0 at boundary");
+    }
+
+    #[test]
+    fn beats_to_swung_step_pairs_always_span_two_sixteenths() {
+        for swing in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let even_len = 1.0 + swing * 0.5;
+            let odd_len = 2.0 - even_len;
+            assert!((even_len + odd_len - 2.0_f64).abs() < 1e-10,
+                "pair should span 2 sixteenths at swing {swing}");
+        }
+    }
+
+    #[test]
     fn swing_does_not_change_total_pattern_length() {
         // With swing, even steps get longer and odd steps get shorter,
         // but the total cycle should remain the same.
@@ -895,6 +1055,9 @@ mod tests {
             pan: Some(-0.5),
             pitch: Some(7.0),
             condition: ConditionTrig::Fill,
+            fx_rvb: None,
+            fx_dly: None,
+            fx_filter: None,
         };
         assert_eq!(step.pan, Some(-0.5));
         assert_eq!(step.pitch, Some(7.0));
@@ -1011,6 +1174,48 @@ mod tests {
         assert_eq!(restored.patterns[0].lanes[0].steps[0].condition, ConditionTrig::Fill);
         assert_eq!(restored.patterns[0].lanes[0].steps[3].pan, Some(-0.5));
         assert!((restored.patterns[0].swing - 0.4).abs() < 0.001);
+    }
+
+    #[test]
+    fn lane_mute_persists_across_pattern_switch() {
+        // Regression: verify Lane.muted is per-pattern (round-trip via switch).
+        let mut bank = PatternBank::new();
+        bank.patterns[0].lanes[3].muted = true;
+        bank.active = 1;
+        assert!(!bank.active_pattern().lanes[3].muted);
+        bank.active = 0;
+        assert!(bank.active_pattern().lanes[3].muted);
+    }
+
+    #[test]
+    fn lane_fx_send_persists_across_pattern_switch() {
+        // After Part B: per-lane FX sends live on Lane (per-pattern), not DrumPad.
+        let mut bank = PatternBank::new();
+        bank.patterns[0].lanes[2].fx_send_rvb = 0.7;
+        bank.patterns[0].lanes[2].fx_filter = true;
+        bank.active = 1;
+        assert!((bank.active_pattern().lanes[2].fx_send_rvb - 0.0).abs() < 0.001);
+        assert!(!bank.active_pattern().lanes[2].fx_filter);
+        bank.active = 0;
+        assert!((bank.active_pattern().lanes[2].fx_send_rvb - 0.7).abs() < 0.001);
+        assert!(bank.active_pattern().lanes[2].fx_filter);
+    }
+
+    #[test]
+    fn master_fx_base_roundtrips_through_pattern_serde() {
+        let mut bank = PatternBank::new();
+        bank.patterns[0].master_fx_base.reverb_mix = 0.42;
+        bank.patterns[0].master_fx_base.delay_mix = 0.13;
+        bank.patterns[0].master_fx_base.dj_filter = -0.25;
+        bank.patterns[0].master_fx_base.initialized = true;
+
+        let json = serde_json::to_string(&bank).unwrap();
+        let restored: PatternBank = serde_json::from_str(&json).unwrap();
+
+        assert!((restored.patterns[0].master_fx_base.reverb_mix - 0.42).abs() < 0.001);
+        assert!((restored.patterns[0].master_fx_base.delay_mix - 0.13).abs() < 0.001);
+        assert!((restored.patterns[0].master_fx_base.dj_filter - (-0.25)).abs() < 0.001);
+        assert!(restored.patterns[0].master_fx_base.initialized);
     }
 
     #[test]

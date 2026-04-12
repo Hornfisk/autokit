@@ -5,10 +5,12 @@ mod logging;
 
 mod engine {
     pub mod echo_detect;
+    pub mod fx;
     pub mod kit;
     pub mod master_bus;
     pub mod sampler;
     pub mod sequencer;
+    pub mod step_smoother;
 }
 
 mod analysis {

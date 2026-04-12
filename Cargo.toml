@@ -3,7 +3,7 @@ members = ["xtask"]
 
 [package]
 name = "autokit"
-version = "0.4.4"
+version = "0.5.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Sample-based drum machine plugin with spectral analysis"
@@ -15,9 +15,16 @@ crate-type = ["cdylib"]
 name = "autokit-standalone"
 path = "src/main.rs"
 
+[features]
+default = []
+# Opt-in audio-thread alloc assertion. Enabled for tests / CI, disabled
+# by default for release builds — a stray alloc should glitch one buffer,
+# not panic the JACK callback and wedge the user's PipeWire graph.
+strict-alloc-asserts = ["nih_plug/assert_process_allocs"]
+
 [dependencies]
 # Plugin framework
-nih_plug = { git = "https://github.com/robbert-vdh/nih-plug", features = ["assert_process_allocs", "standalone"] }
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug", features = ["standalone"] }
 nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug" }
 
 # Audio
@@ -48,6 +55,9 @@ realfft = "3"
 rand = "0.9"
 walkdir = "2"
 rfd = "0.14"
+# Used only by the standalone binary to auto-select a MIDI input port.
+# Pin to the same major as nih-plug's vendored copy to share the compile.
+midir = "0.9"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

@@ -32,7 +32,13 @@ pub struct PresetPad {
     pub pan: f32,
     pub pitch: f32,
     pub decay: f32,
+    #[serde(default)]
+    pub start: f32,
+    #[serde(default = "default_end")]
+    pub end: f32,
 }
+
+fn default_end() -> f32 { 1.0 }
 
 /// Returns `~/.local/share/autokit/presets/`, creating it if missing.
 pub fn preset_dir() -> PathBuf {
@@ -204,6 +210,8 @@ pub fn from_kit(name: &str, kit: &DrumKit, pattern_bank: &crate::engine::sequenc
             pan: p.pan,
             pitch: p.pitch,
             decay: p.decay,
+            start: p.start,
+            end: p.end,
         })
         .collect();
 
@@ -239,6 +247,8 @@ pub fn apply_to_kit(preset: &Preset, kit: &mut DrumKit, pattern_bank: &mut crate
         pad.pan = pp.pan;
         pad.pitch = pp.pitch;
         pad.decay = pp.decay;
+        pad.start = pp.start;
+        pad.end = pp.end;
 
         match &pp.sample_path {
             Some(path) if !path.is_empty() => {
@@ -368,6 +378,8 @@ mod restore_tests {
             pan: 0.0,
             pitch: 0.0,
             decay: 1.0,
+            start: 0.0,
+            end: 1.0,
         }
     }
 

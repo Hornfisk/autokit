@@ -19,6 +19,8 @@ pub enum PadRowAction {
     SetPan(f32),
     SetPitch(f32),
     SetDecay(f32),
+    SetStart(f32),
+    SetEnd(f32),
 }
 
 /// Truncate a string to `max_chars`, appending "…" if truncated.
@@ -281,6 +283,8 @@ pub fn draw_expanded_from_snapshot(
     pan: f32,
     pitch: f32,
     decay: f32,
+    start: f32,
+    end: f32,
     tooltips_on: bool,
 ) -> PadRowAction {
     let mut action = PadRowAction::None;
@@ -365,6 +369,38 @@ pub fn draw_expanded_from_snapshot(
                     );
                     if decay_result.changed {
                         action = PadRowAction::SetDecay(dc);
+                    }
+
+                    // Start knob
+                    let mut st = start;
+                    let start_result = knob::knob(
+                        ui,
+                        egui::Id::new(("start", index)),
+                        &mut st,
+                        0.0, 0.99, 0.0,
+                        "START",
+                        |v| format!("{}%", (v * 100.0) as u32),
+                        cat_color.to_egui_alpha(0x88),
+                        34.0,
+                    );
+                    if start_result.changed {
+                        action = PadRowAction::SetStart(st);
+                    }
+
+                    // End knob
+                    let mut en = end;
+                    let end_result = knob::knob(
+                        ui,
+                        egui::Id::new(("end", index)),
+                        &mut en,
+                        0.01, 1.0, 1.0,
+                        "END",
+                        |v| format!("{}%", (v * 100.0) as u32),
+                        cat_color.to_egui_alpha(0x88),
+                        34.0,
+                    );
+                    if end_result.changed {
+                        action = PadRowAction::SetEnd(en);
                     }
 
                     ui.add(egui::Separator::default().vertical().spacing(8.0));

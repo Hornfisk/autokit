@@ -1,11 +1,12 @@
 use crate::engine::kit::SampleCategory;
+use crate::analysis::features::AudioFeatures;
 
 /// A single point on the sample map.
 #[derive(Clone, Debug)]
 pub struct MapPoint {
-    /// Normalized X (0.0–1.0), from spectral centroid (log scale).
+    /// Normalized X (0.0–1.0): composite brightness (centroid + HF energy).
     pub nx: f32,
-    /// Normalized Y (0.0–1.0), from decay time (linear, 0=short/top, 1=long/bottom).
+    /// Normalized Y (0.0–1.0): character axis (tonal/sub at bottom, noisy at top).
     pub ny: f32,
     /// Index into SampleLibrary::all_samples_flat() for retrieval.
     pub library_index: usize,
@@ -29,14 +30,53 @@ fn normalize_centroid(hz: f32) -> f32 {
 }
 
 /// Normalize decay time to 0.0–1.0 via log scale.
-/// Maps ~0.01s → 0.0, ~4.0s → 1.0. Log scale spreads short percussion
-/// decays across the full Y axis instead of clustering near the top.
+/// Maps ~0.01s → 0.0, ~4.0s → 1.0.
 fn normalize_decay(secs: f32) -> f32 {
     if secs <= 0.0 {
         return 0.0;
     }
-    // log2(secs / 0.01) / log2(4.0 / 0.01) = log2(secs/0.01) / log2(400)
     ((secs / 0.01).log2() / (400.0_f32).log2()).clamp(0.0, 1.0)
+}
+
+/// Pre-defined anchor position for each category.
+/// Spread across the full map so clusters form distinct, well-separated islands.
+fn category_anchor(cat: SampleCategory) -> (f32, f32) {
+    match cat {
+        SampleCategory::Kick   => (0.22, 0.78),
+        SampleCategory::Bass   => (0.38, 0.85),
+        SampleCategory::Tom    => (0.22, 0.45),
+        SampleCategory::Snare  => (0.35, 0.28),
+        SampleCategory::Clap   => (0.55, 0.12),
+        SampleCategory::Hihat  => (0.78, 0.12),
+        SampleCategory::Cymbal => (0.82, 0.38),
+        SampleCategory::Perc   => (0.55, 0.50),
+        SampleCategory::Synth  => (0.62, 0.78),
+        SampleCategory::Other  => (0.82, 0.72),
+    }
+}
+
+/// Compute 2D map position from audio features + category.
+///
+/// Each category has an anchor point on the map. Samples scatter around
+/// their category anchor based on audio features — brightness spreads
+/// along X, noise/tonality along Y.  This creates distinct coloured
+/// clouds with clear separation, similar to commercial drum-map UIs.
+fn map_position(f: &AudioFeatures, cat: SampleCategory) -> (f32, f32) {
+    let (ax, ay) = category_anchor(cat);
+
+    // Feature-based offset within the cluster.
+    // Center around 0: range -0.5 .. +0.5
+    let x_feat = normalize_centroid(f.spectral_centroid) * 0.6 + f.high_freq_ratio * 0.4 - 0.5;
+    let y_feat = f.spectral_flatness * 0.55
+        + (1.0 - f.sub_energy_ratio) * 0.25
+        + (1.0 - normalize_decay(f.decay_time)) * 0.20
+        - 0.5;
+
+    let spread = 0.32;
+    let nx = (ax + x_feat * spread).clamp(0.02, 0.98);
+    let ny = (ay + y_feat * spread).clamp(0.02, 0.98);
+
+    (nx, ny)
 }
 
 use nih_plug_egui::egui;
@@ -46,20 +86,100 @@ use crate::ui::theme;
 
 /// Build map points from the full sample library.
 /// Call once when library scan completes; cache the result in EditorState.
+/// After computing feature-based positions, runs a collision-resolution pass
+/// so that overlapping dots spread into breathable clouds.
 pub fn build_map_points(library: &SampleLibrary) -> Vec<MapPoint> {
     let flat = library.all_samples_flat();
-    flat.iter()
+    let mut points: Vec<MapPoint> = flat.iter()
         .enumerate()
-        .map(|(i, sample)| MapPoint {
-            nx: normalize_centroid(sample.features.spectral_centroid),
-            ny: normalize_decay(sample.features.decay_time),
-            library_index: i,
-            category: sample.entry.category,
-            name: sample.entry.filename.clone(),
-            centroid_hz: sample.features.spectral_centroid,
-            decay_secs: sample.features.decay_time,
+        .map(|(i, sample)| {
+            let (nx, ny) = map_position(&sample.features, sample.entry.category);
+            MapPoint {
+                nx,
+                ny,
+                library_index: i,
+                category: sample.entry.category,
+                name: sample.entry.filename.clone(),
+                centroid_hz: sample.features.spectral_centroid,
+                decay_secs: sample.features.decay_time,
+            }
         })
-        .collect()
+        .collect();
+
+    // Spread overlapping points so every dot is individually visible.
+    spread_overlapping(&mut points, 0.014, 10);
+
+    points
+}
+
+/// Grid-accelerated repulsion: pushes overlapping points apart so each dot
+/// is visible.  Runs in O(N × K) where K is the average number of neighbours
+/// per grid cell — typically 2-5, so effectively linear.
+fn spread_overlapping(points: &mut [MapPoint], min_dist: f32, iterations: usize) {
+    use std::collections::HashMap;
+
+    if points.len() < 2 {
+        return;
+    }
+
+    let grid_res: usize = 128;
+    let cell = |v: f32| -> usize { ((v * grid_res as f32) as usize).min(grid_res - 1) };
+
+    for _ in 0..iterations {
+        // Build spatial grid
+        let mut grid: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        for (i, p) in points.iter().enumerate() {
+            grid.entry((cell(p.nx), cell(p.ny))).or_default().push(i);
+        }
+
+        let mut dx = vec![0.0f32; points.len()];
+        let mut dy = vec![0.0f32; points.len()];
+
+        for (i, p) in points.iter().enumerate() {
+            let gx = cell(p.nx) as i32;
+            let gy = cell(p.ny) as i32;
+
+            for ox in -1..=1_i32 {
+                for oy in -1..=1_i32 {
+                    let ngx = gx + ox;
+                    let ngy = gy + oy;
+                    if ngx < 0 || ngy < 0 || ngx >= grid_res as i32 || ngy >= grid_res as i32 {
+                        continue;
+                    }
+                    if let Some(neighbours) = grid.get(&(ngx as usize, ngy as usize)) {
+                        for &j in neighbours {
+                            if j <= i { continue; }
+                            let ex = points[j].nx - p.nx;
+                            let ey = points[j].ny - p.ny;
+                            let dist = (ex * ex + ey * ey).sqrt();
+                            if dist < min_dist {
+                                if dist > 1e-6 {
+                                    let push = (min_dist - dist) * 0.5;
+                                    let fx = ex / dist * push;
+                                    let fy = ey / dist * push;
+                                    dx[i] -= fx;
+                                    dy[i] -= fy;
+                                    dx[j] += fx;
+                                    dy[j] += fy;
+                                } else {
+                                    // Coincident — spiral out with golden angle
+                                    let angle = i as f32 * 2.399;
+                                    let push = min_dist * 0.5;
+                                    dx[i] += angle.cos() * push;
+                                    dy[i] += angle.sin() * push;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for (i, p) in points.iter_mut().enumerate() {
+            p.nx = (p.nx + dx[i]).clamp(0.005, 0.995);
+            p.ny = (p.ny + dy[i]).clamp(0.005, 0.995);
+        }
+    }
 }
 
 /// View state for zoom/pan.
@@ -237,11 +357,11 @@ pub fn draw_map(
         let pt_matches = matches_filter(p);
         let is_hovered = *hovered_index == Some(i);
         let (radius, mut alpha) = if is_hovered {
-            (5.0, 0.7)
+            (4.0, 0.80)
         } else if let Some(cat) = shortcut_category {
-            if p.category == cat { (4.0, 0.5) } else { (3.0, 0.12) }
+            if p.category == cat { (2.5, 0.55) } else { (1.5, 0.10) }
         } else {
-            (3.0, 0.25)
+            (2.0, 0.35)
         };
         if filter_active && !pt_matches {
             alpha = 0.06; // ghost dim — keeps density context
@@ -537,6 +657,8 @@ mod tests {
                     decay_time: 0.1,
                     spectral_centroid: 1000.0,
                     spectral_flatness: 0.5,
+                    sub_energy_ratio: 0.1,
+                    high_freq_ratio: 0.1,
                     peak: 1.0,
                     duration: 0.1,
                     is_percussive: true,

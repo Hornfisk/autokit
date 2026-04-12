@@ -14,7 +14,7 @@ use crate::analysis::features::AudioFeatures;
 use crate::engine::kit::SampleCategory;
 
 /// Bump this when the cache schema changes in a breaking way.
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 
 /// Cached metadata for a single sample file.
 #[derive(Debug, Clone, Serialize, Deserialize)]

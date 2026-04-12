@@ -2,6 +2,34 @@
 
 All notable changes to Autokit are documented here.
 
+## [0.5.0] — 2026-04-12
+
+### Added
+
+- **4-bus FX architecture** — per-lane reverb/delay sends and filter toggle with parallel FX buses. Color-coded controls: purple (reverb), cyan (delay), amber (filter). Master FX knobs in toolbar (RVB, DLY, DJF).
+- **Per-step FX p-locks** — each step can override lane FX sends (reverb, delay, filter) as parameter locks, with indicator dots on the grid.
+- **Per-pattern FX state** — lane FX settings (reverb/delay/filter) are stored per-pattern, not globally. Master FX knobs snapshot to each pattern with capture-on-switch.
+- **Step clipboard** — copy/paste individual step trigs (CPY/PST buttons + Ctrl+C/V).
+- **Default sample kit** — 16 bundled WAV samples embedded via `include_bytes!`, 8 auto-loaded on fresh install for immediate playback.
+- **Sample loading** — per-pad browse button, OS drag-and-drop, and sample map click-to-assign. Last browse directory persisted across sessions.
+- **Per-track start/end knobs** — sample trim points (ST/END) in the sequencer param bar, per-lane.
+- **Step smoother** — parameter smoothing for step transitions to avoid clicks.
+- **FX engine** — reverb, delay, and DJ-style filter DSP (`src/engine/fx.rs`).
+
+### Changed
+
+- **Classification overhaul (cache v3)** — new DSP features (`sub_energy_ratio`, `high_freq_ratio`), rewritten fingerprint-based classifier with per-instrument discriminants, expanded filename/folder hints, tightened single-cycle wavetable filter.
+- **Sample map visualization** — category-anchored positioning with feature-based scatter and grid-accelerated repulsion. Category anchors moved away from edges to eliminate left-wall dot pileup.
+- **Sequencer param bar** — knobs grouped with vertical separators: `[ST END] | [VEL PAN PIT PRB] | [CND] | [RVB DLY FLT]`.
+- **Pad view row height** — pad view now uses its own vertical reservation (20px vs 126px for sequencer), filling available space instead of wasting ~90px at the bottom.
+- **DjFilter click fix** — SVF state always ticked with equal-power wet/dry crossfade, eliminating deadzone-bypass clicks on pattern switches.
+- **Bottom bar layout** — PREV/NEXT pattern buttons, 2x4 right-aligned button grid.
+
+### Fixed
+
+- **Double-digit step numbers pushing sequencer row layout** — track effect row no longer shifts when step index exceeds 9.
+- **Map left-edge clustering** — samples with low brightness no longer pile up in a vertical line at the left map boundary.
+
 ## [0.4.4] — 2026-04-07
 
 ### Added

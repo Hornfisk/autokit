@@ -33,6 +33,8 @@ struct PadDisplay {
     pan: f32,
     pitch: f32,
     decay: f32,
+    start: f32,
+    end: f32,
 }
 
 /// Everything the GUI needs to render one frame, captured in a brief lock.
@@ -60,6 +62,8 @@ impl DisplaySnapshot {
                 pan: pad.pan,
                 pitch: pad.pitch,
                 decay: pad.decay,
+                start: pad.start,
+                end: pad.end,
             }
         });
         let (scan_processed, scan_total) = shared.scan_progress.as_ref()
@@ -147,6 +151,8 @@ pub struct EditorState {
     pub file_dialog_rx: Option<crossbeam_channel::Receiver<(usize, PathBuf)>>,
     /// Whether we've loaded last_browse_dir from disk yet.
     pub config_loaded: bool,
+    /// Single-step clipboard for copy/paste of plocks. In-memory only.
+    pub step_clipboard: Option<crate::engine::sequencer::Step>,
 }
 
 impl Default for EditorState {
@@ -174,6 +180,7 @@ impl Default for EditorState {
             last_browse_dir: None,
             file_dialog_rx: None,
             config_loaded: false,
+            step_clipboard: None,
         }
     }
 }
@@ -248,6 +255,32 @@ pub fn create(
                         shared.scan_status = ScanStatus::Ready {
                             total: shared.library.as_ref().map(|l| l.total).unwrap_or(0),
                         };
+                    }
+                }
+
+                // Audio thread flipped active pattern at a bar boundary —
+                // apply the new pattern's master FX base via ParamSetter.
+                // 1-frame lag is acceptable; documented in plan.
+                if seq_sync.pattern_fx_apply_pending.swap(false, Ordering::Relaxed) {
+                    let incoming = shared.pattern_bank.active_pattern_mut();
+                    if !incoming.master_fx_base.initialized {
+                        incoming.master_fx_base.reverb_mix = params.reverb_mix.unmodulated_plain_value();
+                        incoming.master_fx_base.delay_mix = params.delay_mix.unmodulated_plain_value();
+                        incoming.master_fx_base.dj_filter = params.dj_filter.unmodulated_plain_value();
+                        incoming.master_fx_base.initialized = true;
+                    } else {
+                        let rvb_v = incoming.master_fx_base.reverb_mix;
+                        let dly_v = incoming.master_fx_base.delay_mix;
+                        let flt_v = incoming.master_fx_base.dj_filter;
+                        setter.begin_set_parameter(&params.reverb_mix);
+                        setter.set_parameter(&params.reverb_mix, rvb_v);
+                        setter.end_set_parameter(&params.reverb_mix);
+                        setter.begin_set_parameter(&params.delay_mix);
+                        setter.set_parameter(&params.delay_mix, dly_v);
+                        setter.end_set_parameter(&params.delay_mix);
+                        setter.begin_set_parameter(&params.dj_filter);
+                        setter.set_parameter(&params.dj_filter, flt_v);
+                        setter.end_set_parameter(&params.dj_filter);
                     }
                 }
 
@@ -335,15 +368,21 @@ pub fn create(
                 }
             });
 
-            // Space bar toggles internal sequencer play/stop
-            // Gated: ignored when the host transport is actively driving playback
-            // (prevents double-trigger when Space also toggles the DAW transport)
+            // Space bar toggles internal sequencer play/stop.
+            //
+            // In a DAW the host transport owns Space (pressing it would
+            // double-toggle), so we gate it with `!host_playing`. In
+            // standalone there is no host driving us — `is_daw` is false
+            // until we observe a host transport stop, which the CPAL/JACK
+            // backends never report, so the flag correctly stays off and
+            // Space unconditionally toggles the internal sequencer.
             let space_pressed = ctx.input(|i| i.key_pressed(egui::Key::Space));
             let host_playing = seq_host_playing.load(Ordering::Relaxed);
+            let is_daw = seq_is_daw.load(Ordering::Relaxed);
             if space_pressed {
-                tracing::info!(host_playing, "Space pressed — gate check");
+                tracing::debug!(host_playing, is_daw, "Space pressed — gate check");
             }
-            if space_pressed && !host_playing {
+            if space_pressed && (!is_daw || !host_playing) {
                 let current = seq_internal_play.load(Ordering::Relaxed);
                 seq_internal_play.store(!current, Ordering::Relaxed);
                 tracing::info!(now_playing = !current, "sequencer toggled via Space");
@@ -362,6 +401,23 @@ pub fn create(
             }
 
             let mut pending_actions: Vec<GuiAction> = Vec::new();
+
+            // Ctrl+C / Ctrl+V copy/paste a single trig when a step is selected.
+            if let Some((sel_lane, sel_step)) = state.seq_view.selected {
+                let (copy, paste) = ctx.input(|i| {
+                    let mods = i.modifiers;
+                    (
+                        mods.command && i.key_pressed(egui::Key::C),
+                        mods.command && i.key_pressed(egui::Key::V),
+                    )
+                });
+                if copy {
+                    pending_actions.push(GuiAction::SeqCopyStep { lane: sel_lane, step: sel_step });
+                }
+                if paste {
+                    pending_actions.push(GuiAction::SeqPasteStep { lane: sel_lane, step: sel_step });
+                }
+            }
 
             // Drain native file-dialog results from the background picker thread.
             if let Some(rx) = state.file_dialog_rx.as_ref() {
@@ -399,6 +455,7 @@ pub fn create(
                         is_standalone,
                         &seq_standalone_tempo,
                         state.tooltips_on,
+                        &seq_sync,
                     );
 
                     match toolbar_action {
@@ -442,18 +499,22 @@ pub fn create(
                         ToolbarAction::ToggleTooltips => {
                             state.tooltips_on = !state.tooltips_on;
                         }
+                        ToolbarAction::ClearAutomation => {
+                            seq_sync.clr_automation.store(true, Ordering::Relaxed);
+                        }
                         ToolbarAction::None => {}
                     }
 
                     // Separator line
                     ui.add(egui::Separator::default().spacing(0.0));
 
-                    // Shared row height — identical in both pad and seq views
                     let shared_avail_h = ui.available_height();
-                    let shared_row_height = {
+
+                    // Pad view row height — less vertical reservation since there's no bottom bar
+                    let pad_row_height = {
                         let num_lanes = 8.0_f32;
                         let cell_spacing = theme::CELL_SPACING;
-                        let vert_avail = shared_avail_h - theme::GRID_VERT_RESERVED;
+                        let vert_avail = shared_avail_h - theme::GRID_VERT_RESERVED_PAD;
                         let row_from_height = ((vert_avail - cell_spacing * (num_lanes - 1.0)) / num_lanes).floor();
                         // Pad strip label: strip + space + tag + space = 61px
                         let label_width = theme::STRIP_WIDTH + 8.0 + theme::TAG_WIDTH + 4.0;
@@ -497,7 +558,7 @@ pub fn create(
                                 .auto_shrink([false, false])
                                 .show(ui, |ui| {
                                     ui.spacing_mut().item_spacing.y = 2.0;
-                                    let pad_row_height = shared_row_height;
+                                    let pad_row_height = pad_row_height;
 
                                     for i in 0..NUM_PADS {
                                         let is_selected = state.selected_pad == Some(i);
@@ -540,7 +601,8 @@ pub fn create(
                                         if is_selected {
                                             let detail_action = pad_row::draw_expanded_from_snapshot(
                                                 ui, i, pad.category, pad.pan,
-                                                pad.pitch, pad.decay, state.tooltips_on,
+                                                pad.pitch, pad.decay, pad.start, pad.end,
+                                                state.tooltips_on,
                                             );
 
                                             match detail_action {
@@ -552,6 +614,12 @@ pub fn create(
                                                 }
                                                 PadRowAction::SetDecay(v) => {
                                                     pending_actions.push(GuiAction::SetPadParam(i, PadParam::Decay, v));
+                                                }
+                                                PadRowAction::SetStart(v) => {
+                                                    pending_actions.push(GuiAction::SetPadParam(i, PadParam::Start, v));
+                                                }
+                                                PadRowAction::SetEnd(v) => {
+                                                    pending_actions.push(GuiAction::SetPadParam(i, PadParam::End, v));
                                                 }
                                                 PadRowAction::DiceCategory => {
                                                     if snap.has_library {
@@ -680,6 +748,11 @@ pub fn create(
                                             solo: lane.solo,
                                             locked: snap.pads[i].locked,
                                             volume: snap.pads[i].volume,
+                                            fx_send_rvb: lane.fx_send_rvb,
+                                            fx_send_dly: lane.fx_send_dly,
+                                            fx_filter: lane.fx_filter,
+                                            start: snap.pads[i].start,
+                                            end: snap.pads[i].end,
                                             steps: core::array::from_fn(|j| crate::ui::sequencer_ui::StepDisplay {
                                                 enabled: lane.steps[j].enabled,
                                                 velocity: lane.steps[j].velocity,
@@ -687,6 +760,9 @@ pub fn create(
                                                 pan: lane.steps[j].pan,
                                                 pitch: lane.steps[j].pitch,
                                                 condition: lane.steps[j].condition,
+                                                fx_rvb: lane.steps[j].fx_rvb,
+                                                fx_dly: lane.steps[j].fx_dly,
+                                                fx_filter: lane.steps[j].fx_filter,
                                             }),
                                         }
                                     }).collect(),
@@ -713,8 +789,9 @@ pub fn create(
 
                             {
                                 use crate::ui::sequencer_ui::SeqAction;
+                                let clipboard_has_step = state.step_clipboard.is_some();
                                 for seq_action in crate::ui::sequencer_ui::draw_sequencer_view(
-                                    ui, &seq_display, &mut state.seq_view, shared_avail_h, state.tooltips_on,
+                                    ui, &seq_display, &mut state.seq_view, shared_avail_h, state.tooltips_on, clipboard_has_step,
                                 ) {
                                     pending_actions.push(match seq_action {
                                         SeqAction::ToggleStep { lane, step } => GuiAction::SeqToggleStep { lane, step },
@@ -723,11 +800,17 @@ pub fn create(
                                         SeqAction::SetStepVelocity { lane, step, value } => GuiAction::SeqSetStepVelocity { lane, step, value },
                                         SeqAction::SetStepPan { lane, step, value } => GuiAction::SeqSetStepPan { lane, step, value },
                                         SeqAction::SetStepPitch { lane, step, value } => GuiAction::SeqSetStepPitch { lane, step, value },
+                                        SeqAction::SetStepReverbLock { lane, step, value } => GuiAction::SeqSetStepReverbLock { lane, step, value },
+                                        SeqAction::SetStepDelayLock { lane, step, value } => GuiAction::SeqSetStepDelayLock { lane, step, value },
+                                        SeqAction::SetStepFilterLock { lane, step, value } => GuiAction::SeqSetStepFilterLock { lane, step, value },
                                         SeqAction::SetStepProbability { lane, step, value } => GuiAction::SeqSetStepProbability { lane, step, value },
                                         SeqAction::SetStepCondition { lane, step, condition } => GuiAction::SeqSetStepCondition { lane, step, condition },
                                         SeqAction::ToggleLaneMute { lane } => GuiAction::SeqToggleLaneMute { lane },
                                         SeqAction::ToggleLaneSolo { lane } => GuiAction::SeqToggleLaneSolo { lane },
                                         SeqAction::ToggleLaneLock { lane } => GuiAction::SeqToggleLaneLock { lane },
+                                        SeqAction::SetLaneReverbSend { lane, value } => GuiAction::SeqSetLaneReverbSend { lane, value },
+                                        SeqAction::SetLaneDelaySend { lane, value } => GuiAction::SeqSetLaneDelaySend { lane, value },
+                                        SeqAction::ToggleLaneFilter { lane } => GuiAction::SeqToggleLaneFilter { lane },
                                         SeqAction::SetLaneVolume { lane, volume } => GuiAction::SeqSetLaneVolume { lane, volume },
                                         SeqAction::SelectPattern { index } => GuiAction::SeqSelectPattern { index },
                                         SeqAction::SetSwing { value } => GuiAction::SeqSetSwing { value },
@@ -752,6 +835,10 @@ pub fn create(
                                         }
                                         SeqAction::ResetLane { lane } => GuiAction::SeqResetLane { lane },
                                         SeqAction::ResetStep { lane, step } => GuiAction::SeqResetStep { lane, step },
+                                        SeqAction::CopyStep { lane, step } => GuiAction::SeqCopyStep { lane, step },
+                                        SeqAction::PasteStep { lane, step } => GuiAction::SeqPasteStep { lane, step },
+                                        SeqAction::SetPadStart { lane, value } => GuiAction::SetPadParam(lane, PadParam::Start, value),
+                                        SeqAction::SetPadEnd { lane, value } => GuiAction::SetPadParam(lane, PadParam::End, value),
                                     });
                                 }
                             }
@@ -958,6 +1045,16 @@ pub fn create(
                             PadParam::Pan => pad.pan = v,
                             PadParam::Pitch => pad.pitch = v,
                             PadParam::Decay => pad.decay = v,
+                            PadParam::Start => {
+                                pad.start = v;
+                                // Ensure start < end
+                                if pad.start >= pad.end { pad.end = (pad.start + 0.01).min(1.0); }
+                            }
+                            PadParam::End => {
+                                pad.end = v;
+                                // Ensure end > start
+                                if pad.end <= pad.start { pad.start = (pad.end - 0.01).max(0.0); }
+                            }
                         }
                     }
                     GuiAction::SavePreset(name) => {
@@ -1164,6 +1261,17 @@ pub fn create(
                     GuiAction::SeqSetStepPitch { lane, step, value } => {
                         shared.pattern_bank.active_pattern_mut().lanes[lane].steps[step].pitch = value;
                     }
+                    GuiAction::SeqSetStepReverbLock { lane, step, value } => {
+                        shared.pattern_bank.active_pattern_mut().lanes[lane].steps[step].fx_rvb =
+                            value.map(|v| v.clamp(0.0, 1.0));
+                    }
+                    GuiAction::SeqSetStepDelayLock { lane, step, value } => {
+                        shared.pattern_bank.active_pattern_mut().lanes[lane].steps[step].fx_dly =
+                            value.map(|v| v.clamp(0.0, 1.0));
+                    }
+                    GuiAction::SeqSetStepFilterLock { lane, step, value } => {
+                        shared.pattern_bank.active_pattern_mut().lanes[lane].steps[step].fx_filter = value;
+                    }
                     GuiAction::SeqSetStepProbability { lane, step, value } => {
                         shared.pattern_bank.active_pattern_mut().lanes[lane].steps[step].probability = value;
                     }
@@ -1180,6 +1288,24 @@ pub fn create(
                     }
                     GuiAction::SeqToggleLaneLock { lane } => {
                         shared.kit.toggle_lock(lane);
+                    }
+                    GuiAction::SeqSetLaneReverbSend { lane, value } => {
+                        let pat = shared.pattern_bank.active_pattern_mut();
+                        if lane < pat.lanes.len() {
+                            pat.lanes[lane].fx_send_rvb = value.clamp(0.0, 1.0);
+                        }
+                    }
+                    GuiAction::SeqSetLaneDelaySend { lane, value } => {
+                        let pat = shared.pattern_bank.active_pattern_mut();
+                        if lane < pat.lanes.len() {
+                            pat.lanes[lane].fx_send_dly = value.clamp(0.0, 1.0);
+                        }
+                    }
+                    GuiAction::SeqToggleLaneFilter { lane } => {
+                        let pat = shared.pattern_bank.active_pattern_mut();
+                        if lane < pat.lanes.len() {
+                            pat.lanes[lane].fx_filter = !pat.lanes[lane].fx_filter;
+                        }
                     }
                     GuiAction::SeqSetLaneVolume { lane, volume } => {
                         shared.kit.pads[lane].volume = volume;
@@ -1205,16 +1331,80 @@ pub fn create(
                             pat.lanes[lane].steps[step] = crate::engine::sequencer::Step::default();
                         }
                     }
+                    GuiAction::SeqCopyStep { lane, step } => {
+                        let pat = shared.pattern_bank.active_pattern();
+                        if lane < pat.lanes.len() && step < pat.lanes[lane].steps.len() {
+                            state.step_clipboard = Some(pat.lanes[lane].steps[step]);
+                        }
+                    }
+                    GuiAction::SeqPasteStep { lane, step } => {
+                        if let Some(clip) = state.step_clipboard {
+                            let snap = HistorySnapshot {
+                                pads: shared.kit.snapshot(),
+                                sequencer: shared.pattern_bank.snapshot(),
+                            };
+                            shared.history.push(snap);
+                            let pat = shared.pattern_bank.active_pattern_mut();
+                            if lane < pat.lanes.len() && step < pat.lanes[lane].steps.len() {
+                                pat.lanes[lane].steps[step] = clip;
+                            }
+                        }
+                    }
                     GuiAction::SeqSelectPattern { index } => {
                         let is_playing = seq_playing.load(Ordering::Relaxed)
                             || seq_internal_play.load(Ordering::Relaxed);
                         if is_playing {
-                            // Queue for bar boundary switch
+                            // Capture the outgoing pattern's live FX knob
+                            // values into its base BEFORE queuing — otherwise
+                            // returning to this pattern later loses whatever
+                            // the user had dialed in. Audio thread will apply
+                            // the incoming pattern's base at the bar boundary
+                            // via pattern_fx_apply_pending.
+                            let rvb_now = params.reverb_mix.unmodulated_plain_value();
+                            let dly_now = params.delay_mix.unmodulated_plain_value();
+                            let flt_now = params.dj_filter.unmodulated_plain_value();
+                            let outgoing = shared.pattern_bank.active_pattern_mut();
+                            outgoing.master_fx_base.reverb_mix = rvb_now;
+                            outgoing.master_fx_base.delay_mix = dly_now;
+                            outgoing.master_fx_base.dj_filter = flt_now;
+                            outgoing.master_fx_base.initialized = true;
                             shared.pattern_bank.queued = Some(index);
                         } else {
-                            // Switch immediately when stopped
+                            // Switch immediately when stopped: capture the
+                            // outgoing pattern's live knob values into its
+                            // base, then apply the incoming pattern's base.
+                            let rvb_now = params.reverb_mix.unmodulated_plain_value();
+                            let dly_now = params.delay_mix.unmodulated_plain_value();
+                            let flt_now = params.dj_filter.unmodulated_plain_value();
+                            {
+                                let outgoing = shared.pattern_bank.active_pattern_mut();
+                                outgoing.master_fx_base.reverb_mix = rvb_now;
+                                outgoing.master_fx_base.delay_mix = dly_now;
+                                outgoing.master_fx_base.dj_filter = flt_now;
+                                outgoing.master_fx_base.initialized = true;
+                            }
                             shared.pattern_bank.active = index;
                             shared.pattern_bank.queued = None;
+                            let incoming = shared.pattern_bank.active_pattern_mut();
+                            if !incoming.master_fx_base.initialized {
+                                incoming.master_fx_base.reverb_mix = rvb_now;
+                                incoming.master_fx_base.delay_mix = dly_now;
+                                incoming.master_fx_base.dj_filter = flt_now;
+                                incoming.master_fx_base.initialized = true;
+                            } else {
+                                let rvb_v = incoming.master_fx_base.reverb_mix;
+                                let dly_v = incoming.master_fx_base.delay_mix;
+                                let flt_v = incoming.master_fx_base.dj_filter;
+                                setter.begin_set_parameter(&params.reverb_mix);
+                                setter.set_parameter(&params.reverb_mix, rvb_v);
+                                setter.end_set_parameter(&params.reverb_mix);
+                                setter.begin_set_parameter(&params.delay_mix);
+                                setter.set_parameter(&params.delay_mix, dly_v);
+                                setter.end_set_parameter(&params.delay_mix);
+                                setter.begin_set_parameter(&params.dj_filter);
+                                setter.set_parameter(&params.dj_filter, flt_v);
+                                setter.end_set_parameter(&params.dj_filter);
+                            }
                         }
                     }
                     GuiAction::SeqSetSwing { value } => {
@@ -1246,6 +1436,7 @@ pub fn create(
                                 *step = crate::engine::sequencer::Step::default();
                             }
                             lane.muted = false;
+                            lane.solo = false;
                         }
                         pat.swing = 0.0;
                     }
@@ -1309,7 +1500,9 @@ pub fn create(
                         seq_fill_active.store(active, Ordering::Relaxed);
                     }
                     GuiAction::SeqToggleInternalPlay => {
-                        if !seq_host_playing.load(Ordering::Relaxed) {
+                        let in_daw = seq_is_daw.load(Ordering::Relaxed);
+                        let host_busy = seq_host_playing.load(Ordering::Relaxed);
+                        if !in_daw || !host_busy {
                             let current = seq_internal_play.load(Ordering::Relaxed);
                             seq_internal_play.store(!current, Ordering::Relaxed);
                         }
@@ -1370,7 +1563,7 @@ fn spawn_file_dialog(state: &mut EditorState, pad_index: usize) {
 
 /// Actions that the GUI can trigger, applied in a brief second lock.
 /// Which pad parameter to set.
-enum PadParam { Volume, Pan, Pitch, Decay }
+enum PadParam { Volume, Pan, Pitch, Decay, Start, End }
 
 enum GuiAction {
     None,
@@ -1397,11 +1590,17 @@ enum GuiAction {
     SeqSetStepVelocity { lane: usize, step: usize, value: f32 },
     SeqSetStepPan { lane: usize, step: usize, value: Option<f32> },
     SeqSetStepPitch { lane: usize, step: usize, value: Option<f32> },
+    SeqSetStepReverbLock { lane: usize, step: usize, value: Option<f32> },
+    SeqSetStepDelayLock { lane: usize, step: usize, value: Option<f32> },
+    SeqSetStepFilterLock { lane: usize, step: usize, value: Option<bool> },
     SeqSetStepProbability { lane: usize, step: usize, value: f32 },
     SeqSetStepCondition { lane: usize, step: usize, condition: crate::engine::sequencer::ConditionTrig },
     SeqToggleLaneMute { lane: usize },
     SeqToggleLaneSolo { lane: usize },
     SeqToggleLaneLock { lane: usize },
+    SeqSetLaneReverbSend { lane: usize, value: f32 },
+    SeqSetLaneDelaySend { lane: usize, value: f32 },
+    SeqToggleLaneFilter { lane: usize },
     SeqSetLaneVolume { lane: usize, volume: f32 },
     SeqSelectPattern { index: usize },
     SeqSetSwing { value: f32 },
@@ -1416,6 +1615,8 @@ enum GuiAction {
     SeqExportMidi,
     SeqResetLane { lane: usize },
     SeqResetStep { lane: usize, step: usize },
+    SeqCopyStep { lane: usize, step: usize },
+    SeqPasteStep { lane: usize, step: usize },
     StartScan(PathBuf),
 }
 
