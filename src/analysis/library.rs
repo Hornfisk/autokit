@@ -232,6 +232,26 @@ impl SampleLibrary {
         }
     }
 
+    /// Pick a random sample from *any* category whose path isn't already used.
+    /// Used as a fallback when the target category is empty so pads can still
+    /// be filled from the user's library instead of leaking bundled defaults.
+    /// Returns None only when every sample in the library is already excluded.
+    pub fn random_any_excluding<'a>(
+        &'a self,
+        exclude: &HashSet<String>,
+    ) -> Option<&'a AnalyzedSample> {
+        let candidates: Vec<&AnalyzedSample> = self
+            .all_samples_flat()
+            .into_iter()
+            .filter(|s| !exclude.contains(&s.entry.path.to_string_lossy().to_string()))
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        let mut rng = rand::rng();
+        candidates.choose(&mut rng).copied()
+    }
+
     /// Create a reference-only clone for use in dice operations.
     /// The Arc'd sample data is shared, not copied.
     pub fn clone_for_dice(&self) -> SampleLibrary {

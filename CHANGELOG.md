@@ -2,6 +2,16 @@
 
 All notable changes to Autokit are documented here.
 
+## [0.5.1] — 2026-04-20
+
+### Fixed
+
+- **Default-kit samples leaking into user-scanned libraries.** `populate_kit_from_library` now clears non-locked pads before filling and falls back to any unused sample when a category is absent from the user's library. Pointing Autokit at a folder that classifies into only some of the 8 kit categories (e.g. kicks + hats + clap, no cymbal/perc/synth) no longer leaves bundled defaults on the uncovered pads. Empty-library safety net preserved — fresh installs with no user library still get the bundled kit.
+
+### Added
+
+- **Folder browser — show-hidden toggle.** A per-session "show hidden" checkbox in the built-in folder picker reveals dotfile directories (`.cache`, `.config`, etc.) that were previously always filtered out.
+
 ## [0.5.0] — 2026-04-12
 
 ### Added

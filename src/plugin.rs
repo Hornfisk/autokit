@@ -375,9 +375,21 @@ impl Default for Autokit {
 
 /// Populate the kit from the library using the default layout, then update waveforms.
 /// Ensures each pad receives a unique sample (best-effort when category has fewer samples than pads).
+///
+/// Three-pass flow:
+/// 1. If the library is empty, return without touching pads — preserves the
+///    bundled-default-kit safety net for fresh installs (see commit 619a6af).
+/// 2. Clear non-locked pads so bundled defaults from `initialize()` can't leak
+///    through when the user's library lacks samples in a given category.
+/// 3. Fill each pad with a category-matched sample; if that category is empty
+///    in the library, fall back to any unused sample so pads still play.
 pub fn populate_kit_from_library(shared: &mut SharedState) {
-    let layout = shared.library.as_ref().expect("library must be set before populate").generate_kit();
-    let mut assigned = 0u32;
+    let library = shared.library.as_ref().expect("library must be set before populate");
+    if library.total == 0 {
+        tracing::info!("library empty — leaving bundled default kit in place");
+        return;
+    }
+    let layout = library.generate_kit();
 
     // Seed exclusion set with paths from locked pads so we don't duplicate those either
     let mut used: HashSet<String> = shared
@@ -388,17 +400,43 @@ pub fn populate_kit_from_library(shared: &mut SharedState) {
         .filter_map(|p| p.sample_path.clone())
         .collect();
 
+    // Clear non-locked pads so defaults can't leak into categories the user's
+    // library doesn't cover.
+    for pad in shared.kit.pads.iter_mut() {
+        if !pad.locked {
+            pad.sample = None;
+            pad.sample_path = None;
+            pad.name.clear();
+        }
+    }
+
+    let mut assigned = 0u32;
+
+    // Pass 1: category-matched fill.
     for (pad_idx, category) in layout {
         if pad_idx >= shared.kit.pads.len() {
             break;
         }
-
-        // Skip locked pads
         if shared.kit.pads[pad_idx].locked {
             continue;
         }
-
         if let Some(sample) = shared.library.as_ref().unwrap().random_from_excluding(category, &used) {
+            let path = sample.entry.path.to_string_lossy().to_string();
+            used.insert(path.clone());
+            shared.kit.pads[pad_idx].sample = Some(Arc::clone(&sample.data));
+            shared.kit.pads[pad_idx].sample_path = Some(path);
+            shared.kit.pads[pad_idx].name = sample.entry.filename.clone();
+            shared.kit.pads[pad_idx].category = sample.entry.category;
+            assigned += 1;
+        }
+    }
+
+    // Pass 2: fallback fill for pads still empty (category absent in library).
+    for pad_idx in 0..shared.kit.pads.len() {
+        if shared.kit.pads[pad_idx].locked || shared.kit.pads[pad_idx].sample.is_some() {
+            continue;
+        }
+        if let Some(sample) = shared.library.as_ref().unwrap().random_any_excluding(&used) {
             let path = sample.entry.path.to_string_lossy().to_string();
             used.insert(path.clone());
             shared.kit.pads[pad_idx].sample = Some(Arc::clone(&sample.data));

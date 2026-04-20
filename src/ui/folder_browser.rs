@@ -21,6 +21,9 @@ pub struct FolderBrowser {
     entries: Vec<DirEntry>,
     /// Whether entries need to be refreshed.
     dirty: bool,
+    /// When true, dotfile directories (`.cache`, `.config`, etc.) are shown.
+    /// Per-session, not persisted.
+    show_hidden: bool,
 }
 
 /// What happened this frame.
@@ -44,6 +47,7 @@ impl FolderBrowser {
             current_path: start,
             entries: Vec::new(),
             dirty: true,
+            show_hidden: false,
         }
     }
 
@@ -57,8 +61,7 @@ impl FolderBrowser {
                     continue;
                 }
                 let name = entry.file_name().to_string_lossy().into_owned();
-                // Skip hidden directories
-                if name.starts_with('.') {
+                if !self.show_hidden && name.starts_with('.') {
                     continue;
                 }
                 self.entries.push(DirEntry { name, path });
@@ -211,6 +214,14 @@ impl FolderBrowser {
 
                 ui.add_space(4.0);
                 ui.separator();
+
+                // Show-hidden toggle (per-session; triggers a refresh on change)
+                if ui
+                    .checkbox(&mut self.show_hidden, "show hidden")
+                    .changed()
+                {
+                    self.dirty = true;
+                }
 
                 // Bottom bar: SELECT / CANCEL
                 ui.horizontal(|ui| {
