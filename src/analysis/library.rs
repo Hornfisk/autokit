@@ -87,7 +87,7 @@ impl SampleLibrary {
             };
 
             // Load audio — always required for playback regardless of cache
-            let data = match audio_file::load_wav_mono(path_str) {
+            let data = match audio_file::load_wav_mono(path_str, sample_rate) {
                 Ok(d) => d,
                 Err(e) => {
                     tracing::trace!(path = path_str, error = %e, "skipping unloadable file");

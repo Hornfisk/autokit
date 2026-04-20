@@ -94,7 +94,7 @@ impl DjFilter {
         Self {
             left: SvfChannel::new(),
             right: SvfChannel::new(),
-            sample_rate: 48_000.0,
+            sample_rate: 44_100.0,
         }
     }
 

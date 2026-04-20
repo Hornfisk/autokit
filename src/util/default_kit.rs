@@ -77,7 +77,7 @@ const DEFAULT_PADS: [DefaultPad; NUM_PADS] = [
 /// Load every bundled sample and assign it to the matching pad.
 /// Non-fatal on decode error — logs and skips the offender so the plugin
 /// still starts.
-pub fn apply_to_kit(shared: &mut SharedState) {
+pub fn apply_to_kit(shared: &mut SharedState, sample_rate: f32) {
     let kit: &mut DrumKit = &mut shared.kit;
     let mut loaded = 0usize;
 
@@ -85,7 +85,7 @@ pub fn apply_to_kit(shared: &mut SharedState) {
         if kit.pads[pad_index].locked {
             continue;
         }
-        match audio_file::load_wav_mono_from_bytes(entry.bytes, entry.name) {
+        match audio_file::load_wav_mono_from_bytes(entry.bytes, entry.name, sample_rate) {
             Ok(samples) => {
                 let data = Arc::new(samples);
                 let pad = &mut kit.pads[pad_index];

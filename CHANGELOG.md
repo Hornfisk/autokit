@@ -2,6 +2,12 @@
 
 All notable changes to Autokit are documented here.
 
+## [0.5.2] — 2026-04-20
+
+### Changed
+
+- **Sample-rate-aware loading.** All audio loaded into Autokit (bundled default kit, scanned library, preset recall) is now resampled to the host/standalone sample rate at load time via `rubato` sinc interpolation. Previously samples were stored at their native rate and played back through the voice engine without rate conversion, which pitched samples up on 48 kHz hosts (common with Slammer bounces) and down on 88.2/96 kHz hosts. Rate-matched sources now sound the way they were bounced, regardless of the project rate. `load_wav_mono` / `load_wav_mono_from_bytes` take a `target_rate: f32`; `decode_mono` returns the native rate; `resample_if_needed` is a no-op when native == target.
+
 ## [0.5.1] — 2026-04-20
 
 ### Fixed

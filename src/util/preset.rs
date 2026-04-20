@@ -235,7 +235,7 @@ pub fn serialize_state(kit: &DrumKit, pattern_bank: &crate::engine::sequencer::P
 /// Apply a preset to a kit, loading sample audio from disk.
 /// Pads with missing or unreadable sample files get `None` sample data.
 /// If the preset contains pattern data, it is restored into `pattern_bank`.
-pub fn apply_to_kit(preset: &Preset, kit: &mut DrumKit, pattern_bank: &mut crate::engine::sequencer::PatternBank) {
+pub fn apply_to_kit(preset: &Preset, kit: &mut DrumKit, pattern_bank: &mut crate::engine::sequencer::PatternBank, sample_rate: f32) {
     for (i, pp) in preset.pads.iter().enumerate() {
         if i >= kit.pads.len() {
             break;
@@ -263,7 +263,7 @@ pub fn apply_to_kit(preset: &Preset, kit: &mut DrumKit, pattern_bank: &mut crate
                     pad.sample_path = Some(path.clone());
                     continue;
                 }
-                match audio_file::load_wav_mono(path) {
+                match audio_file::load_wav_mono(path, sample_rate) {
                     Ok(samples) => {
                         pad.sample = Some(Arc::new(samples));
                         pad.sample_path = Some(path.clone());
@@ -321,10 +321,10 @@ pub struct RestoredState {
 
 /// Build a fresh `DrumKit` + `PatternBank` from a preset, loading sample audio
 /// from disk. **All file I/O runs here** — call only from a background thread.
-pub fn restore_to_fresh(preset: &Preset) -> RestoredState {
+pub fn restore_to_fresh(preset: &Preset, sample_rate: f32) -> RestoredState {
     let mut kit = DrumKit::new();
     let mut patterns = PatternBank::new();
-    apply_to_kit(preset, &mut kit, &mut patterns);
+    apply_to_kit(preset, &mut kit, &mut patterns, sample_rate);
 
     // After apply_to_kit: any pad with `sample == None` but a non-empty
     // `sample_path` is a missing reference worth surfacing.
@@ -351,17 +351,17 @@ pub fn restore_to_fresh(preset: &Preset) -> RestoredState {
 /// `None` if there's nothing to restore or the JSON is corrupt.
 ///
 /// **All file I/O runs here** — call only from a background thread.
-pub fn restore_persisted_off_thread(persisted: &str) -> Option<RestoredState> {
+pub fn restore_persisted_off_thread(persisted: &str, sample_rate: f32) -> Option<RestoredState> {
     if !persisted.is_empty() {
         match serde_json::from_str::<Preset>(persisted) {
-            Ok(p) => Some(restore_to_fresh(&p)),
+            Ok(p) => Some(restore_to_fresh(&p, sample_rate)),
             Err(e) => {
                 tracing::warn!("failed to parse persisted plugin state: {e}");
                 None
             }
         }
     } else {
-        load_standalone_state().map(|p| restore_to_fresh(&p))
+        load_standalone_state().map(|p| restore_to_fresh(&p, sample_rate))
     }
 }
 
@@ -399,7 +399,7 @@ mod restore_tests {
             patterns: None,
         };
 
-        let restored = restore_to_fresh(&preset);
+        let restored = restore_to_fresh(&preset, 44100.0);
 
         // Pads come back with metadata intact but no audio data.
         assert_eq!(restored.kit.pads[0].name, "kick");
@@ -428,7 +428,7 @@ mod restore_tests {
 
         // Should return Some(RestoredState) — restoration continues even
         // when no samples can be loaded.
-        let restored = restore_persisted_off_thread(&json).expect("restore returns state");
+        let restored = restore_persisted_off_thread(&json, 44100.0).expect("restore returns state");
         assert_eq!(restored.missing_paths.len(), 1);
         assert!(restored.kit.pads[0].sample.is_none());
     }
@@ -438,12 +438,12 @@ mod restore_tests {
         // Empty persisted state + no standalone file = nothing to restore.
         // (Standalone file may or may not exist on the test host; we only
         // assert this is non-panicking and returns a value of either kind.)
-        let _ = restore_persisted_off_thread("");
+        let _ = restore_persisted_off_thread("", 44100.0);
     }
 
     #[test]
     fn restore_persisted_off_thread_returns_none_for_corrupt_json() {
-        let restored = restore_persisted_off_thread("not json {{{");
+        let restored = restore_persisted_off_thread("not json {{{", 44100.0);
         assert!(restored.is_none());
     }
 

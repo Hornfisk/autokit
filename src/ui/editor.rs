@@ -1082,7 +1082,8 @@ pub fn create(
                                 };
                                 shared.history.push(snap);
                                 let s = &mut *shared;
-                                preset::apply_to_kit(&p, &mut s.kit, &mut s.pattern_bank);
+                                let sr = s.library.as_ref().map(|l| l.sample_rate).unwrap_or(44100.0);
+                                preset::apply_to_kit(&p, &mut s.kit, &mut s.pattern_bank, sr);
                                 needs_waveform_update = true;
                                 tracing::info!("Loaded preset: {}", p.name);
                                 state.status_message =
@@ -1163,8 +1164,12 @@ pub fn create(
                     GuiAction::LoadSampleFromPath { pad_index, path } => {
                         // Decode outside the lock — blocks the GUI thread briefly
                         // but is always a single short drum sample, so this is fine.
+                        let target_rate = shared.library.as_ref()
+                            .map(|l| l.sample_rate)
+                            .unwrap_or(44100.0);
                         let decoded = crate::util::audio_file::load_wav_mono(
                             &path.to_string_lossy(),
+                            target_rate,
                         );
                         match decoded {
                             Ok(samples) => {

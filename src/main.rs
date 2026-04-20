@@ -90,6 +90,14 @@ fn install_panic_logger() {
 fn build_args() -> Vec<String> {
     let mut args: Vec<String> = std::env::args().collect();
 
+    // nih-plug standalone defaults to 48000 Hz, but the DJControl Inpulse 500
+    // only supports 44100. Running at 48000 forces PipeWire to resample every
+    // buffer, causing audible artifacts. Default to 44100 on all platforms.
+    if !args.iter().any(|a| a == "--sample-rate") {
+        args.push("--sample-rate".to_string());
+        args.push("44100".to_string());
+    }
+
     #[cfg(target_os = "windows")]
     if !args.iter().any(|a| a == "--period-size") {
         let mut patched = Vec::with_capacity(args.len() + 2);

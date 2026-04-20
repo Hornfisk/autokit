@@ -2,15 +2,14 @@
 /// with several steps' worth of overlap.
 const BUFFER_SIZE: usize = 32;
 
-/// Maximum samples between outgoing and incoming note to count as echo.
-/// ~50ms at 48kHz — covers host round-trip across multiple buffer sizes.
-const ECHO_WINDOW: u64 = 2400;
+/// Echo window duration in seconds (~50ms).
+const ECHO_WINDOW_SECS: f64 = 0.050;
+
+/// Recovery duration in seconds (~2s with no echoes before clearing suppression).
+const RECOVERY_SECS: f64 = 2.0;
 
 /// Consecutive echo matches before activating suppression mode.
 const SUPPRESS_THRESHOLD: u32 = 4;
-
-/// Samples with no echoes before clearing suppression (~2s at 48kHz).
-const RECOVERY_SAMPLES: u64 = 96000;
 
 /// Detects when incoming MIDI notes are echoes of recent sequencer output.
 ///
@@ -25,10 +24,12 @@ pub struct EchoDetector {
     consecutive_echoes: u32,
     suppressing: bool,
     last_echo_clock: u64,
+    echo_window: u64,
+    recovery_samples: u64,
 }
 
 impl EchoDetector {
-    pub fn new() -> Self {
+    pub fn new(sample_rate: f32) -> Self {
         Self {
             buffer: [(0, 0); BUFFER_SIZE],
             write_pos: 0,
@@ -37,6 +38,8 @@ impl EchoDetector {
             consecutive_echoes: 0,
             suppressing: false,
             last_echo_clock: 0,
+            echo_window: (ECHO_WINDOW_SECS * sample_rate as f64) as u64,
+            recovery_samples: (RECOVERY_SECS * sample_rate as f64) as u64,
         }
     }
 
@@ -45,7 +48,7 @@ impl EchoDetector {
         self.sample_clock += buffer_len as u64;
 
         if self.suppressing
-            && self.sample_clock.saturating_sub(self.last_echo_clock) > RECOVERY_SAMPLES
+            && self.sample_clock.saturating_sub(self.last_echo_clock) > self.recovery_samples
         {
             self.suppressing = false;
             self.consecutive_echoes = 0;
@@ -76,7 +79,7 @@ impl EchoDetector {
         for i in 0..self.len {
             let idx = (start + i) % BUFFER_SIZE;
             let (buf_note, buf_clock) = self.buffer[idx];
-            if buf_note == note && self.sample_clock.saturating_sub(buf_clock) <= ECHO_WINDOW {
+            if buf_note == note && self.sample_clock.saturating_sub(buf_clock) <= self.echo_window {
                 found = Some(idx);
                 break;
             }
@@ -109,7 +112,7 @@ mod tests {
 
     #[test]
     fn same_note_within_window_is_echo() {
-        let mut det = EchoDetector::new();
+        let mut det = EchoDetector::new(48000.0);
         det.record(36);
         // Simulate a few samples passing (within window)
         det.tick(100);
@@ -118,15 +121,15 @@ mod tests {
 
     #[test]
     fn same_note_outside_window_is_not_echo() {
-        let mut det = EchoDetector::new();
+        let mut det = EchoDetector::new(48000.0);
         det.record(36);
-        det.tick(ECHO_WINDOW as usize + 100);
+        det.tick(det.echo_window as usize + 100);
         assert!(!det.check(36), "same note outside window should not be echo");
     }
 
     #[test]
     fn different_note_is_not_echo() {
-        let mut det = EchoDetector::new();
+        let mut det = EchoDetector::new(48000.0);
         det.record(36);
         det.tick(100);
         assert!(!det.check(38), "different note should not be echo");
@@ -134,7 +137,7 @@ mod tests {
 
     #[test]
     fn match_is_consumed_once() {
-        let mut det = EchoDetector::new();
+        let mut det = EchoDetector::new(48000.0);
         det.record(36);
         det.tick(100);
         assert!(det.check(36));
@@ -143,7 +146,7 @@ mod tests {
 
     #[test]
     fn suppressing_activates_after_threshold() {
-        let mut det = EchoDetector::new();
+        let mut det = EchoDetector::new(48000.0);
         assert!(!det.is_suppressing());
 
         for i in 0..SUPPRESS_THRESHOLD {
@@ -157,7 +160,7 @@ mod tests {
 
     #[test]
     fn non_echo_resets_consecutive_count() {
-        let mut det = EchoDetector::new();
+        let mut det = EchoDetector::new(48000.0);
 
         // Build up 3 echoes (below threshold)
         for _ in 0..3 {
@@ -182,7 +185,7 @@ mod tests {
 
     #[test]
     fn recovery_clears_suppressing() {
-        let mut det = EchoDetector::new();
+        let mut det = EchoDetector::new(48000.0);
 
         // Activate suppression
         for i in 0..SUPPRESS_THRESHOLD {
@@ -193,13 +196,13 @@ mod tests {
         assert!(det.is_suppressing());
 
         // Wait for recovery
-        det.tick(RECOVERY_SAMPLES as usize + 1);
+        det.tick(det.recovery_samples as usize + 1);
         assert!(!det.is_suppressing(), "should clear after recovery timeout");
     }
 
     #[test]
     fn ring_buffer_wraps_without_panic() {
-        let mut det = EchoDetector::new();
+        let mut det = EchoDetector::new(48000.0);
         // Overflow the buffer
         for i in 0..(BUFFER_SIZE * 2) {
             det.record((i % 128) as u8);

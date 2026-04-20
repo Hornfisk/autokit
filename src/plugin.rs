@@ -344,7 +344,7 @@ impl Default for Autokit {
             gui_triggers: Arc::new(core::array::from_fn(|_| AtomicU8::new(0))),
             preview_voice: PreviewVoice::new(),
             seq_sync: Arc::new(SequencerSync::new()),
-            echo_detector: EchoDetector::new(),
+            echo_detector: EchoDetector::new(44100.0),
             seq_internal_beats: 0.0,
             persist_counter: 0,
             state_restored: false,
@@ -581,6 +581,7 @@ impl Plugin for Autokit {
         );
 
         self.voices = Some(VoicePool::new(self.sample_rate));
+        self.echo_detector = EchoDetector::new(self.sample_rate);
 
         // Fresh-install fallback: if we have neither DAW-persisted state nor
         // a saved standalone session, seed the pads with the bundled default
@@ -592,7 +593,7 @@ impl Plugin for Autokit {
             let standalone_missing = preset::load_standalone_state().is_none();
             if persist_empty && standalone_missing {
                 let mut shared = self.shared.lock();
-                default_kit::apply_to_kit(&mut shared);
+                default_kit::apply_to_kit(&mut shared, self.sample_rate);
             }
         }
 
@@ -630,7 +631,7 @@ impl Plugin for Autokit {
                         // After the library is built, do the heavy state
                         // restoration here — never on the audio thread.
                         let persisted = plugin_state.lock().clone();
-                        let restored = preset::restore_persisted_off_thread(&persisted);
+                        let restored = preset::restore_persisted_off_thread(&persisted, sample_rate);
                         if tx.send(ScanResult { library, restored }).is_err() {
                             tracing::warn!("plugin dropped before scan completed");
                         }
