@@ -1204,3 +1204,180 @@ impl Vst3Plugin for Autokit {
         Vst3SubCategory::Sampler,
     ];
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::features::AudioFeatures;
+    use crate::analysis::library::AnalyzedSample;
+    use crate::analysis::scanner::SampleEntry;
+    use crate::engine::kit::{DrumKit, SampleCategory};
+    use crate::ui::state::SharedState;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    /// Regression test: bundled-default sample names must not leak into pad
+    /// slots after the user scans a folder of uncategorized samples.
+    ///
+    /// Scenario:
+    /// 1. Initialize SharedState with empty kit (no defaults yet)
+    /// 2. Pre-populate pads with bundled default samples (simulating plugin init)
+    /// 3. Build a SampleLibrary with 10 uncategorized (Other) samples
+    /// 4. Call populate_kit_from_library
+    /// 5. Assert: every non-locked pad has a sample_path from the user's library,
+    ///    NOT from the bundled defaults
+    #[test]
+    fn populate_kit_fills_all_pads_from_uncategorized_library() {
+        // Step 1: Create SharedState with fresh kit
+        let mut shared = SharedState::new();
+
+        // Step 2: Pre-populate with bundled defaults (simulate apply_to_kit behavior)
+        // Note: bundled defaults have Some(sample) but None for sample_path
+        let default_names = [
+            "bd_909.wav",
+            "sd_1.wav",
+            "hh_1.wav",
+            "hh_2.wav",
+            "808.wav",
+            "tom.wav",
+            "hitom.wav",
+            "bd_psy.wav",
+        ];
+        let default_categories = [
+            SampleCategory::Kick,
+            SampleCategory::Snare,
+            SampleCategory::Hihat,
+            SampleCategory::Hihat,
+            SampleCategory::Bass,
+            SampleCategory::Tom,
+            SampleCategory::Tom,
+            SampleCategory::Kick,
+        ];
+
+        for (pad_idx, (name, category)) in default_names
+            .iter()
+            .zip(default_categories.iter())
+            .enumerate()
+        {
+            let pad = &mut shared.kit.pads[pad_idx];
+            pad.name = name.to_string();
+            pad.category = *category;
+            pad.sample = Some(Arc::new(vec![0.1f32; 4410])); // dummy audio data
+            pad.sample_path = None; // bundled samples have NO filesystem path
+        }
+
+        // Step 3: Build a library with 10 uncategorized samples (all Other category)
+        let mut by_category: HashMap<SampleCategory, Vec<AnalyzedSample>> = HashMap::new();
+        let test_samples = [
+            "user_sample_01.wav",
+            "user_sample_02.wav",
+            "user_sample_03.wav",
+            "user_sample_04.wav",
+            "user_sample_05.wav",
+            "user_sample_06.wav",
+            "user_sample_07.wav",
+            "user_sample_08.wav",
+            "user_sample_09.wav",
+            "user_sample_10.wav",
+        ];
+
+        for sample_name in &test_samples {
+            let entry = SampleEntry {
+                path: PathBuf::from(format!("/user/uncategorized/{}", sample_name)),
+                filename: sample_name.to_string(),
+                category: SampleCategory::Other, // Uncategorized — the key condition
+                folder_hint: None,
+                duration_ms: 500,
+                is_percussive: true,
+            };
+
+            let sample = AnalyzedSample {
+                entry,
+                features: AudioFeatures {
+                    attack_time: 0.005,
+                    decay_time: 0.2,
+                    spectral_centroid: 2000.0,
+                    spectral_flatness: 0.6,
+                    sub_energy_ratio: 0.2,
+                    high_freq_ratio: 0.15,
+                    peak: 0.8,
+                    duration: 0.5,
+                    is_percussive: true,
+                },
+                data: Arc::new(vec![0.5f32; 22050]), // dummy audio
+            };
+
+            by_category
+                .entry(SampleCategory::Other)
+                .or_default()
+                .push(sample);
+        }
+
+        let library = SampleLibrary {
+            total: 10,
+            by_category,
+            sample_rate: 44100.0,
+        };
+
+        shared.library = Some(library);
+
+        // Step 4: Call populate_kit_from_library
+        populate_kit_from_library(&mut shared);
+
+        // Step 5: Verify no bundled defaults leaked through
+        for (pad_idx, pad) in shared.kit.pads.iter().enumerate() {
+            if pad.locked {
+                continue; // Skip locked pads as per test requirements
+            }
+
+            // Assert: pad must have a sample
+            assert!(
+                pad.sample.is_some(),
+                "pad {} should have sample data assigned",
+                pad_idx
+            );
+
+            // Assert: pad must have a sample_path (crucial — bundled had None)
+            assert!(
+                pad.sample_path.is_some(),
+                "pad {} should have a sample_path (none means bundled default leaked)",
+                pad_idx
+            );
+
+            // Assert: sample_path must come from the user's library, not bundled
+            let path = pad.sample_path.as_ref().unwrap();
+            assert!(
+                path.contains("user/uncategorized/"),
+                "pad {} sample_path '{}' should come from user library, not bundled defaults",
+                pad_idx,
+                path
+            );
+        }
+
+        // Step 6: Verify all assigned paths are unique (no duplicates)
+        let mut paths: Vec<String> = shared
+            .kit
+            .pads
+            .iter()
+            .filter(|p| !p.locked)
+            .filter_map(|p| p.sample_path.clone())
+            .collect();
+
+        let unique_count = {
+            let mut unique_set = HashSet::new();
+            for path in &paths {
+                unique_set.insert(path.clone());
+            }
+            unique_set.len()
+        };
+
+        assert_eq!(
+            unique_count, paths.len(),
+            "all assigned sample paths should be unique (no duplicates)"
+        );
+        assert!(
+            paths.len() > 0,
+            "at least some pads should be assigned from the library"
+        );
+    }
+}

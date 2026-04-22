@@ -379,6 +379,46 @@ mod tests {
         let lib = test_library();
         assert!(lib.sample_by_flat_index(999999).is_none());
     }
+
+    /// A low-frequency percussive knock — short (~150 ms), low ZCR, but with
+    /// a clear transient and decay envelope — must be accepted. This is the
+    /// shape of Renoise-sliced drum knocks, 808 sub-kicks, finger-on-shell
+    /// hits, and other legitimate low-pitched oneshots.
+    #[test]
+    fn accepts_low_freq_short_knock() {
+        let sr = 44100.0_f32;
+        let len = (0.15 * sr) as usize; // ~150 ms, well under the 8192-sample tonal-check ceiling
+        let freq = 80.0_f32;
+        let decay = 25.0_f32; // fast decay → high crest factor like a real knock
+        let samples: Vec<f32> = (0..len)
+            .map(|i| {
+                let t = i as f32 / sr;
+                (std::f32::consts::TAU * freq * t).sin() * (-decay * t).exp()
+            })
+            .collect();
+        assert!(
+            looks_like_oneshot(&samples),
+            "damped 80Hz knock (len={}) must be accepted",
+            samples.len()
+        );
+    }
+
+    /// A pure sustained sine at the same length and frequency — i.e. a
+    /// wavetable / single-cycle-looped rendering — must still be rejected.
+    /// Discriminator is crest factor: pure sine sits at √2 ≈ 1.41.
+    #[test]
+    fn rejects_low_freq_short_sustained_sine() {
+        let sr = 44100.0_f32;
+        let len = (0.15 * sr) as usize;
+        let freq = 80.0_f32;
+        let samples: Vec<f32> = (0..len)
+            .map(|i| (std::f32::consts::TAU * freq * i as f32 / sr).sin() * 0.5)
+            .collect();
+        assert!(
+            !looks_like_oneshot(&samples),
+            "sustained 80Hz sine (wavetable shape) must be rejected"
+        );
+    }
 }
 
 /// Minimum length for a usable oneshot — ~46 ms at 44.1 kHz. Single-cycle
@@ -440,23 +480,34 @@ fn looks_like_oneshot(samples: &[f32]) -> bool {
     // Reject very short tonal files — likely rendered single-cycle wavetables
     // that are slightly longer than MIN_ONESHOT_SAMPLES (e.g. multi-cycle or
     // with a gentle fade-out that sneaks past the energy decay check).
+    //
+    // Crest factor gate: a wavetable / pure tone has crest ≈ √2 (≈1.4); a
+    // percussive knock — even at a low fundamental — has crest ≥ 3 (spike
+    // then decay). Without this gate, short low-pitched knocks (Renoise
+    // slices, 808 sub-kicks, finger-on-shell hits) trip the low-ZCR check
+    // and get silently discarded despite being legitimate one-shots.
     if samples.len() < 8192 {
         let zcr = zero_crossing_rate(samples);
+        let rms =
+            (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
+        let crest = peak / rms.max(1e-10);
         // Very low ZCR (<0.05) = a few cycles of a low-freq pure tone.
-        // Combined with short length → almost certainly a wavetable.
-        if zcr < 0.05 {
-            tracing::trace!(zcr, len = samples.len(), "reject: short tonal file (wavetable?)");
+        // Combined with short length AND low crest → almost certainly a wavetable.
+        if zcr < 0.05 && crest < 3.0 {
+            tracing::trace!(zcr, crest, len = samples.len(), "reject: short tonal file (wavetable?)");
             return false;
         }
         // Mid-range ZCR with very uniform energy (checked between halves,
-        // not just quarters) also suggests a looped waveform.
+        // not just quarters) also suggests a looped waveform — again gated
+        // on low crest so percussive content with a pronounced transient
+        // stays accepted.
         let half = samples.len() / 2;
         let h1_energy: f32 = samples[..half].iter().map(|s| s * s).sum::<f32>() / half as f32;
         let h2_energy: f32 = samples[half..].iter().map(|s| s * s).sum::<f32>() / half as f32;
         if h1_energy > 1e-10 {
             let half_ratio = h2_energy / h1_energy;
-            if half_ratio > 0.65 && zcr < 0.15 {
-                tracing::trace!(half_ratio, zcr, "reject: sustained tonal short file");
+            if half_ratio > 0.65 && zcr < 0.15 && crest < 3.0 {
+                tracing::trace!(half_ratio, zcr, crest, "reject: sustained tonal short file");
                 return false;
             }
         }
