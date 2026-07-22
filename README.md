@@ -24,7 +24,7 @@ Download the latest build for your platform from the [Releases](https://github.c
 install.bat
 ```
 
-Rescan plugins in your DAW. Autokit appears as **REXIST / Autokit**.
+Rescan plugins in your DAW. Autokit appears as **Hyperfocus DSP / Autokit**.
 
 Place your oneshot samples (WAV, FLAC, OGG) in `~/Music/Samples`. Autokit scans this folder on first launch and caches the results.
 

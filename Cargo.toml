@@ -3,7 +3,7 @@ members = ["xtask"]
 
 [package]
 name = "autokit"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Sample-based drum machine plugin with spectral analysis"

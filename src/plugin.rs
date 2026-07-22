@@ -514,7 +514,7 @@ impl Autokit {
 
 impl Plugin for Autokit {
     const NAME: &'static str = "Autokit";
-    const VENDOR: &'static str = "REXIST";
+    const VENDOR: &'static str = "Hyperfocus DSP";
     const URL: &'static str = "";
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
