@@ -75,6 +75,12 @@ pub struct History {
     redo_stack: Vec<HistorySnapshot>,
 }
 
+impl Default for History {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl History {
     pub fn new() -> Self {
         Self {
@@ -137,36 +143,41 @@ mod tests {
             })
             .collect();
 
-        let patterns: Vec<PatternSnapshot> = (0..16).map(|_| {
-            let lanes: [LaneSnapshot; NUM_PADS] = core::array::from_fn(|_| LaneSnapshot {
-                steps: [StepSnapshot {
-                    enabled: false,
-                    velocity: 0.8,
-                    probability: 1.0,
-                    pan: None,
-                    pitch: None,
-                    condition: crate::engine::sequencer::ConditionTrig::Always,
-                    fx_rvb: None,
-                    fx_dly: None,
-                    fx_filter: None,
-                }; 16],
-                muted: false,
-                solo: false,
-                fx_send_rvb: 0.0,
-                fx_send_dly: 0.0,
-                fx_filter: false,
-            });
-            PatternSnapshot {
-                lanes,
-                swing: 0.0,
-                master_automation: crate::engine::sequencer::MasterAutomation::default(),
-                master_fx_base: crate::engine::sequencer::MasterFxBase::default(),
-            }
-        }).collect();
+        let patterns: Vec<PatternSnapshot> = (0..16)
+            .map(|_| {
+                let lanes: [LaneSnapshot; NUM_PADS] = core::array::from_fn(|_| LaneSnapshot {
+                    steps: [StepSnapshot {
+                        enabled: false,
+                        velocity: 0.8,
+                        probability: 1.0,
+                        pan: None,
+                        pitch: None,
+                        condition: crate::engine::sequencer::ConditionTrig::Always,
+                        fx_rvb: None,
+                        fx_dly: None,
+                        fx_filter: None,
+                    }; 16],
+                    muted: false,
+                    solo: false,
+                    fx_send_rvb: 0.0,
+                    fx_send_dly: 0.0,
+                    fx_filter: false,
+                });
+                PatternSnapshot {
+                    lanes,
+                    swing: 0.0,
+                    master_automation: crate::engine::sequencer::MasterAutomation::default(),
+                    master_fx_base: crate::engine::sequencer::MasterFxBase::default(),
+                }
+            })
+            .collect();
 
         HistorySnapshot {
             pads,
-            sequencer: SequencerSnapshot { patterns, active_pattern: 0 },
+            sequencer: SequencerSnapshot {
+                patterns,
+                active_pattern: 0,
+            },
         }
     }
 
@@ -244,22 +255,22 @@ mod tests {
     }
 
     use crate::engine::kit::DrumKit;
-    use crate::engine::sequencer::Sequencer;
+    use crate::engine::sequencer::PatternBank;
     use std::sync::Arc;
 
-    /// Helper: create a full HistorySnapshot from a kit and sequencer.
-    fn snapshot_from(kit: &DrumKit, seq: &Sequencer) -> HistorySnapshot {
+    /// Helper: create a full HistorySnapshot from a kit and pattern bank.
+    fn snapshot_from(kit: &DrumKit, bank: &PatternBank) -> HistorySnapshot {
         HistorySnapshot {
             pads: kit.snapshot(),
-            sequencer: seq.snapshot(),
+            sequencer: bank.snapshot(),
         }
     }
 
     #[test]
     fn dice_then_undo_restores_original() {
+        use crate::analysis::features::AudioFeatures;
         use crate::analysis::library::{AnalyzedSample, SampleLibrary};
         use crate::analysis::scanner::SampleEntry;
-        use crate::analysis::features::AudioFeatures;
         use std::collections::HashMap;
         use std::path::PathBuf;
 
@@ -273,21 +284,24 @@ mod tests {
             duration_ms: 100,
             is_percussive: true,
         };
-        by_category.entry(SampleCategory::Kick).or_insert_with(Vec::new).push(AnalyzedSample {
-            entry,
-            features: AudioFeatures {
-                attack_time: 0.001,
-                decay_time: 0.05,
-                spectral_centroid: 1000.0,
-                spectral_flatness: 0.5,
-                sub_energy_ratio: 0.1,
-                high_freq_ratio: 0.1,
-                peak: 1.0,
-                duration: 0.1,
-                is_percussive: true,
-            },
-            data: Arc::new(vec![0.5; 100]),
-        });
+        by_category
+            .entry(SampleCategory::Kick)
+            .or_insert_with(Vec::new)
+            .push(AnalyzedSample {
+                entry,
+                features: AudioFeatures {
+                    attack_time: 0.001,
+                    decay_time: 0.05,
+                    spectral_centroid: 1000.0,
+                    spectral_flatness: 0.5,
+                    sub_energy_ratio: 0.1,
+                    high_freq_ratio: 0.1,
+                    peak: 1.0,
+                    duration: 0.1,
+                    is_percussive: true,
+                },
+                data: Arc::new(vec![0.5; 100]),
+            });
         let lib = SampleLibrary {
             total: 1,
             by_category,
@@ -299,7 +313,7 @@ mod tests {
         kit.pads[0].name = "original-kick".to_string();
         kit.pads[0].sample = Some(Arc::new(vec![1.0; 100]));
 
-        let seq = Sequencer::new();
+        let seq = PatternBank::new();
         let mut history = History::new();
 
         // Snapshot before dice
@@ -320,9 +334,9 @@ mod tests {
 
     #[test]
     fn dice_undo_redo_roundtrip() {
+        use crate::analysis::features::AudioFeatures;
         use crate::analysis::library::{AnalyzedSample, SampleLibrary};
         use crate::analysis::scanner::SampleEntry;
-        use crate::analysis::features::AudioFeatures;
         use std::collections::HashMap;
         use std::path::PathBuf;
 
@@ -335,21 +349,24 @@ mod tests {
             duration_ms: 100,
             is_percussive: true,
         };
-        by_category.entry(SampleCategory::Kick).or_insert_with(Vec::new).push(AnalyzedSample {
-            entry,
-            features: AudioFeatures {
-                attack_time: 0.001,
-                decay_time: 0.05,
-                spectral_centroid: 1000.0,
-                spectral_flatness: 0.5,
-                sub_energy_ratio: 0.1,
-                high_freq_ratio: 0.1,
-                peak: 1.0,
-                duration: 0.1,
-                is_percussive: true,
-            },
-            data: Arc::new(vec![0.5; 100]),
-        });
+        by_category
+            .entry(SampleCategory::Kick)
+            .or_insert_with(Vec::new)
+            .push(AnalyzedSample {
+                entry,
+                features: AudioFeatures {
+                    attack_time: 0.001,
+                    decay_time: 0.05,
+                    spectral_centroid: 1000.0,
+                    spectral_flatness: 0.5,
+                    sub_energy_ratio: 0.1,
+                    high_freq_ratio: 0.1,
+                    peak: 1.0,
+                    duration: 0.1,
+                    is_percussive: true,
+                },
+                data: Arc::new(vec![0.5; 100]),
+            });
         let lib = SampleLibrary {
             total: 1,
             by_category,
@@ -360,7 +377,7 @@ mod tests {
         kit.pads[0].category = SampleCategory::Kick;
         kit.pads[0].name = "before".to_string();
 
-        let seq = Sequencer::new();
+        let seq = PatternBank::new();
         let mut history = History::new();
 
         // Push pre-dice snapshot, then dice
@@ -383,9 +400,9 @@ mod tests {
 
     #[test]
     fn multiple_dice_multiple_undos() {
+        use crate::analysis::features::AudioFeatures;
         use crate::analysis::library::{AnalyzedSample, SampleLibrary};
         use crate::analysis::scanner::SampleEntry;
-        use crate::analysis::features::AudioFeatures;
         use std::collections::HashMap;
         use std::path::PathBuf;
 
@@ -400,21 +417,24 @@ mod tests {
                 duration_ms: 100,
                 is_percussive: true,
             };
-            by_category.entry(SampleCategory::Kick).or_insert_with(Vec::new).push(AnalyzedSample {
-                entry,
-                features: AudioFeatures {
-                    attack_time: 0.001,
-                    decay_time: 0.05,
-                    spectral_centroid: 1000.0,
-                    spectral_flatness: 0.5,
-                    sub_energy_ratio: 0.1,
-                    high_freq_ratio: 0.1,
-                    peak: 1.0,
-                    duration: 0.1,
-                    is_percussive: true,
-                },
-                data: Arc::new(vec![0.5; 100]),
-            });
+            by_category
+                .entry(SampleCategory::Kick)
+                .or_default()
+                .push(AnalyzedSample {
+                    entry,
+                    features: AudioFeatures {
+                        attack_time: 0.001,
+                        decay_time: 0.05,
+                        spectral_centroid: 1000.0,
+                        spectral_flatness: 0.5,
+                        sub_energy_ratio: 0.1,
+                        high_freq_ratio: 0.1,
+                        peak: 1.0,
+                        duration: 0.1,
+                        is_percussive: true,
+                    },
+                    data: Arc::new(vec![0.5; 100]),
+                });
         }
         let lib = SampleLibrary {
             total: 5,
@@ -426,7 +446,7 @@ mod tests {
         kit.pads[0].category = SampleCategory::Kick;
         kit.pads[0].name = "initial".to_string();
 
-        let seq = Sequencer::new();
+        let seq = PatternBank::new();
         let mut history = History::new();
         let mut names: Vec<String> = vec!["initial".to_string()];
 

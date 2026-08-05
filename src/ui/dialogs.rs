@@ -4,8 +4,10 @@ use std::path::PathBuf;
 use crate::ui::folder_browser::{self, FolderBrowser};
 use crate::ui::theme;
 use crate::util::config;
+use crate::util::storage;
 
 /// State for all modal dialogs.
+#[derive(Default)]
 pub struct DialogState {
     pub show_save: bool,
     pub save_name: String,
@@ -18,24 +20,6 @@ pub struct DialogState {
     pub save_pattern_name: String,
     pub show_load_pattern: bool,
     pub pattern_list: Vec<(String, PathBuf)>,
-}
-
-impl Default for DialogState {
-    fn default() -> Self {
-        Self {
-            show_save: false,
-            save_name: String::new(),
-            show_load: false,
-            preset_list: Vec::new(),
-            show_setup: false,
-            setup_path: String::new(),
-            folder_browser: None,
-            show_save_pattern: false,
-            save_pattern_name: String::new(),
-            show_load_pattern: false,
-            pattern_list: Vec::new(),
-        }
-    }
 }
 
 /// Result of showing dialogs — actions the editor should handle.
@@ -153,7 +137,10 @@ pub fn show_load_dialog(ctx: &egui::Context, state: &mut DialogState) -> DialogA
                                     .add(
                                         egui::Button::new(
                                             egui::RichText::new(name)
-                                                .font(egui::FontId::new(11.0, egui::FontFamily::Monospace))
+                                                .font(egui::FontId::new(
+                                                    11.0,
+                                                    egui::FontFamily::Monospace,
+                                                ))
                                                 .color(theme::ACCENT),
                                         )
                                         .fill(theme::BG_ROW)
@@ -168,7 +155,10 @@ pub fn show_load_dialog(ctx: &egui::Context, state: &mut DialogState) -> DialogA
                                     .add(
                                         egui::Button::new(
                                             egui::RichText::new("\u{00d7}")
-                                                .font(egui::FontId::new(12.0, egui::FontFamily::Monospace))
+                                                .font(egui::FontId::new(
+                                                    12.0,
+                                                    egui::FontFamily::Monospace,
+                                                ))
                                                 .color(theme::MUTE_RED),
                                         )
                                         .fill(theme::BG_ROW)
@@ -263,7 +253,7 @@ pub fn show_setup_dialog(ctx: &egui::Context, state: &mut DialogState) -> Dialog
                     .clicked()
                 {
                     let start = if state.setup_path.is_empty() {
-                        config::home_dir()
+                        storage::home_dir()
                     } else {
                         PathBuf::from(&state.setup_path)
                     };
@@ -291,10 +281,18 @@ pub fn show_setup_dialog(ctx: &egui::Context, state: &mut DialogState) -> Dialog
                         egui::Button::new(
                             egui::RichText::new("SCAN")
                                 .font(egui::FontId::new(10.0, egui::FontFamily::Monospace))
-                                .color(if path_valid { theme::ACCENT } else { theme::TEXT_DISABLED })
+                                .color(if path_valid {
+                                    theme::ACCENT
+                                } else {
+                                    theme::TEXT_DISABLED
+                                })
                                 .strong(),
                         )
-                        .fill(if path_valid { theme::ACCENT_DIM } else { theme::BG_ROW })
+                        .fill(if path_valid {
+                            theme::ACCENT_DIM
+                        } else {
+                            theme::BG_ROW
+                        })
                         .min_size(egui::vec2(60.0, 24.0)),
                     )
                     .clicked()
@@ -430,7 +428,10 @@ pub fn show_load_pattern_dialog(ctx: &egui::Context, state: &mut DialogState) ->
                                     .add(
                                         egui::Button::new(
                                             egui::RichText::new(name)
-                                                .font(egui::FontId::new(11.0, egui::FontFamily::Monospace))
+                                                .font(egui::FontId::new(
+                                                    11.0,
+                                                    egui::FontFamily::Monospace,
+                                                ))
                                                 .color(theme::ACCENT),
                                         )
                                         .fill(theme::BG_ROW)
@@ -445,7 +446,10 @@ pub fn show_load_pattern_dialog(ctx: &egui::Context, state: &mut DialogState) ->
                                     .add(
                                         egui::Button::new(
                                             egui::RichText::new("\u{00d7}")
-                                                .font(egui::FontId::new(12.0, egui::FontFamily::Monospace))
+                                                .font(egui::FontId::new(
+                                                    12.0,
+                                                    egui::FontFamily::Monospace,
+                                                ))
                                                 .color(theme::MUTE_RED),
                                         )
                                         .fill(theme::BG_ROW)

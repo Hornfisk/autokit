@@ -131,7 +131,8 @@ impl LibraryCache {
 
     /// Insert or update a cache entry.
     pub fn insert(&mut self, path: &Path, entry: CacheEntry) {
-        self.entries.insert(path.to_string_lossy().into_owned(), entry);
+        self.entries
+            .insert(path.to_string_lossy().into_owned(), entry);
     }
 
     /// Remove entries for paths no longer on disk, returning the count removed.

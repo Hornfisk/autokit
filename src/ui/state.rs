@@ -10,9 +10,13 @@ use crate::util::history::History;
 #[derive(Clone, Debug)]
 pub enum ScanStatus {
     /// No config yet — show setup dialog. `suggested_path` is auto-discovered.
-    NeedsSetup { suggested_path: Option<PathBuf> },
+    NeedsSetup {
+        suggested_path: Option<PathBuf>,
+    },
     Scanning,
-    Ready { total: usize },
+    Ready {
+        total: usize,
+    },
 }
 
 /// Pre-computed waveform display data for one pad.
@@ -74,6 +78,16 @@ pub struct SharedState {
     pub scan_progress: Option<Arc<ScanProgress>>,
     /// Background scan receiver — GUI thread polls this as fallback when process() is dead.
     pub bg_rx: Option<crossbeam_channel::Receiver<ScanResult>>,
+    /// Sample paths a restored preset referenced but couldn't load (moved,
+    /// deleted, or on a drive that isn't mounted). Surfaced in the UI so the
+    /// user can tell an empty pad from a broken one.
+    pub missing_sample_paths: Vec<String>,
+}
+
+impl Default for SharedState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SharedState {
@@ -90,6 +104,7 @@ impl SharedState {
             pending_scan_path: None,
             scan_progress: None,
             bg_rx: None,
+            missing_sample_paths: Vec::new(),
         }
     }
 

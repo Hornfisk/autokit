@@ -45,8 +45,11 @@ impl StepSmoother {
     }
 
     /// Advance one sample. Returns the current value.
+    ///
+    /// Named `next_value` rather than `next` so it can't be mistaken for
+    /// `Iterator::next` at a call site.
     #[inline]
-    pub fn next(&mut self) -> f32 {
+    pub fn next_value(&mut self) -> f32 {
         if self.samples_remaining > 0 {
             self.current += self.inc_per_sample;
             self.samples_remaining -= 1;
@@ -54,11 +57,6 @@ impl StepSmoother {
                 self.current = self.target;
             }
         }
-        self.current
-    }
-
-    #[inline]
-    pub fn current(&self) -> f32 {
         self.current
     }
 }

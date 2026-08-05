@@ -1,51 +1,14 @@
-use nih_plug::prelude::*;
+//! Standalone binary for Autokit.
+//!
+//! Links the `autokit` library rather than re-declaring its module tree —
+//! see the note in `src/lib.rs`.
 
-mod plugin;
-mod logging;
-
-mod engine {
-    pub mod echo_detect;
-    pub mod fx;
-    pub mod kit;
-    pub mod master_bus;
-    pub mod sampler;
-    pub mod sequencer;
-    pub mod step_smoother;
-}
-
-mod analysis {
-    pub mod cache;
-    pub mod features;
-    pub mod library;
-    pub mod scanner;
-}
-
-mod ui {
-    pub mod dialogs;
-    pub mod editor;
-    pub mod folder_browser;
-    pub mod knob;
-    pub mod pad_row;
-    pub mod sample_map;
-    pub mod sequencer_ui;
-    pub mod state;
-    pub mod theme;
-    pub mod toolbar;
-    pub mod waveform;
-}
-
-mod util {
-    pub mod audio_file;
-    pub mod config;
-    pub mod default_kit;
-    pub mod history;
-    pub mod preset;
-}
+use autokit::plugin::Autokit;
 
 fn main() {
     install_panic_logger();
     let args = build_args();
-    nih_plug::wrapper::standalone::nih_export_standalone_with_args::<plugin::Autokit, _>(args);
+    nih_plug::wrapper::standalone::nih_export_standalone_with_args::<Autokit, _>(args);
 }
 
 /// Chain a tracing logger in front of the default panic hook so that a
@@ -110,7 +73,9 @@ fn build_args() -> Vec<String> {
 
     if !args.iter().any(|a| a == "--midi-input") {
         if let Some(port_name) = pick_default_midi_input() {
-            eprintln!("autokit: auto-selecting MIDI input '{port_name}' (pass --midi-input to override)");
+            eprintln!(
+                "autokit: auto-selecting MIDI input '{port_name}' (pass --midi-input to override)"
+            );
             args.push("--midi-input".to_string());
             args.push(port_name);
         } else {

@@ -1,5 +1,5 @@
-use crate::engine::kit::SampleCategory;
 use crate::analysis::features::AudioFeatures;
+use crate::engine::kit::SampleCategory;
 
 /// A single point on the sample map.
 #[derive(Clone, Debug)]
@@ -42,16 +42,16 @@ fn normalize_decay(secs: f32) -> f32 {
 /// Spread across the full map so clusters form distinct, well-separated islands.
 fn category_anchor(cat: SampleCategory) -> (f32, f32) {
     match cat {
-        SampleCategory::Kick   => (0.22, 0.78),
-        SampleCategory::Bass   => (0.38, 0.85),
-        SampleCategory::Tom    => (0.22, 0.45),
-        SampleCategory::Snare  => (0.35, 0.28),
-        SampleCategory::Clap   => (0.55, 0.12),
-        SampleCategory::Hihat  => (0.78, 0.12),
+        SampleCategory::Kick => (0.22, 0.78),
+        SampleCategory::Bass => (0.38, 0.85),
+        SampleCategory::Tom => (0.22, 0.45),
+        SampleCategory::Snare => (0.35, 0.28),
+        SampleCategory::Clap => (0.55, 0.12),
+        SampleCategory::Hihat => (0.78, 0.12),
         SampleCategory::Cymbal => (0.82, 0.38),
-        SampleCategory::Perc   => (0.55, 0.50),
-        SampleCategory::Synth  => (0.62, 0.78),
-        SampleCategory::Other  => (0.82, 0.72),
+        SampleCategory::Perc => (0.55, 0.50),
+        SampleCategory::Synth => (0.62, 0.78),
+        SampleCategory::Other => (0.82, 0.72),
     }
 }
 
@@ -79,10 +79,10 @@ fn map_position(f: &AudioFeatures, cat: SampleCategory) -> (f32, f32) {
     (nx, ny)
 }
 
-use nih_plug_egui::egui;
 use crate::analysis::library::SampleLibrary;
 use crate::engine::kit::NUM_PADS;
 use crate::ui::theme;
+use nih_plug_egui::egui;
 
 /// Build map points from the full sample library.
 /// Call once when library scan completes; cache the result in EditorState.
@@ -90,7 +90,8 @@ use crate::ui::theme;
 /// so that overlapping dots spread into breathable clouds.
 pub fn build_map_points(library: &SampleLibrary) -> Vec<MapPoint> {
     let flat = library.all_samples_flat();
-    let mut points: Vec<MapPoint> = flat.iter()
+    let mut points: Vec<MapPoint> = flat
+        .iter()
         .enumerate()
         .map(|(i, sample)| {
             let (nx, ny) = map_position(&sample.features, sample.entry.category);
@@ -148,7 +149,9 @@ fn spread_overlapping(points: &mut [MapPoint], min_dist: f32, iterations: usize)
                     }
                     if let Some(neighbours) = grid.get(&(ngx as usize, ngy as usize)) {
                         for &j in neighbours {
-                            if j <= i { continue; }
+                            if j <= i {
+                                continue;
+                            }
                             let ex = points[j].nx - p.nx;
                             let ey = points[j].ny - p.ny;
                             let dist = (ex * ex + ey * ey).sqrt();
@@ -191,7 +194,11 @@ pub struct MapViewState {
 
 impl Default for MapViewState {
     fn default() -> Self {
-        Self { zoom: 1.0, pan_x: 0.0, pan_y: 0.0 }
+        Self {
+            zoom: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+        }
     }
 }
 
@@ -230,20 +237,26 @@ pub fn hit_test(
             continue;
         }
         let dist = cursor.distance(screen);
-        if dist < max_dist {
-            if best.is_none() || dist < best.unwrap().1 {
-                best = Some((i, dist, screen));
-            }
+        if dist < max_dist && (best.is_none() || dist < best.unwrap().1) {
+            best = Some((i, dist, screen));
         }
     }
-    best.map(|(i, _, pos)| HitResult { point_index: i, screen_pos: pos })
+    best.map(|(i, _, pos)| HitResult {
+        point_index: i,
+        screen_pos: pos,
+    })
 }
 
 /// Actions returned by draw_map for the editor to handle.
 pub enum MapAction {
     None,
-    ClickedDot { point_index: usize },
-    AssignToPad { point_index: usize, pad_index: usize },
+    ClickedDot {
+        point_index: usize,
+    },
+    AssignToPad {
+        point_index: usize,
+        pad_index: usize,
+    },
 }
 
 /// State for the assignment popup.
@@ -252,28 +265,38 @@ pub struct PopupState {
     pub anchor_pos: egui::Pos2,
 }
 impl Default for PopupState {
-    fn default() -> Self { Self { active_point: None, anchor_pos: egui::Pos2::ZERO } }
+    fn default() -> Self {
+        Self {
+            active_point: None,
+            anchor_pos: egui::Pos2::ZERO,
+        }
+    }
 }
 
 /// Draw the scatter plot. Returns any action triggered.
 /// `name_filter` is a case-insensitive substring applied to each point's
 /// filename — non-matching points are dimmed and excluded from hit testing.
+// Immediate-mode draw function: it takes a flat snapshot of everything it
+// paints for one frame. The 16-argument `draw_toolbar_snapshot` was converted
+// to a view struct because it had five consecutive `bool`s that could be
+// transposed silently; these are shorter and have no same-typed neighbours, so
+// a struct would add indirection without removing a real hazard.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_map(
     ui: &mut egui::Ui,
     points: &[MapPoint],
     view: &mut MapViewState,
     kit_paths: &[Option<String>],
     hovered_index: &mut Option<usize>,
-    shortcut_pad: Option<usize>,
+    _shortcut_pad: Option<usize>,
     shortcut_category: Option<SampleCategory>,
     tooltips_on: bool,
     name_filter: &str,
 ) -> MapAction {
     let filter_lc = name_filter.to_lowercase();
     let filter_active = !filter_lc.is_empty();
-    let matches_filter = |p: &MapPoint| -> bool {
-        !filter_active || p.name.to_lowercase().contains(&filter_lc)
-    };
+    let matches_filter =
+        |p: &MapPoint| -> bool { !filter_active || p.name.to_lowercase().contains(&filter_lc) };
     let mut action = MapAction::None;
     let available = ui.available_size();
     let (response, painter) = ui.allocate_painter(available, egui::Sense::click_and_drag());
@@ -285,7 +308,12 @@ pub fn draw_map(
     // Border tint when shortcut mode is active
     if let Some(cat) = shortcut_category {
         let border_color = theme::category_color(cat);
-        painter.rect_stroke(rect, 0.0, egui::Stroke::new(2.0, border_color.to_egui_alpha(0x44)), egui::StrokeKind::Inside);
+        painter.rect_stroke(
+            rect,
+            0.0,
+            egui::Stroke::new(2.0, border_color.to_egui_alpha(0x44)),
+            egui::StrokeKind::Inside,
+        );
     }
 
     // Axis labels
@@ -315,7 +343,11 @@ pub fn draw_map(
             if let Some(cursor) = response.hover_pos() {
                 let (nx, ny) = from_screen(
                     cursor,
-                    &MapViewState { zoom: old_zoom, pan_x: view.pan_x, pan_y: view.pan_y },
+                    &MapViewState {
+                        zoom: old_zoom,
+                        pan_x: view.pan_x,
+                        pan_y: view.pan_y,
+                    },
                     rect,
                 );
                 view.pan_x = nx - (cursor.x - rect.left()) / (view.zoom * rect.width());
@@ -359,7 +391,11 @@ pub fn draw_map(
         let (radius, mut alpha) = if is_hovered {
             (4.0, 0.80)
         } else if let Some(cat) = shortcut_category {
-            if p.category == cat { (2.5, 0.55) } else { (1.5, 0.10) }
+            if p.category == cat {
+                (2.5, 0.55)
+            } else {
+                (1.5, 0.10)
+            }
         } else {
             (2.0, 0.35)
         };
@@ -370,7 +406,7 @@ pub fn draw_map(
     }
 
     // --- Draw kit dots (bright + ring) ---
-    for (_i, p) in points.iter().enumerate() {
+    for p in points.iter() {
         let screen = to_screen(p.nx, p.ny, view, rect);
         if !rect.contains(screen) {
             continue;
@@ -407,8 +443,7 @@ pub fn draw_map(
                     tooltip_pos.y = cursor.y + 15.0;
                 }
 
-                let tooltip_rect =
-                    egui::Rect::from_min_size(tooltip_pos, egui::vec2(150.0, 32.0));
+                let tooltip_rect = egui::Rect::from_min_size(tooltip_pos, egui::vec2(150.0, 32.0));
                 painter.rect_filled(
                     tooltip_rect,
                     4.0,
@@ -424,7 +459,12 @@ pub fn draw_map(
                 painter.text(
                     tooltip_rect.min + egui::vec2(6.0, 17.0),
                     egui::Align2::LEFT_TOP,
-                    format!("{} \u{00b7} {:.0}Hz \u{00b7} {:.2}s", p.category.label(), p.centroid_hz, p.decay_secs),
+                    format!(
+                        "{} \u{00b7} {:.0}Hz \u{00b7} {:.2}s",
+                        p.category.label(),
+                        p.centroid_hz,
+                        p.decay_secs
+                    ),
                     egui::FontId::new(8.0, egui::FontFamily::Monospace),
                     theme::TEXT_DIM,
                 );
@@ -442,7 +482,9 @@ pub fn draw_map(
             if let Some(hit) = hit_test(cursor, points, view, rect, 8.0)
                 .filter(|h| matches_filter(&points[h.point_index]))
             {
-                action = MapAction::ClickedDot { point_index: hit.point_index };
+                action = MapAction::ClickedDot {
+                    point_index: hit.point_index,
+                };
             }
         }
     }
@@ -472,17 +514,43 @@ pub fn draw_mini_pad_bar(
         for i in 0..NUM_PADS {
             let color = theme::category_color(pad_categories[i]);
             let is_active = shortcut_pad == Some(i);
-            let bg = if is_active { color.to_egui_alpha(0x44) } else { color.to_egui_alpha(0x22) };
-            let border = if is_active { egui::Stroke::new(2.0, color.to_egui()) } else { egui::Stroke::new(1.0, color.to_egui_alpha(0x55)) };
-            let label = format!("{} {}", i + 1, pad_categories[i].label().chars().take(3).collect::<String>().to_uppercase());
+            let bg = if is_active {
+                color.to_egui_alpha(0x44)
+            } else {
+                color.to_egui_alpha(0x22)
+            };
+            let border = if is_active {
+                egui::Stroke::new(2.0, color.to_egui())
+            } else {
+                egui::Stroke::new(1.0, color.to_egui_alpha(0x55))
+            };
+            let label = format!(
+                "{} {}",
+                i + 1,
+                pad_categories[i]
+                    .label()
+                    .chars()
+                    .take(3)
+                    .collect::<String>()
+                    .to_uppercase()
+            );
             let btn = egui::Button::new(
-                egui::RichText::new(&label).font(egui::FontId::new(8.0, egui::FontFamily::Monospace)).color(color.to_egui()))
-                .fill(bg).stroke(border).min_size(egui::vec2(btn_width, 22.0));
+                egui::RichText::new(&label)
+                    .font(egui::FontId::new(8.0, egui::FontFamily::Monospace))
+                    .color(color.to_egui()),
+            )
+            .fill(bg)
+            .stroke(border)
+            .min_size(egui::vec2(btn_width, 22.0));
             let response = ui.add(btn);
-            if response.clicked() { action = PadBarAction::ToggleShortcut(i); }
+            if response.clicked() {
+                action = PadBarAction::ToggleShortcut(i);
+            }
             if response.hovered() {
                 response.on_hover_text_at_pointer(
-                    egui::RichText::new(&pad_names[i]).font(egui::FontId::new(9.0, egui::FontFamily::Monospace)));
+                    egui::RichText::new(&pad_names[i])
+                        .font(egui::FontId::new(9.0, egui::FontFamily::Monospace)),
+                );
             }
         }
     });
@@ -508,9 +576,16 @@ pub fn draw_popup(
     // Position popup near anchor, flip if near edges
     let popup_width = 140.0;
     let popup_height = 80.0;
-    let mut pos = egui::pos2(popup.anchor_pos.x + 15.0, popup.anchor_pos.y - popup_height - 10.0);
-    if pos.x + popup_width > map_rect.right() { pos.x = popup.anchor_pos.x - popup_width - 15.0; }
-    if pos.y < map_rect.top() { pos.y = popup.anchor_pos.y + 15.0; }
+    let mut pos = egui::pos2(
+        popup.anchor_pos.x + 15.0,
+        popup.anchor_pos.y - popup_height - 10.0,
+    );
+    if pos.x + popup_width > map_rect.right() {
+        pos.x = popup.anchor_pos.x - popup_width - 15.0;
+    }
+    if pos.y < map_rect.top() {
+        pos.y = popup.anchor_pos.y + 15.0;
+    }
 
     let mut action = MapAction::None;
 
@@ -524,35 +599,66 @@ pub fn draw_popup(
                 .corner_radius(egui::CornerRadius::same(5))
                 .inner_margin(egui::Margin::same(6))
                 .show(ui, |ui| {
-                    ui.label(egui::RichText::new(&p.name)
-                        .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                        .color(color.to_egui()).strong());
-                    ui.label(egui::RichText::new(format!("{} \u{00b7} {:.0}Hz \u{00b7} {:.2}s", p.category.label(), p.centroid_hz, p.decay_secs))
+                    ui.label(
+                        egui::RichText::new(&p.name)
+                            .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
+                            .color(color.to_egui())
+                            .strong(),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} \u{00b7} {:.0}Hz \u{00b7} {:.2}s",
+                            p.category.label(),
+                            p.centroid_hz,
+                            p.decay_secs
+                        ))
                         .font(egui::FontId::new(8.0, egui::FontFamily::Monospace))
-                        .color(theme::TEXT_DIM));
+                        .color(theme::TEXT_DIM),
+                    );
                     ui.add_space(3.0);
-                    ui.label(egui::RichText::new("ASSIGN TO PAD:")
-                        .font(egui::FontId::new(7.0, egui::FontFamily::Monospace))
-                        .color(theme::TEXT_DIM));
+                    ui.label(
+                        egui::RichText::new("ASSIGN TO PAD:")
+                            .font(egui::FontId::new(7.0, egui::FontFamily::Monospace))
+                            .color(theme::TEXT_DIM),
+                    );
                     ui.add_space(2.0);
-                    egui::Grid::new("popup_pads").spacing(egui::vec2(2.0, 2.0)).show(ui, |ui| {
-                        for i in 0..NUM_PADS {
-                            let pad_color = theme::category_color(pad_categories[i]);
-                            let is_match = pad_categories[i] == p.category;
-                            let bg = if is_match { pad_color.to_egui_alpha(0x44) } else { pad_color.to_egui_alpha(0x22) };
-                            if ui.add(egui::Button::new(
-                                egui::RichText::new(format!("{}", i + 1))
-                                    .font(egui::FontId::new(9.0, egui::FontFamily::Monospace))
-                                    .color(pad_color.to_egui()))
-                                .fill(bg).min_size(egui::vec2(24.0, 18.0)))
-                                .clicked()
-                            {
-                                action = MapAction::AssignToPad { point_index, pad_index: i };
-                                popup.active_point = None;
+                    egui::Grid::new("popup_pads")
+                        .spacing(egui::vec2(2.0, 2.0))
+                        .show(ui, |ui| {
+                            for (i, &pad_category) in pad_categories.iter().enumerate() {
+                                let pad_color = theme::category_color(pad_category);
+                                let is_match = pad_category == p.category;
+                                let bg = if is_match {
+                                    pad_color.to_egui_alpha(0x44)
+                                } else {
+                                    pad_color.to_egui_alpha(0x22)
+                                };
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new(format!("{}", i + 1))
+                                                .font(egui::FontId::new(
+                                                    9.0,
+                                                    egui::FontFamily::Monospace,
+                                                ))
+                                                .color(pad_color.to_egui()),
+                                        )
+                                        .fill(bg)
+                                        .min_size(egui::vec2(24.0, 18.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    action = MapAction::AssignToPad {
+                                        point_index,
+                                        pad_index: i,
+                                    };
+                                    popup.active_point = None;
+                                }
+                                if i == 3 {
+                                    ui.end_row();
+                                }
                             }
-                            if i == 3 { ui.end_row(); }
-                        }
-                    });
+                        });
                 });
         });
 
@@ -560,16 +666,27 @@ pub fn draw_popup(
     ctx.input(|input| {
         for i in 0..NUM_PADS {
             let key = match i {
-                0 => egui::Key::Num1, 1 => egui::Key::Num2, 2 => egui::Key::Num3, 3 => egui::Key::Num4,
-                4 => egui::Key::Num5, 5 => egui::Key::Num6, 6 => egui::Key::Num7, 7 => egui::Key::Num8,
+                0 => egui::Key::Num1,
+                1 => egui::Key::Num2,
+                2 => egui::Key::Num3,
+                3 => egui::Key::Num4,
+                4 => egui::Key::Num5,
+                5 => egui::Key::Num6,
+                6 => egui::Key::Num7,
+                7 => egui::Key::Num8,
                 _ => continue,
             };
             if input.key_pressed(key) {
-                action = MapAction::AssignToPad { point_index, pad_index: i };
+                action = MapAction::AssignToPad {
+                    point_index,
+                    pad_index: i,
+                };
                 popup.active_point = None;
             }
         }
-        if input.key_pressed(egui::Key::Escape) { popup.active_point = None; }
+        if input.key_pressed(egui::Key::Escape) {
+            popup.active_point = None;
+        }
     });
 
     action
@@ -621,8 +738,8 @@ mod tests {
     fn decay_short_spreads_well() {
         // Key fix: short decays (typical percussion) should NOT cluster near 0
         let d005 = normalize_decay(0.05); // 50ms — typical kick
-        let d02 = normalize_decay(0.2);   // 200ms — typical snare
-        let d1 = normalize_decay(1.0);    // 1s — longer perc
+        let d02 = normalize_decay(0.2); // 200ms — typical snare
+        let d1 = normalize_decay(1.0); // 1s — longer perc
         assert!(d005 > 0.15, "50ms should be well off the top, got {d005}");
         assert!(d02 > 0.3, "200ms should be mid-low, got {d02}");
         assert!(d1 > 0.6, "1s should be in the lower half, got {d1}");
@@ -633,8 +750,8 @@ mod tests {
 
     #[test]
     fn build_map_points_count_matches_library() {
-        use crate::analysis::library::AnalyzedSample;
         use crate::analysis::features::AudioFeatures;
+        use crate::analysis::library::AnalyzedSample;
         use crate::analysis::scanner::SampleEntry;
         use std::collections::HashMap;
         use std::path::PathBuf;
@@ -665,9 +782,16 @@ mod tests {
                 },
                 data: Arc::new(vec![0.5; 4410]),
             };
-            by_category.entry(*cat).or_insert_with(Vec::new).push(sample);
+            by_category
+                .entry(*cat)
+                .or_insert_with(Vec::new)
+                .push(sample);
         }
-        let lib = SampleLibrary { total: 10, by_category, sample_rate: 44100.0 };
+        let lib = SampleLibrary {
+            total: 10,
+            by_category,
+            sample_rate: 44100.0,
+        };
         let points = build_map_points(&lib);
         assert_eq!(points.len(), 10);
         for p in &points {
@@ -688,7 +812,11 @@ mod tests {
 
     #[test]
     fn screen_transform_with_zoom() {
-        let view = MapViewState { zoom: 2.0, pan_x: 0.25, pan_y: 0.25 };
+        let view = MapViewState {
+            zoom: 2.0,
+            pan_x: 0.25,
+            pan_y: 0.25,
+        };
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 200.0));
         let screen = to_screen(0.5, 0.5, &view, rect);
         assert!((screen.x - 200.0).abs() < 0.1);

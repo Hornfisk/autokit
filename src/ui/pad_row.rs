@@ -34,6 +34,12 @@ fn truncate_name(name: &str, max_chars: usize) -> String {
 }
 
 /// Draw a collapsed pad row from snapshot data (no mutex held).
+// Immediate-mode draw function: it takes a flat snapshot of everything it
+// paints for one frame. The 16-argument `draw_toolbar_snapshot` was converted
+// to a view struct because it had five consecutive `bool`s that could be
+// transposed silently; these are shorter and have no same-typed neighbours, so
+// a struct would add indirection without removing a real hazard.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_collapsed_from_snapshot(
     ui: &mut egui::Ui,
     _index: usize,
@@ -99,8 +105,7 @@ pub fn draw_collapsed_from_snapshot(
                 let tag_size = egui::vec2(46.0, 16.0);
                 ui.allocate_ui(egui::vec2(46.0, row_height), |ui| {
                     ui.centered_and_justified(|ui| {
-                        let (tag_rect, _) =
-                            ui.allocate_exact_size(tag_size, egui::Sense::hover());
+                        let (tag_rect, _) = ui.allocate_exact_size(tag_size, egui::Sense::hover());
                         if ui.is_rect_visible(tag_rect) {
                             let painter = ui.painter_at(tag_rect);
                             painter.rect_filled(tag_rect, 2, cat_egui);
@@ -126,7 +131,9 @@ pub fn draw_collapsed_from_snapshot(
                                 ui,
                                 egui::Id::new(("pad_lvl", _index)),
                                 &mut vol,
-                                0.0, 1.0, 1.0,
+                                0.0,
+                                1.0,
+                                1.0,
                                 "Pad volume",
                                 |v| format!("{}", (v * 100.0) as u32),
                                 cat_egui,
@@ -153,7 +160,11 @@ pub fn draw_collapsed_from_snapshot(
                     .fill(egui::Color32::TRANSPARENT)
                     .min_size(egui::vec2(18.0, row_height)),
                 );
-                theme::tip(play_response.clone(), "Preview this pad (or press keyboard key)", tooltips_on);
+                theme::tip(
+                    play_response.clone(),
+                    "Preview this pad (or press keyboard key)",
+                    tooltips_on,
+                );
                 if play_response.clicked() {
                     action = PadRowAction::PlayPad;
                 }
@@ -185,7 +196,20 @@ pub fn draw_collapsed_from_snapshot(
                 // Fixed: strip(3) + space(8) + tag(46) + spacing(6) + play(18+6)
                 //        + name(140+6) + browse(22+6) + dice(46+6) + lock(46+6)
                 // Added: 16px knob + 4px space = 20px
-                const FIXED_W: f32 = 3.0 + 8.0 + 46.0 + 4.0 + 16.0 + 4.0 + 6.0 + 24.0 + 146.0 + 28.0 + 52.0 + 52.0 + 6.0 + 12.0;
+                const FIXED_W: f32 = 3.0
+                    + 8.0
+                    + 46.0
+                    + 4.0
+                    + 16.0
+                    + 4.0
+                    + 6.0
+                    + 24.0
+                    + 146.0
+                    + 28.0
+                    + 52.0
+                    + 52.0
+                    + 6.0
+                    + 12.0;
                 let waveform_width = (total_w - FIXED_W).max(40.0);
                 let wf_color = cat_color.to_egui_alpha((waveform_opacity * 255.0) as u8);
                 waveform::paint_waveform(
@@ -213,7 +237,11 @@ pub fn draw_collapsed_from_snapshot(
                 if browse_response.clicked() {
                     action = PadRowAction::BrowseSample;
                 }
-                theme::tip(browse_response, "Browse for a sample file (or drop one here)", tooltips_on);
+                theme::tip(
+                    browse_response,
+                    "Browse for a sample file (or drop one here)",
+                    tooltips_on,
+                );
 
                 // DICE button — boxed text
                 let dice_response = ui.add(
@@ -233,10 +261,19 @@ pub fn draw_collapsed_from_snapshot(
                 }
                 theme::tip(dice_response, "Randomize this pad", tooltips_on);
 
-                // LOCK button — boxed text, inverted when locked
-                let lock_label = if locked { "LOCK" } else { "LOCK" };
-                let lock_fg = if locked { theme::BG_MAIN } else { theme::TEXT_DIM };
-                let lock_bg = if locked { theme::ACCENT } else { theme::BG_DETAIL };
+                // LOCK button — boxed text, inverted when locked. The label is
+                // the same either way; lock state shows in the colours.
+                let lock_label = "LOCK";
+                let lock_fg = if locked {
+                    theme::BG_MAIN
+                } else {
+                    theme::TEXT_DIM
+                };
+                let lock_bg = if locked {
+                    theme::ACCENT
+                } else {
+                    theme::BG_DETAIL
+                };
                 let lock_stroke = if locked {
                     egui::Stroke::new(1.0, theme::ACCENT)
                 } else {
@@ -257,7 +294,15 @@ pub fn draw_collapsed_from_snapshot(
                 if lock_response.clicked() {
                     action = PadRowAction::ToggleLock;
                 }
-                theme::tip(lock_response, if locked { "Unlock pad (sample will change on dice)" } else { "Lock pad (keep sample on dice)" }, tooltips_on);
+                theme::tip(
+                    lock_response,
+                    if locked {
+                        "Unlock pad (sample will change on dice)"
+                    } else {
+                        "Lock pad (keep sample on dice)"
+                    },
+                    tooltips_on,
+                );
             });
         });
 
@@ -267,7 +312,12 @@ pub fn draw_collapsed_from_snapshot(
         let glow_color = cat_color.to_egui_alpha(glow_alpha);
         ui.painter().rect_filled(
             frame_response.response.rect,
-            egui::CornerRadius { nw: 0, ne: 3, se: 3, sw: 0 },
+            egui::CornerRadius {
+                nw: 0,
+                ne: 3,
+                se: 3,
+                sw: 0,
+            },
             glow_color,
         );
     }
@@ -276,6 +326,12 @@ pub fn draw_collapsed_from_snapshot(
 }
 
 /// Draw the expanded detail panel from snapshot data (no mutex held).
+// Immediate-mode draw function: it takes a flat snapshot of everything it
+// paints for one frame. The 16-argument `draw_toolbar_snapshot` was converted
+// to a view struct because it had five consecutive `bool`s that could be
+// transposed silently; these are shorter and have no same-typed neighbours, so
+// a struct would add indirection without removing a real hazard.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_expanded_from_snapshot(
     ui: &mut egui::Ui,
     index: usize,
@@ -321,7 +377,9 @@ pub fn draw_expanded_from_snapshot(
                         ui,
                         egui::Id::new(("pan", index)),
                         &mut p,
-                        -1.0, 1.0, 0.0,
+                        -1.0,
+                        1.0,
+                        0.0,
                         "PAN",
                         |v| {
                             if v.abs() < 0.01 {
@@ -345,7 +403,9 @@ pub fn draw_expanded_from_snapshot(
                         ui,
                         egui::Id::new(("pitch", index)),
                         &mut pt,
-                        -24.0, 24.0, 0.0,
+                        -24.0,
+                        24.0,
+                        0.0,
                         "PITCH",
                         |v| format!("{:+.0}", v),
                         cat_color.to_egui_alpha(0x88),
@@ -361,7 +421,9 @@ pub fn draw_expanded_from_snapshot(
                         ui,
                         egui::Id::new(("decay", index)),
                         &mut dc,
-                        0.01, 1.0, 1.0,
+                        0.01,
+                        1.0,
+                        1.0,
                         "DECAY",
                         |v| format!("{}%", (v * 100.0) as u32),
                         cat_color.to_egui_alpha(0x88),
@@ -377,7 +439,9 @@ pub fn draw_expanded_from_snapshot(
                         ui,
                         egui::Id::new(("start", index)),
                         &mut st,
-                        0.0, 0.99, 0.0,
+                        0.0,
+                        0.99,
+                        0.0,
                         "START",
                         |v| format!("{}%", (v * 100.0) as u32),
                         cat_color.to_egui_alpha(0x88),
@@ -393,7 +457,9 @@ pub fn draw_expanded_from_snapshot(
                         ui,
                         egui::Id::new(("end", index)),
                         &mut en,
-                        0.01, 1.0, 1.0,
+                        0.01,
+                        1.0,
+                        1.0,
                         "END",
                         |v| format!("{}%", (v * 100.0) as u32),
                         cat_color.to_egui_alpha(0x88),
@@ -416,7 +482,11 @@ pub fn draw_expanded_from_snapshot(
                         .fill(cat_color.to_egui_alpha(0x11))
                         .corner_radius(3),
                     );
-                    theme::tip(resp.clone(), "Randomize within this category only", tooltips_on);
+                    theme::tip(
+                        resp.clone(),
+                        "Randomize within this category only",
+                        tooltips_on,
+                    );
                     if resp.clicked() {
                         action = PadRowAction::DiceCategory;
                     }

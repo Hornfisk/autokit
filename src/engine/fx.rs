@@ -1,44 +1,25 @@
 //! Master FX bus DSP: DJ filter, tempo-synced feedback delay, Schroeder reverb.
 //!
 //! All state is pre-allocated in `prepare()`. `process_sample()` does zero heap
-//! work — safe to call under `assert_process_allocs`. Three processors share
-//! one struct so the master bus gets a single `FxBus::process_sample` call per
-//! sample and the per-sample knob values can be passed in one struct.
+//! work — safe to call under `assert_process_allocs`.
 //!
-//! Signal chain (applied in order inside `process_sample`):
-//!     input → dj_filter → delay (wet mix) → reverb (wet mix) → output
+//! **Routing lives in the caller, not here.** [`FxBus`] is a container: it owns
+//! the three processors and forwards `prepare()`. `Plugin::process` in
+//! `plugin.rs` drives each one individually because Autokit runs a four-bus
+//! send architecture, not a serial chain:
 //!
-//! The DJ filter comes first so its sweep feeds the delay and reverb tails
-//! musically (filter-kill a break and the wet tail goes with it). Delay
-//! feeds reverb so echoes diffuse naturally.
+//! ```text
+//!   voices ─┬─► dry_bypass ─────────────────────────────────┐
+//!           ├─► dry_filter ──────────────┐                  │
+//!           ├─► send_rvb ──► reverb ──┐  │                  │
+//!           └─► send_dly ──► delay  ──┴──┴─► dj_filter ─────┴─► master bus
+//! ```
+//!
+//! Reverb and delay are true sends fed from per-voice send levels, and their
+//! returns join the filter bus so a DJ-filter sweep takes the wet tails with
+//! it. Lanes with the `F` toggle off bypass the filter entirely.
 
 use std::f32::consts::PI;
-
-/// Targets driven by `StepSmoother`s upstream — one value per knob, sampled
-/// once per sample in the master bus loop and passed in here. No smoothing
-/// happens inside this module; it trusts that the caller has already ramped.
-#[derive(Clone, Copy)]
-pub struct FxTargets {
-    /// 0.0 = dry, 1.0 = full wet reverb.
-    pub reverb_mix: f32,
-    /// 0.0 = dry, 1.0 = full wet delay.
-    pub delay_mix: f32,
-    /// Delay time in samples. Caller computes from tempo + sync division.
-    pub delay_samples: f32,
-    /// Bipolar DJ filter: -1.0 = lowpass kill, 0.0 = bypass, +1.0 = highpass kill.
-    pub dj_filter: f32,
-}
-
-impl Default for FxTargets {
-    fn default() -> Self {
-        Self {
-            reverb_mix: 0.0,
-            delay_mix: 0.0,
-            delay_samples: 0.0,
-            dj_filter: 0.0,
-        }
-    }
-}
 
 // ── DJ filter (state-variable, bipolar) ──────────────────────────────────
 //
@@ -57,7 +38,10 @@ struct SvfChannel {
 
 impl SvfChannel {
     const fn new() -> Self {
-        Self { ic1eq: 0.0, ic2eq: 0.0 }
+        Self {
+            ic1eq: 0.0,
+            ic2eq: 0.0,
+        }
     }
 
     fn reset(&mut self) {
@@ -87,6 +71,12 @@ pub struct DjFilter {
     left: SvfChannel,
     right: SvfChannel,
     sample_rate: f32,
+}
+
+impl Default for DjFilter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DjFilter {
@@ -128,6 +118,12 @@ impl DjFilter {
             (log_min + (log_max - log_min) * amount).exp()
         };
 
+        // Clamp below Nyquist before prewarping. `tan(PI * f / sr)` goes
+        // negative once f exceeds sr/2, which flips the SVF's sign and makes
+        // it blow up. DJ_MAX_HZ is 18 kHz, so any host running at or below
+        // 36 kHz (32 kHz and 22.05 kHz are both legal, and offline bounces
+        // use them) would hit this.
+        let cutoff_hz = cutoff_hz.min(self.sample_rate * 0.45);
         let g = (PI * cutoff_hz / self.sample_rate).tan();
 
         let (lp_l, hp_l) = self.left.tick(l, g, k);
@@ -146,7 +142,10 @@ impl DjFilter {
         let wet_gain = (mix_lin * std::f32::consts::FRAC_PI_2).sin();
         let dry_gain = (mix_lin * std::f32::consts::FRAC_PI_2).cos();
 
-        (wet_l * wet_gain + l * dry_gain, wet_r * wet_gain + r * dry_gain)
+        (
+            wet_l * wet_gain + l * dry_gain,
+            wet_r * wet_gain + r * dry_gain,
+        )
     }
 }
 
@@ -167,6 +166,12 @@ pub struct Delay {
     buf_len: usize,
     damp_state_l: f32,
     damp_state_r: f32,
+}
+
+impl Default for Delay {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Delay {
@@ -262,11 +267,17 @@ struct Comb {
 
 impl Comb {
     fn new() -> Self {
-        Self { buf: Vec::new(), idx: 0, lp_state: 0.0 }
+        Self {
+            buf: Vec::new(),
+            idx: 0,
+            lp_state: 0.0,
+        }
     }
 
     fn prepare(&mut self, size: usize) {
-        self.buf.resize(size, 0.0);
+        // Never size to zero: `tick` indexes `buf[idx]` unconditionally, and
+        // a low enough sample rate makes `tuning * scale` truncate to 0.
+        self.buf.resize(size.max(1), 0.0);
         self.buf.fill(0.0);
         self.idx = 0;
         self.lp_state = 0.0;
@@ -274,6 +285,9 @@ impl Comb {
 
     #[inline]
     fn tick(&mut self, x: f32) -> f32 {
+        if self.buf.is_empty() {
+            return 0.0;
+        }
         let out = self.buf[self.idx];
         // Damped feedback — the comb's "high-frequency absorption" that
         // turns a pure comb into a reverb-ish decay.
@@ -294,17 +308,24 @@ struct Allpass {
 
 impl Allpass {
     fn new() -> Self {
-        Self { buf: Vec::new(), idx: 0 }
+        Self {
+            buf: Vec::new(),
+            idx: 0,
+        }
     }
 
     fn prepare(&mut self, size: usize) {
-        self.buf.resize(size, 0.0);
+        // See `Comb::prepare` — zero-length buffers would panic in `tick`.
+        self.buf.resize(size.max(1), 0.0);
         self.buf.fill(0.0);
         self.idx = 0;
     }
 
     #[inline]
     fn tick(&mut self, x: f32) -> f32 {
+        if self.buf.is_empty() {
+            return 0.0;
+        }
         let bufout = self.buf[self.idx];
         let out = -x + bufout;
         self.buf[self.idx] = x + bufout * ALLPASS_FEEDBACK;
@@ -321,6 +342,12 @@ pub struct Reverb {
     combs_r: [Comb; 4],
     allpasses_l: [Allpass; 2],
     allpasses_r: [Allpass; 2],
+}
+
+impl Default for Reverb {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Reverb {
@@ -383,6 +410,12 @@ pub struct FxBus {
     pub reverb: Reverb,
 }
 
+impl Default for FxBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FxBus {
     pub fn new() -> Self {
         Self {
@@ -392,33 +425,166 @@ impl FxBus {
         }
     }
 
+    /// Recompute every processor's state for a new sample rate. Called from
+    /// both `Plugin::initialize` and `Plugin::reset` — the latter matters
+    /// because it flushes delay and reverb tails across a transport jump.
     pub fn prepare(&mut self, sample_rate: f32) {
         self.dj_filter.prepare(sample_rate);
         self.delay.prepare(sample_rate);
         self.reverb.prepare(sample_rate);
     }
+}
 
-    /// Process one stereo sample through DJ filter → delay → reverb, with
-    /// dry/wet mixing applied per-stage. `targets` is sampled once per
-    /// sample by the caller (already StepSmoother-ramped).
-    #[inline]
-    pub fn process_sample(&mut self, l: f32, r: f32, targets: &FxTargets) -> (f32, f32) {
-        // Stage 1: DJ filter (replaces dry signal — it's a color/kill effect,
-        // not a send).
-        let (mut l, mut r) = self.dj_filter.process_sample(l, r, targets.dj_filter);
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        // Stage 2: Delay send — wet is a mix, dry passes through.
-        let (dwet_l, dwet_r) = self.delay.process_sample(l, r, targets.delay_samples);
-        let dmix = targets.delay_mix.clamp(0.0, 1.0);
-        l += dwet_l * dmix;
-        r += dwet_r * dmix;
+    /// Peak absolute value, and whether anything went non-finite.
+    fn scan(samples: &[f32]) -> (f32, bool) {
+        let mut peak = 0.0f32;
+        let mut bad = false;
+        for &s in samples {
+            if !s.is_finite() {
+                bad = true;
+            } else {
+                peak = peak.max(s.abs());
+            }
+        }
+        (peak, bad)
+    }
 
-        // Stage 3: Reverb send — same pattern.
-        let (rwet_l, rwet_r) = self.reverb.process_sample(l, r);
-        let rmix = targets.reverb_mix.clamp(0.0, 1.0);
-        l += rwet_l * rmix;
-        r += rwet_r * rmix;
+    fn sine(len: usize, freq: f32, sr: f32) -> Vec<f32> {
+        (0..len)
+            .map(|i| (std::f32::consts::TAU * freq * i as f32 / sr).sin() * 0.5)
+            .collect()
+    }
 
-        (l, r)
+    /// Regression: `tan(PI * f / sr)` goes negative once the cutoff passes
+    /// Nyquist, which flips the SVF's sign and makes it diverge. DJ_MAX_HZ is
+    /// 18 kHz, so every sample rate at or below 36 kHz used to blow up at the
+    /// highpass end of the knob.
+    #[test]
+    fn dj_filter_stays_stable_below_36khz() {
+        for &sr in &[22_050.0f32, 32_000.0, 44_100.0, 48_000.0, 96_000.0] {
+            for &knob in &[-1.0f32, -0.5, 0.0, 0.5, 1.0] {
+                let mut f = DjFilter::new();
+                f.prepare(sr);
+                let input = sine(2048, 440.0, sr);
+                let mut out = Vec::with_capacity(input.len());
+                for &s in &input {
+                    let (l, _) = f.process_sample(s, s, knob);
+                    out.push(l);
+                }
+                let (peak, bad) = scan(&out);
+                assert!(!bad, "sr={sr} knob={knob}: produced NaN/inf");
+                assert!(peak < 10.0, "sr={sr} knob={knob}: diverged, peak={peak}");
+            }
+        }
+    }
+
+    #[test]
+    fn dj_filter_at_zero_is_effectively_bypass() {
+        let sr = 44_100.0;
+        let mut f = DjFilter::new();
+        f.prepare(sr);
+        let input = sine(1024, 1000.0, sr);
+        let mut max_err = 0.0f32;
+        for &s in &input {
+            let (l, r) = f.process_sample(s, s, 0.0);
+            max_err = max_err.max((l - s).abs()).max((r - s).abs());
+        }
+        assert!(
+            max_err < 1e-6,
+            "knob=0 should pass dry through, max error {max_err}"
+        );
+    }
+
+    /// Regression: `Comb::tick` / `Allpass::tick` indexed `buf[idx]`
+    /// unconditionally. A sample rate low enough to truncate a tuning to zero
+    /// samples panicked on the audio thread.
+    #[test]
+    fn reverb_survives_a_sample_rate_that_truncates_tunings_to_zero() {
+        let mut rv = Reverb::new();
+        rv.prepare(1.0); // scale = 1/44100 — every tuning truncates to 0
+        for _ in 0..256 {
+            let (l, r) = rv.process_sample(0.5, 0.5);
+            assert!(l.is_finite() && r.is_finite());
+        }
+    }
+
+    #[test]
+    fn reverb_before_prepare_does_not_panic() {
+        let mut rv = Reverb::new();
+        let (l, r) = rv.process_sample(1.0, 1.0);
+        assert_eq!(
+            (l, r),
+            (0.0, 0.0),
+            "unprepared reverb should be silent, not panic"
+        );
+    }
+
+    #[test]
+    fn reverb_decays_toward_silence_after_input_stops() {
+        let sr = 44_100.0;
+        let mut rv = Reverb::new();
+        rv.prepare(sr);
+        for _ in 0..1024 {
+            rv.process_sample(1.0, 1.0);
+        }
+        let mut tail_peak = 0.0f32;
+        for i in 0..(sr as usize * 8) {
+            let (l, r) = rv.process_sample(0.0, 0.0);
+            assert!(
+                l.is_finite() && r.is_finite(),
+                "reverb went non-finite at {i}"
+            );
+            tail_peak = tail_peak.max(l.abs()).max(r.abs());
+        }
+        assert!(
+            tail_peak < 10.0,
+            "reverb tail should not run away, peak {tail_peak}"
+        );
+    }
+
+    #[test]
+    fn delay_with_no_buffer_is_silent_rather_than_panicking() {
+        let mut d = Delay::new();
+        let (l, r) = d.process_sample(1.0, 1.0, 100.0);
+        assert_eq!((l, r), (0.0, 0.0));
+    }
+
+    #[test]
+    fn delay_repeats_the_input_after_the_requested_time() {
+        let sr = 44_100.0;
+        let mut d = Delay::new();
+        d.prepare(sr);
+        let delay_samples = 100.0;
+
+        // One impulse in.
+        let (_, _) = d.process_sample(1.0, 1.0, delay_samples);
+        let mut echo_at = None;
+        for i in 1..400 {
+            let (l, _) = d.process_sample(0.0, 0.0, delay_samples);
+            if l.abs() > 0.1 && echo_at.is_none() {
+                echo_at = Some(i);
+            }
+        }
+        let echo_at = echo_at.expect("delay should produce an echo");
+        assert!(
+            (echo_at as f32 - delay_samples).abs() <= 2.0,
+            "echo should land near {delay_samples} samples, got {echo_at}"
+        );
+    }
+
+    #[test]
+    fn delay_clamps_a_request_longer_than_its_buffer() {
+        let sr = 44_100.0;
+        let mut d = Delay::new();
+        d.prepare(sr);
+        // Far longer than DELAY_MAX_SECS.
+        for _ in 0..512 {
+            let (l, r) = d.process_sample(0.5, 0.5, sr * 60.0);
+            assert!(l.is_finite() && r.is_finite());
+        }
     }
 }

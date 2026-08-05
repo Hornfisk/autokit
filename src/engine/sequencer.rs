@@ -1,35 +1,34 @@
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::engine::kit::{DrumKit, NUM_PADS};
-use crate::engine::sampler::VoicePool;
-use crate::util::history::{StepSnapshot, LaneSnapshot, PatternSnapshot, SequencerSnapshot};
+use crate::engine::sampler::{Trigger, VoicePool};
 
 /// Conditional trig types — Elektron-style step conditions.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 pub enum ConditionTrig {
-    Always,        // Default — fires every loop
-    Every(u8),     // 1:N — fires every Nth loop (N = 2, 4, 8)
-    NotEvery(u8),  // !1:N — fires on all loops EXCEPT every Nth
-    Fill,          // Fires only when FILL mode is active
-    NotFill,       // Fires only when FILL mode is NOT active
-}
-
-impl Default for ConditionTrig {
-    fn default() -> Self {
-        Self::Always
-    }
+    #[default]
+    Always, // Default — fires every loop
+    Every(u8),    // 1:N — fires every Nth loop (N = 2, 4, 8)
+    NotEvery(u8), // !1:N — fires on all loops EXCEPT every Nth
+    Fill,         // Fires only when FILL mode is active
+    NotFill,      // Fires only when FILL mode is NOT active
 }
 
 impl ConditionTrig {
     /// All conditions in cycle order for the GUI selector.
     pub const CYCLE: &'static [ConditionTrig] = &[
         Self::Always,
-        Self::Every(2), Self::Every(4), Self::Every(8),
-        Self::NotEvery(2), Self::NotEvery(4), Self::NotEvery(8),
-        Self::Fill, Self::NotFill,
+        Self::Every(2),
+        Self::Every(4),
+        Self::Every(8),
+        Self::NotEvery(2),
+        Self::NotEvery(4),
+        Self::NotEvery(8),
+        Self::Fill,
+        Self::NotFill,
     ];
 
     /// Short display label for grid cells and selector button.
@@ -53,6 +52,17 @@ impl ConditionTrig {
         let idx = Self::CYCLE.iter().position(|c| c == self).unwrap_or(0);
         Self::CYCLE[(idx + 1) % Self::CYCLE.len()]
     }
+
+    /// Coerce an out-of-range divisor to `Always`. `Every(0)` / `NotEvery(0)`
+    /// are unreachable through the UI (which only offers N ∈ {2,4,8}) but are
+    /// representable in JSON, and `loop_count % 0` divides by zero on the
+    /// audio thread. See also the `n.max(1)` guard in `evaluate_condition`.
+    fn sanitized(self) -> Self {
+        match self {
+            Self::Every(0) | Self::NotEvery(0) => Self::Always,
+            other => other,
+        }
+    }
 }
 
 /// A single step in the sequencer.
@@ -61,13 +71,13 @@ pub struct Step {
     pub enabled: bool,
     pub velocity: f32,
     pub probability: f32,
-    pub pan: Option<f32>,        // None = inherit pad default, Some = p-lock
-    pub pitch: Option<f32>,      // None = inherit pad default, Some = p-lock (semitones)
+    pub pan: Option<f32>,   // None = inherit pad default, Some = p-lock
+    pub pitch: Option<f32>, // None = inherit pad default, Some = p-lock (semitones)
     pub condition: ConditionTrig,
     #[serde(default)]
-    pub fx_rvb: Option<f32>,     // None = inherit pad fx_send_rvb, Some = override
+    pub fx_rvb: Option<f32>, // None = inherit pad fx_send_rvb, Some = override
     #[serde(default)]
-    pub fx_dly: Option<f32>,     // None = inherit pad fx_send_dly, Some = override
+    pub fx_dly: Option<f32>, // None = inherit pad fx_send_dly, Some = override
     #[serde(default)]
     pub fx_filter: Option<bool>, // None = inherit pad fx_filter, Some = override
 }
@@ -88,11 +98,50 @@ impl Default for Step {
     }
 }
 
+/// Clamp a float into `0.0..=1.0`, substituting `fallback` for NaN.
+fn clamp_unit(v: f32, fallback: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(0.0, 1.0)
+    } else {
+        fallback
+    }
+}
+
+impl Step {
+    /// Force every field back into its documented range. See
+    /// [`PatternBank::sanitize`] for why this exists.
+    fn sanitize(&mut self) {
+        self.velocity = clamp_unit(self.velocity, 0.8);
+        self.probability = clamp_unit(self.probability, 1.0);
+        self.condition = self.condition.sanitized();
+        if let Some(p) = self.pan {
+            self.pan = Some(if p.is_finite() {
+                p.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            });
+        }
+        if let Some(p) = self.pitch {
+            self.pitch = Some(if p.is_finite() {
+                p.clamp(-24.0, 24.0)
+            } else {
+                0.0
+            });
+        }
+        if let Some(v) = self.fx_rvb {
+            self.fx_rvb = Some(clamp_unit(v, 0.0));
+        }
+        if let Some(v) = self.fx_dly {
+            self.fx_dly = Some(clamp_unit(v, 0.0));
+        }
+    }
+}
+
 /// One lane = one pad's 16-step sequence.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Lane {
     pub pad_index: usize,
-    pub steps: [Step; 16],
+    pub steps: [Step; NUM_STEPS],
     pub muted: bool,
     #[serde(default)]
     pub solo: bool,
@@ -111,13 +160,22 @@ impl Lane {
     pub fn new(pad_index: usize) -> Self {
         Self {
             pad_index,
-            steps: [Step::default(); 16],
+            steps: [Step::default(); NUM_STEPS],
             muted: false,
             solo: false,
             fx_send_rvb: 0.0,
             fx_send_dly: 0.0,
             fx_filter: false,
         }
+    }
+
+    /// Force every field back into range. See [`PatternBank::sanitize`].
+    fn sanitize(&mut self) {
+        for step in &mut self.steps {
+            step.sanitize();
+        }
+        self.fx_send_rvb = clamp_unit(self.fx_send_rvb, 0.0);
+        self.fx_send_dly = clamp_unit(self.fx_send_dly, 0.0);
     }
 }
 
@@ -129,17 +187,17 @@ pub const NUM_PATTERNS: usize = 16;
 /// per-lane) so the master FX timing is independent of which lane fires.
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct MasterAutomation {
-    pub reverb_mix: [Option<f32>; 16],
-    pub delay_mix: [Option<f32>; 16],
-    pub dj_filter: [Option<f32>; 16],
+    pub reverb_mix: [Option<f32>; NUM_STEPS],
+    pub delay_mix: [Option<f32>; NUM_STEPS],
+    pub dj_filter: [Option<f32>; NUM_STEPS],
 }
 
 impl Default for MasterAutomation {
     fn default() -> Self {
         Self {
-            reverb_mix: [None; 16],
-            delay_mix: [None; 16],
-            dj_filter: [None; 16],
+            reverb_mix: [None; NUM_STEPS],
+            delay_mix: [None; NUM_STEPS],
+            dj_filter: [None; NUM_STEPS],
         }
     }
 }
@@ -180,6 +238,12 @@ pub struct Pattern {
     pub master_fx_base: MasterFxBase,
 }
 
+impl Default for Pattern {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Pattern {
     pub fn new() -> Self {
         Self {
@@ -192,7 +256,28 @@ impl Pattern {
 
     /// Returns true if any step in any lane is enabled.
     pub fn has_data(&self) -> bool {
-        self.lanes.iter().any(|lane| lane.steps.iter().any(|s| s.enabled))
+        self.lanes
+            .iter()
+            .any(|lane| lane.steps.iter().any(|s| s.enabled))
+    }
+
+    /// Force the lane list to exactly `NUM_PADS` correctly-indexed lanes and
+    /// clamp every value. See [`PatternBank::sanitize`].
+    pub fn sanitize(&mut self) {
+        self.lanes.truncate(NUM_PADS);
+        while self.lanes.len() < NUM_PADS {
+            let idx = self.lanes.len();
+            self.lanes.push(Lane::new(idx));
+        }
+        for (i, lane) in self.lanes.iter_mut().enumerate() {
+            // Lane N always drives pad N. `pad_index` is redundant with the
+            // slot but is serialized, so a hand-edited or corrupt file can
+            // disagree — and the audio thread indexes `kit.pads` and
+            // `trigger_flags` with it directly.
+            lane.pad_index = i;
+            lane.sanitize();
+        }
+        self.swing = clamp_unit(self.swing, 0.0);
     }
 }
 
@@ -204,6 +289,12 @@ pub struct PatternBank {
     pub queued: Option<usize>,
 }
 
+impl Default for PatternBank {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PatternBank {
     pub fn new() -> Self {
         Self {
@@ -213,43 +304,82 @@ impl PatternBank {
         }
     }
 
+    /// Restore every invariant the audio thread relies on.
+    ///
+    /// **Call this after any deserialization** — the DAW `#[persist]` blob,
+    /// a preset file, or a single-pattern file. All three are user-reachable
+    /// (hand-edited JSON, a file from another Autokit version, a truncated
+    /// write) and the audio thread indexes `patterns[active]`,
+    /// `kit.pads[lane.pad_index]` and `trigger_flags[lane.pad_index]`
+    /// directly. Without this, a bad index is an audio-thread panic, which on
+    /// the JACK backend kills the process callback and wedges the user's
+    /// PipeWire graph.
+    pub fn sanitize(&mut self) {
+        self.patterns.truncate(NUM_PATTERNS);
+        while self.patterns.len() < NUM_PATTERNS {
+            self.patterns.push(Pattern::new());
+        }
+        for pattern in &mut self.patterns {
+            pattern.sanitize();
+        }
+        if self.active >= self.patterns.len() {
+            self.active = 0;
+        }
+        if self.queued.is_some_and(|q| q >= self.patterns.len()) {
+            self.queued = None;
+        }
+    }
+
+    /// Index of the active pattern, clamped into range. `sanitize()` should
+    /// already guarantee this; the clamp is belt-and-braces because the
+    /// callers run on the audio thread.
+    #[inline]
+    fn active_index(&self) -> usize {
+        if self.active < self.patterns.len() {
+            self.active
+        } else {
+            0
+        }
+    }
+
     pub fn active_pattern(&self) -> &Pattern {
-        &self.patterns[self.active]
+        &self.patterns[self.active_index()]
     }
 
     pub fn active_pattern_mut(&mut self) -> &mut Pattern {
-        &mut self.patterns[self.active]
+        let idx = self.active_index();
+        &mut self.patterns[idx]
     }
 
     pub fn snapshot(&self) -> crate::util::history::SequencerSnapshot {
         crate::util::history::SequencerSnapshot {
-            patterns: self.patterns.iter().map(|pat| {
-                crate::util::history::PatternSnapshot {
-                    lanes: core::array::from_fn(|i| {
-                        crate::util::history::LaneSnapshot {
-                            steps: core::array::from_fn(|j| crate::util::history::StepSnapshot {
-                                enabled: pat.lanes[i].steps[j].enabled,
-                                velocity: pat.lanes[i].steps[j].velocity,
-                                probability: pat.lanes[i].steps[j].probability,
-                                pan: pat.lanes[i].steps[j].pan,
-                                pitch: pat.lanes[i].steps[j].pitch,
-                                condition: pat.lanes[i].steps[j].condition,
-                                fx_rvb: pat.lanes[i].steps[j].fx_rvb,
-                                fx_dly: pat.lanes[i].steps[j].fx_dly,
-                                fx_filter: pat.lanes[i].steps[j].fx_filter,
-                            }),
-                            muted: pat.lanes[i].muted,
-                            solo: pat.lanes[i].solo,
-                            fx_send_rvb: pat.lanes[i].fx_send_rvb,
-                            fx_send_dly: pat.lanes[i].fx_send_dly,
-                            fx_filter: pat.lanes[i].fx_filter,
-                        }
+            patterns: self
+                .patterns
+                .iter()
+                .map(|pat| crate::util::history::PatternSnapshot {
+                    lanes: core::array::from_fn(|i| crate::util::history::LaneSnapshot {
+                        steps: core::array::from_fn(|j| crate::util::history::StepSnapshot {
+                            enabled: pat.lanes[i].steps[j].enabled,
+                            velocity: pat.lanes[i].steps[j].velocity,
+                            probability: pat.lanes[i].steps[j].probability,
+                            pan: pat.lanes[i].steps[j].pan,
+                            pitch: pat.lanes[i].steps[j].pitch,
+                            condition: pat.lanes[i].steps[j].condition,
+                            fx_rvb: pat.lanes[i].steps[j].fx_rvb,
+                            fx_dly: pat.lanes[i].steps[j].fx_dly,
+                            fx_filter: pat.lanes[i].steps[j].fx_filter,
+                        }),
+                        muted: pat.lanes[i].muted,
+                        solo: pat.lanes[i].solo,
+                        fx_send_rvb: pat.lanes[i].fx_send_rvb,
+                        fx_send_dly: pat.lanes[i].fx_send_dly,
+                        fx_filter: pat.lanes[i].fx_filter,
                     }),
                     swing: pat.swing,
                     master_automation: pat.master_automation,
                     master_fx_base: pat.master_fx_base,
-                }
-            }).collect(),
+                })
+                .collect(),
             active_pattern: self.active,
         }
     }
@@ -289,9 +419,31 @@ fn advance_pattern_if_queued(bank: &mut PatternBank) {
     }
 }
 
-/// The sequencer — owns playback state; pattern data lives in PatternBank.
+/// Host transport state for a single buffer.
+///
+/// Grouped rather than passed as five positional arguments — `buffer_len`,
+/// `tempo`, `pos_beats` and `sample_rate` are all numeric and were easy to
+/// transpose at a call site.
+#[derive(Clone, Copy, Debug)]
+pub struct Transport {
+    pub buffer_len: usize,
+    /// Whether the host transport is rolling.
+    pub playing: bool,
+    /// Host tempo in BPM. `None` means the host didn't report one.
+    pub tempo: Option<f64>,
+    /// Host position in quarter notes. `None` means free-running.
+    pub pos_beats: Option<f64>,
+    pub sample_rate: f32,
+}
+
+/// The sequencer — owns playback state only.
+///
+/// Pattern data lives in `SharedState::pattern_bank` and is passed to
+/// [`Sequencer::process_buffer_with_patterns`] per buffer. Until 0.5.5 this
+/// struct also carried its own `bank`, which nothing in the audio or UI path
+/// ever read or wrote — with the result that the undo snapshot taken when a
+/// scan completed captured that empty bank instead of the user's patterns.
 pub struct Sequencer {
-    pub bank: PatternBank,
     playing: bool,
     current_step: usize,
     tick_accumulator: f64,
@@ -303,10 +455,15 @@ pub struct Sequencer {
     loop_count: u64,
 }
 
+impl Default for Sequencer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Sequencer {
     pub fn new() -> Self {
         Self {
-            bank: PatternBank::new(),
             playing: false,
             current_step: 0,
             tick_accumulator: 0.0,
@@ -327,153 +484,36 @@ impl Sequencer {
         self.playing = false;
     }
 
-    /// Access lanes of the active pattern (convenience for existing code).
-    pub fn lanes(&self) -> &[Lane] {
-        &self.bank.active_pattern().lanes
-    }
-
-    pub fn lanes_mut(&mut self) -> &mut Vec<Lane> {
-        &mut self.bank.active_pattern_mut().lanes
-    }
-
-    pub fn swing(&self) -> f32 {
-        self.bank.active_pattern().swing
-    }
-
-    pub fn set_swing(&mut self, value: f32) {
-        self.bank.active_pattern_mut().swing = value;
-    }
-
-    /// Compute duration of a step in samples, accounting for swing.
-    /// Even steps (0,2,4,...) are lengthened, odd steps (1,3,5,...) are shortened.
-    pub fn step_duration_samples(&self, step: usize, tempo: f64, sample_rate: f32) -> f64 {
-        let base = sample_rate as f64 * 60.0 / tempo / 4.0;
-        let swing = self.bank.active_pattern().swing;
-        let swing_offset = swing as f64 * base * 0.5;
-        if step % 2 == 0 {
-            base + swing_offset
-        } else {
-            base - swing_offset
-        }
-    }
-
     pub(crate) fn evaluate_condition(&self, cond: ConditionTrig) -> bool {
         match cond {
             ConditionTrig::Always => true,
-            ConditionTrig::Every(n) => self.loop_count % n as u64 == 0,
-            ConditionTrig::NotEvery(n) => self.loop_count % n as u64 != 0,
+            // `n.max(1)`: a zero divisor is unreachable through the UI and is
+            // stripped by `ConditionTrig::sanitized`, but `% 0` panics on the
+            // audio thread so the guard stays here too.
+            ConditionTrig::Every(n) => self.loop_count.is_multiple_of(n.max(1) as u64),
+            ConditionTrig::NotEvery(n) => !self.loop_count.is_multiple_of(n.max(1) as u64),
             ConditionTrig::Fill => self.fill_active,
             ConditionTrig::NotFill => !self.fill_active,
         }
-    }
-
-    /// Process one audio buffer using self.bank. Scans for step boundaries, triggers voices.
-    /// Returns the number of voices triggered (useful for testing/debug).
-    pub fn process_buffer(
-        &mut self,
-        buffer_len: usize,
-        host_playing: bool,
-        tempo: Option<f64>,
-        pos_beats: Option<f64>,
-        sample_rate: f32,
-        voices: &mut VoicePool,
-        kit: &DrumKit,
-        trigger_flags: &[AtomicU8; NUM_PADS],
-    ) -> usize {
-        let tempo = match (host_playing, tempo) {
-            (true, Some(t)) if t > 0.0 => t,
-            _ => {
-                self.playing = false;
-                return 0;
-            }
-        };
-
-        // Sync to host position — always derive step from host beats (no drift accumulation)
-        let mut fire_steps = [0usize; NUM_STEPS];
-        let mut fire_count = 0usize;
-        if let Some(beats) = pos_beats {
-            if beats < 0.0 {
-                self.playing = false;
-                return 0;
-            }
-            let sixteenths = beats * 4.0;
-            let swing = self.bank.active_pattern().swing as f64;
-            let (host_step, frac) = Self::beats_to_swung_step(sixteenths, swing);
-
-            self.current_step = host_step;
-            let step_dur = self.step_duration_samples(host_step, tempo, sample_rate);
-            self.tick_accumulator = frac * step_dur;
-
-            if !self.playing {
-                fire_steps[fire_count] = host_step;
-                fire_count += 1;
-            } else if host_step != self.last_host_step {
-                let prev = self.last_host_step;
-                let mut s = (prev + 1) % 16;
-                loop {
-                    if s == 0 {
-                        self.loop_count += 1;
-                        advance_pattern_if_queued(&mut self.bank);
-                    }
-                    if fire_count < NUM_STEPS {
-                        fire_steps[fire_count] = s;
-                        fire_count += 1;
-                    }
-                    if s == host_step { break; }
-                    s = (s + 1) % 16;
-                }
-            }
-
-            self.last_host_step = host_step;
-            self.last_pos_beats = beats;
-        }
-
-        self.playing = true;
-        let mut triggered = 0usize;
-
-        for &step in &fire_steps[..fire_count] {
-            self.current_step = step;
-            triggered += self.fire_step(0, voices, kit, trigger_flags);
-        }
-        if fire_count > 0 {
-            self.current_step = fire_steps[fire_count - 1];
-        }
-
-        for sample_offset in 0..buffer_len {
-            self.tick_accumulator += 1.0;
-            let step_dur = self.step_duration_samples(self.current_step, tempo, sample_rate);
-
-            if self.tick_accumulator >= step_dur {
-                self.tick_accumulator -= step_dur;
-                self.current_step = (self.current_step + 1) % 16;
-                self.last_host_step = self.current_step;
-
-                if self.current_step == 0 {
-                    self.loop_count += 1;
-                    advance_pattern_if_queued(&mut self.bank);
-                }
-
-                triggered += self.fire_step(sample_offset, voices, kit, trigger_flags);
-            }
-        }
-
-        triggered
     }
 
     /// Process one audio buffer using pattern data from an external PatternBank.
     /// Used when patterns live in SharedState; the Sequencer owns only playback state.
     pub fn process_buffer_with_patterns(
         &mut self,
-        buffer_len: usize,
-        host_playing: bool,
-        tempo: Option<f64>,
-        pos_beats: Option<f64>,
-        sample_rate: f32,
+        transport: &Transport,
         voices: &mut VoicePool,
         kit: &DrumKit,
         bank: &mut PatternBank,
         trigger_flags: &[AtomicU8; NUM_PADS],
     ) -> usize {
+        let Transport {
+            buffer_len,
+            playing: host_playing,
+            tempo,
+            pos_beats,
+            sample_rate,
+        } = *transport;
         let tempo = match (host_playing, tempo) {
             (true, Some(t)) if t > 0.0 => t,
             _ => {
@@ -494,7 +534,12 @@ impl Sequencer {
             let (host_step, frac) = Self::beats_to_swung_step(sixteenths, swing);
 
             self.current_step = host_step;
-            let step_dur = self.step_duration_with_swing(host_step, tempo, sample_rate, bank.active_pattern().swing);
+            let step_dur = self.step_duration_with_swing(
+                host_step,
+                tempo,
+                sample_rate,
+                bank.active_pattern().swing,
+            );
             self.tick_accumulator = frac * step_dur;
 
             if !self.playing {
@@ -502,7 +547,7 @@ impl Sequencer {
                 fire_count += 1;
             } else if host_step != self.last_host_step {
                 let prev = self.last_host_step;
-                let mut s = (prev + 1) % 16;
+                let mut s = (prev + 1) % NUM_STEPS;
                 loop {
                     if s == 0 {
                         self.loop_count += 1;
@@ -512,8 +557,10 @@ impl Sequencer {
                         fire_steps[fire_count] = s;
                         fire_count += 1;
                     }
-                    if s == host_step { break; }
-                    s = (s + 1) % 16;
+                    if s == host_step {
+                        break;
+                    }
+                    s = (s + 1) % NUM_STEPS;
                 }
             }
 
@@ -535,11 +582,16 @@ impl Sequencer {
 
         for sample_offset in 0..buffer_len {
             self.tick_accumulator += 1.0;
-            let step_dur = self.step_duration_with_swing(self.current_step, tempo, sample_rate, bank.active_pattern().swing);
+            let step_dur = self.step_duration_with_swing(
+                self.current_step,
+                tempo,
+                sample_rate,
+                bank.active_pattern().swing,
+            );
 
             if self.tick_accumulator >= step_dur {
                 self.tick_accumulator -= step_dur;
-                self.current_step = (self.current_step + 1) % 16;
+                self.current_step = (self.current_step + 1) % NUM_STEPS;
                 // Keep last_host_step in sync so the next buffer's catch-up
                 // doesn't re-fire a step the accumulator already advanced past.
                 self.last_host_step = self.current_step;
@@ -549,17 +601,27 @@ impl Sequencer {
                     advance_pattern_if_queued(bank);
                 }
 
-                triggered += self.fire_step_from_bank(sample_offset, voices, kit, bank, trigger_flags);
+                triggered +=
+                    self.fire_step_from_bank(sample_offset, voices, kit, bank, trigger_flags);
             }
         }
 
         triggered
     }
 
-    fn step_duration_with_swing(&self, step: usize, tempo: f64, sample_rate: f32, swing: f32) -> f64 {
+    /// Duration of one step in samples, accounting for swing. Even steps
+    /// (0,2,4,…) are lengthened and odd steps shortened by the same amount,
+    /// so a full 16-step bar always spans the same time.
+    pub fn step_duration_with_swing(
+        &self,
+        step: usize,
+        tempo: f64,
+        sample_rate: f32,
+        swing: f32,
+    ) -> f64 {
         let base = sample_rate as f64 * 60.0 / tempo / 4.0;
         let swing_offset = swing as f64 * base * 0.5;
-        if step % 2 == 0 {
+        if step.is_multiple_of(2) {
             base + swing_offset
         } else {
             base - swing_offset
@@ -569,7 +631,7 @@ impl Sequencer {
     /// Map a host beat position to a swing-adjusted (step, fractional_position) pair.
     /// Without this, `sixteenths.floor()` snaps to a straight grid and ignores swing.
     fn beats_to_swung_step(sixteenths: f64, swing: f64) -> (usize, f64) {
-        let bar_pos = sixteenths.rem_euclid(16.0);
+        let bar_pos = sixteenths.rem_euclid(NUM_STEPS as f64);
         let pair = (bar_pos / 2.0).floor() as usize;
         let pos_in_pair = bar_pos - pair as f64 * 2.0;
         let even_len = 1.0 + swing * 0.5;
@@ -589,127 +651,12 @@ impl Sequencer {
         bank: &PatternBank,
         trigger_flags: &[AtomicU8; NUM_PADS],
     ) -> usize {
-        let step_idx = self.current_step;
+        let step_idx = self.current_step.min(NUM_STEPS - 1);
         let pattern = bank.active_pattern();
         let any_solo = pattern.lanes.iter().any(|l| l.solo);
         let mut count = 0;
 
-        for i in 0..pattern.lanes.len() {
-            let lane = &pattern.lanes[i];
-            if any_solo && !lane.solo { continue; }
-            if lane.muted { continue; }
-
-            let step = &lane.steps[step_idx];
-            if !step.enabled { continue; }
-
-            if !self.evaluate_condition(step.condition) { continue; }
-
-            if step.probability < 1.0 {
-                let roll: f32 = self.rng.random();
-                if roll >= step.probability { continue; }
-            }
-
-            let velocity = step.velocity;
-            let pad_index = lane.pad_index;
-            voices.trigger(
-                pad_index, velocity, kit, sample_offset,
-                step.pan, step.pitch, step.fx_rvb, step.fx_dly, step.fx_filter,
-                lane.fx_send_rvb, lane.fx_send_dly, lane.fx_filter,
-            );
-            trigger_flags[pad_index].fetch_add(1, Ordering::Relaxed);
-            count += 1;
-        }
-        count
-    }
-
-    /// Capture the undoable sequencer state (all patterns).
-    pub fn snapshot(&self) -> SequencerSnapshot {
-        let patterns: Vec<PatternSnapshot> = self.bank.patterns.iter().map(|pat| {
-            let lanes: [LaneSnapshot; NUM_PADS] = core::array::from_fn(|i| {
-                let steps: [StepSnapshot; 16] = core::array::from_fn(|j| StepSnapshot {
-                    enabled: pat.lanes[i].steps[j].enabled,
-                    velocity: pat.lanes[i].steps[j].velocity,
-                    probability: pat.lanes[i].steps[j].probability,
-                    pan: pat.lanes[i].steps[j].pan,
-                    pitch: pat.lanes[i].steps[j].pitch,
-                    condition: pat.lanes[i].steps[j].condition,
-                    fx_rvb: pat.lanes[i].steps[j].fx_rvb,
-                    fx_dly: pat.lanes[i].steps[j].fx_dly,
-                    fx_filter: pat.lanes[i].steps[j].fx_filter,
-                });
-                LaneSnapshot {
-                    steps,
-                    muted: pat.lanes[i].muted,
-                    solo: pat.lanes[i].solo,
-                    fx_send_rvb: pat.lanes[i].fx_send_rvb,
-                    fx_send_dly: pat.lanes[i].fx_send_dly,
-                    fx_filter: pat.lanes[i].fx_filter,
-                }
-            });
-            PatternSnapshot {
-                lanes,
-                swing: pat.swing,
-                master_automation: pat.master_automation,
-                master_fx_base: pat.master_fx_base,
-            }
-        }).collect();
-
-        SequencerSnapshot {
-            patterns,
-            active_pattern: self.bank.active,
-        }
-    }
-
-    /// Restore sequencer state from a snapshot. Preserves playback state.
-    pub fn restore(&mut self, snapshot: &SequencerSnapshot) {
-        for (pat, snap_pat) in self.bank.patterns.iter_mut().zip(snapshot.patterns.iter()) {
-            for (lane, snap_lane) in pat.lanes.iter_mut().zip(snap_pat.lanes.iter()) {
-                for (step, snap_step) in lane.steps.iter_mut().zip(snap_lane.steps.iter()) {
-                    step.enabled = snap_step.enabled;
-                    step.velocity = snap_step.velocity;
-                    step.probability = snap_step.probability;
-                    step.pan = snap_step.pan;
-                    step.pitch = snap_step.pitch;
-                    step.condition = snap_step.condition;
-                    step.fx_rvb = snap_step.fx_rvb;
-                    step.fx_dly = snap_step.fx_dly;
-                    step.fx_filter = snap_step.fx_filter;
-                }
-                lane.muted = snap_lane.muted;
-                lane.solo = snap_lane.solo;
-                lane.fx_send_rvb = snap_lane.fx_send_rvb;
-                lane.fx_send_dly = snap_lane.fx_send_dly;
-                lane.fx_filter = snap_lane.fx_filter;
-            }
-            pat.swing = snap_pat.swing;
-            pat.master_automation = snap_pat.master_automation;
-            pat.master_fx_base = snap_pat.master_fx_base;
-        }
-        self.bank.active = snapshot.active_pattern;
-    }
-
-    pub fn current_step(&self) -> usize {
-        self.current_step
-    }
-
-    pub fn is_playing(&self) -> bool {
-        self.playing
-    }
-
-    /// Fire all enabled, non-muted lanes of the active pattern for the current step.
-    fn fire_step(
-        &mut self,
-        sample_offset: usize,
-        voices: &mut VoicePool,
-        kit: &DrumKit,
-        trigger_flags: &[AtomicU8; NUM_PADS],
-    ) -> usize {
-        let step_idx = self.current_step;
-        let any_solo = self.bank.active_pattern().lanes.iter().any(|l| l.solo);
-        let mut count = 0;
-
-        for i in 0..self.bank.active_pattern().lanes.len() {
-            let lane = &self.bank.active_pattern().lanes[i];
+        for lane in &pattern.lanes {
             if any_solo && !lane.solo {
                 continue;
             }
@@ -719,6 +666,14 @@ impl Sequencer {
 
             let step = &lane.steps[step_idx];
             if !step.enabled {
+                continue;
+            }
+
+            // `pad_index` is serialized, so a corrupt or hand-edited pattern
+            // can point past the kit. `PatternBank::sanitize` normalizes it on
+            // load; this guard is the audio-thread backstop.
+            let pad_index = lane.pad_index;
+            if pad_index >= kit.pads.len() || pad_index >= trigger_flags.len() {
                 continue;
             }
 
@@ -733,23 +688,34 @@ impl Sequencer {
                 }
             }
 
-            let velocity = step.velocity;
-            let pad_index = lane.pad_index;
-            let lane_rvb = lane.fx_send_rvb;
-            let lane_dly = lane.fx_send_dly;
-            let lane_flt = lane.fx_filter;
             voices.trigger(
-                pad_index, velocity, kit, sample_offset,
-                step.pan, step.pitch, step.fx_rvb, step.fx_dly, step.fx_filter,
-                lane_rvb, lane_dly, lane_flt,
+                &Trigger {
+                    start_offset: sample_offset,
+                    pan: step.pan,
+                    pitch: step.pitch,
+                    fx_rvb: step.fx_rvb,
+                    fx_dly: step.fx_dly,
+                    fx_filter: step.fx_filter,
+                    ..Trigger::new(pad_index, step.velocity).with_lane_fx(
+                        lane.fx_send_rvb,
+                        lane.fx_send_dly,
+                        lane.fx_filter,
+                    )
+                },
+                kit,
             );
-            if pad_index < trigger_flags.len() {
-                trigger_flags[pad_index].fetch_add(1, Ordering::Relaxed);
-            }
+            trigger_flags[pad_index].fetch_add(1, Ordering::Relaxed);
             count += 1;
         }
-
         count
+    }
+
+    pub fn current_step(&self) -> usize {
+        self.current_step
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.playing
     }
 }
 
@@ -758,14 +724,21 @@ mod tests {
     use super::*;
     use crate::engine::kit::DrumKit;
     use crate::engine::sampler::VoicePool;
-    use std::sync::Arc;
     use std::sync::atomic::AtomicU8;
+    use std::sync::Arc;
+
+    const SR: f32 = 44100.0;
+    const TEMPO: f64 = 120.0;
+    /// One 16-step bar at 120 BPM / 44.1 kHz = 4 beats = 2 s.
+    const SAMPLES_PER_BAR: usize = 88200;
+    /// One 16th step at 120 BPM / 44.1 kHz.
+    const STEP_SAMPLES: f64 = 5512.5;
 
     fn dummy_flags() -> [AtomicU8; NUM_PADS] {
         core::array::from_fn(|_| AtomicU8::new(0))
     }
 
-    /// Helper: create a kit with all 16 pads loaded (1.0 samples).
+    /// A kit with every pad loaded, so any triggered lane produces a voice.
     fn test_kit() -> DrumKit {
         let mut kit = DrumKit::new();
         for pad in &mut kit.pads {
@@ -775,13 +748,57 @@ mod tests {
         kit
     }
 
+    /// A bank with the given `(lane, step)` pairs enabled on pattern 0.
+    fn bank_with(enabled: &[(usize, usize)]) -> PatternBank {
+        let mut bank = PatternBank::new();
+        for &(lane, step) in enabled {
+            bank.patterns[0].lanes[lane].steps[step].enabled = true;
+        }
+        bank
+    }
+
+    /// Drive the sequencer across `bars` bars of host-locked transport, in
+    /// 512-sample blocks, and return the total number of voices triggered.
+    ///
+    /// This goes through `process_buffer_with_patterns` — the same call
+    /// `Plugin::process` makes — so these tests cover the shipping path.
+    fn run_bars(seq: &mut Sequencer, bank: &mut PatternBank, bars: usize) -> usize {
+        let kit = test_kit();
+        let mut voices = VoicePool::new(SR);
+        let flags = dummy_flags();
+        let block = 512usize;
+        let blocks = SAMPLES_PER_BAR * bars / block;
+
+        let mut total = 0;
+        for b in 0..blocks {
+            let beats = (b * block) as f64 / SR as f64 * (TEMPO / 60.0);
+            total += seq.process_buffer_with_patterns(
+                &Transport {
+                    buffer_len: block,
+                    playing: true,
+                    tempo: Some(TEMPO),
+                    pos_beats: Some(beats),
+                    sample_rate: SR,
+                },
+                &mut voices,
+                &kit,
+                bank,
+                &flags,
+            );
+        }
+        total
+    }
+
+    // ── Structure ────────────────────────────────────────────────────────
+
     #[test]
-    fn new_sequencer_has_correct_lane_count_with_16_steps_each() {
-        let seq = Sequencer::new();
-        assert_eq!(seq.lanes().len(), NUM_PADS);
-        for (i, lane) in seq.lanes().iter().enumerate() {
+    fn new_bank_has_one_lane_per_pad_with_16_steps_each() {
+        let bank = PatternBank::new();
+        let pattern = bank.active_pattern();
+        assert_eq!(pattern.lanes.len(), NUM_PADS);
+        for (i, lane) in pattern.lanes.iter().enumerate() {
             assert_eq!(lane.pad_index, i);
-            assert_eq!(lane.steps.len(), 16);
+            assert_eq!(lane.steps.len(), NUM_STEPS);
             assert!(!lane.muted);
             for step in &lane.steps {
                 assert!(!step.enabled);
@@ -789,241 +806,6 @@ mod tests {
                 assert!((step.probability - 1.0).abs() < 0.001);
             }
         }
-    }
-
-    #[test]
-    fn default_swing_is_zero() {
-        let seq = Sequencer::new();
-        assert!((seq.swing() - 0.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn step_duration_at_120bpm_44100hz() {
-        let seq = Sequencer::new();
-        // At 120 BPM: one quarter note = 0.5s = 22050 samples
-        // One sixteenth = 22050 / 4 = 5512.5
-        let dur = seq.step_duration_samples(0, 120.0, 44100.0);
-        assert!((dur - 5512.5).abs() < 0.1);
-    }
-
-    #[test]
-    fn swing_lengthens_even_steps_shortens_odd() {
-        let mut seq = Sequencer::new();
-        seq.set_swing(0.5);
-        let base = 5512.5; // 120 BPM, 44100 Hz
-        let swing_offset = 0.5 * base * 0.5; // 1378.125
-
-        let even_dur = seq.step_duration_samples(0, 120.0, 44100.0);
-        let odd_dur = seq.step_duration_samples(1, 120.0, 44100.0);
-
-        assert!((even_dur - (base + swing_offset)).abs() < 0.1);
-        assert!((odd_dur - (base - swing_offset)).abs() < 0.1);
-    }
-
-    #[test]
-    fn process_triggers_enabled_steps_at_correct_positions() {
-        let mut seq = Sequencer::new();
-        // Enable step 0 on lane 0 (kick)
-        seq.lanes_mut()[0].steps[0].enabled = true;
-
-        let kit = test_kit();
-        let mut voices = VoicePool::new(44100.0);
-
-        // Simulate: host at beat 0.0, playing, 120 BPM
-        // Step 0 should fire immediately (at sample offset 0)
-        let flags = dummy_flags();
-        let triggers = seq.process_buffer(
-            512,       // buffer_len
-            true,      // host playing
-            Some(120.0), // tempo
-            Some(0.0),   // pos_beats (beat 0 = step 0)
-            44100.0,
-            &mut voices,
-            &kit,
-            &flags,
-        );
-
-        assert!(triggers > 0, "should have triggered at least one voice");
-        assert!(voices.active_count() > 0, "voice pool should have active voices");
-    }
-
-    #[test]
-    fn muted_lane_does_not_trigger() {
-        let mut seq = Sequencer::new();
-        seq.lanes_mut()[0].steps[0].enabled = true;
-        seq.lanes_mut()[0].muted = true;
-
-        let kit = test_kit();
-        let mut voices = VoicePool::new(44100.0);
-        let flags = dummy_flags();
-
-        let triggers = seq.process_buffer(
-            512, true, Some(120.0), Some(0.0), 44100.0,
-            &mut voices, &kit, &flags,
-        );
-
-        assert_eq!(triggers, 0, "muted lane should not trigger");
-        assert_eq!(voices.active_count(), 0);
-    }
-
-    #[test]
-    fn probability_zero_never_triggers() {
-        let mut seq = Sequencer::new();
-        seq.lanes_mut()[0].steps[0].enabled = true;
-        seq.lanes_mut()[0].steps[0].probability = 0.0;
-
-        let kit = test_kit();
-        let mut voices = VoicePool::new(44100.0);
-        let flags = dummy_flags();
-
-        // Run it several times — should never trigger
-        for beat in 0..10 {
-            let triggers = seq.process_buffer(
-                512, true, Some(120.0), Some(beat as f64 * 4.0), 44100.0,
-                &mut voices, &kit, &flags,
-            );
-            if triggers > 0 {
-                panic!("probability 0.0 should never trigger (beat {beat})");
-            }
-        }
-    }
-
-    #[test]
-    fn no_trigger_when_host_stopped() {
-        let mut seq = Sequencer::new();
-        seq.lanes_mut()[0].steps[0].enabled = true;
-
-        let kit = test_kit();
-        let mut voices = VoicePool::new(44100.0);
-        let flags = dummy_flags();
-
-        let triggers = seq.process_buffer(
-            512, false, Some(120.0), Some(0.0), 44100.0,
-            &mut voices, &kit, &flags,
-        );
-
-        assert_eq!(triggers, 0, "should not trigger when host is stopped");
-    }
-
-    #[test]
-    fn full_pattern_cycles_through_16_steps() {
-        let mut seq = Sequencer::new();
-        // Enable step 0 on lane 0, step 4 on lane 1, step 8 on lane 2
-        seq.lanes_mut()[0].steps[0].enabled = true;
-        seq.lanes_mut()[1].steps[4].enabled = true;
-        seq.lanes_mut()[2].steps[8].enabled = true;
-
-        let kit = test_kit();
-        let mut voices = VoicePool::new(44100.0);
-        let flags = dummy_flags();
-
-        // At 120 BPM, one full pattern (16 sixteenths = 4 beats) = 2 seconds = 88200 samples
-        // Process in 512-sample blocks
-        let mut total_triggers = 0;
-        let samples_per_pattern: usize = 88200;
-        let block_size: usize = 512;
-        let blocks = samples_per_pattern / block_size;
-
-        for block in 0..blocks {
-            let beat_pos = (block * block_size) as f64 / 44100.0 * (120.0 / 60.0);
-            let triggers = seq.process_buffer(
-                block_size, true, Some(120.0), Some(beat_pos), 44100.0,
-                &mut voices, &kit, &flags,
-            );
-            total_triggers += triggers;
-        }
-
-        // Should have triggered exactly 3 times (one per enabled step)
-        assert_eq!(total_triggers, 3, "expected 3 triggers across one full pattern");
-    }
-
-    #[test]
-    fn beats_to_swung_step_no_swing_is_straight() {
-        for i in 0..16 {
-            let sixteenths = i as f64 + 0.5;
-            let (step, frac) = Sequencer::beats_to_swung_step(sixteenths, 0.0);
-            assert_eq!(step, i, "step at sixteenth {sixteenths}");
-            assert!((frac - 0.5).abs() < 0.001, "frac at sixteenth {sixteenths}");
-        }
-    }
-
-    #[test]
-    fn beats_to_swung_step_shifts_odd_steps() {
-        let swing = 0.5;
-        let even_len = 1.0 + swing * 0.5; // 1.25
-        // At sixteenth 1.0 (straight grid odd step boundary), swing pushes it later
-        let (step, _frac) = Sequencer::beats_to_swung_step(1.0, swing);
-        assert_eq!(step, 0, "sixteenth 1.0 is still in even step with swing 0.5");
-        // At the swung boundary (1.25), odd step begins
-        let (step, frac) = Sequencer::beats_to_swung_step(even_len, swing);
-        assert_eq!(step, 1, "odd step begins at {even_len}");
-        assert!(frac.abs() < 0.001, "frac should be ~0 at boundary");
-    }
-
-    #[test]
-    fn beats_to_swung_step_pairs_always_span_two_sixteenths() {
-        for swing in [0.0, 0.25, 0.5, 0.75, 1.0] {
-            let even_len = 1.0 + swing * 0.5;
-            let odd_len = 2.0 - even_len;
-            assert!((even_len + odd_len - 2.0_f64).abs() < 1e-10,
-                "pair should span 2 sixteenths at swing {swing}");
-        }
-    }
-
-    #[test]
-    fn swing_does_not_change_total_pattern_length() {
-        // With swing, even steps get longer and odd steps get shorter,
-        // but the total cycle should remain the same.
-        let mut seq = Sequencer::new();
-        seq.set_swing(0.7);
-
-        let total: f64 = (0..16)
-            .map(|s| seq.step_duration_samples(s, 120.0, 44100.0))
-            .sum();
-
-        // Without swing, total = 16 * 5512.5 = 88200.0
-        assert!((total - 88200.0).abs() < 0.1, "swing should preserve total pattern length");
-    }
-
-    #[test]
-    fn host_rewind_resyncs_sequencer() {
-        let mut seq = Sequencer::new();
-        seq.lanes_mut()[0].steps[0].enabled = true;
-        seq.lanes_mut()[0].steps[8].enabled = true;
-
-        let kit = test_kit();
-        let mut voices = VoicePool::new(44100.0);
-        let flags = dummy_flags();
-
-        // Play forward to beat 2.0 (step 8)
-        let triggers1 = seq.process_buffer(
-            512, true, Some(120.0), Some(2.0), 44100.0,
-            &mut voices, &kit, &flags,
-        );
-        assert!(triggers1 > 0, "should fire step 8 at beat 2.0");
-
-        // Host rewinds to beat 0.0 — sequencer should resync and fire step 0
-        let triggers2 = seq.process_buffer(
-            512, true, Some(120.0), Some(0.0), 44100.0,
-            &mut voices, &kit, &flags,
-        );
-        assert!(triggers2 > 0, "should fire step 0 after rewind to beat 0.0");
-    }
-
-    #[test]
-    fn step_default_has_no_plocks_and_always_condition() {
-        let step = Step::default();
-        assert!(!step.enabled);
-        assert!((step.velocity - 0.8).abs() < 0.001);
-        assert!((step.probability - 1.0).abs() < 0.001);
-        assert!(step.pan.is_none());
-        assert!(step.pitch.is_none());
-        assert_eq!(step.condition, ConditionTrig::Always);
-    }
-
-    #[test]
-    fn condition_trig_default_is_always() {
-        assert_eq!(ConditionTrig::default(), ConditionTrig::Always);
     }
 
     #[test]
@@ -1047,6 +829,17 @@ mod tests {
     }
 
     #[test]
+    fn step_default_has_no_plocks_and_always_condition() {
+        let step = Step::default();
+        assert!(!step.enabled);
+        assert!((step.velocity - 0.8).abs() < 0.001);
+        assert!((step.probability - 1.0).abs() < 0.001);
+        assert!(step.pan.is_none());
+        assert!(step.pitch.is_none());
+        assert_eq!(step.condition, ConditionTrig::Always);
+    }
+
+    #[test]
     fn step_with_plocks() {
         let step = Step {
             enabled: true,
@@ -1065,51 +858,326 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_captures_sequencer_state() {
-        let mut seq = Sequencer::new();
-        seq.lanes_mut()[0].steps[0].enabled = true;
-        seq.lanes_mut()[0].steps[0].velocity = 0.6;
-        seq.lanes_mut()[3].muted = true;
-        seq.set_swing(0.3);
+    fn condition_trig_default_is_always() {
+        assert_eq!(ConditionTrig::default(), ConditionTrig::Always);
+    }
 
-        let snap = seq.snapshot();
-        assert!(snap.patterns[0].lanes[0].steps[0].enabled);
-        assert!((snap.patterns[0].lanes[0].steps[0].velocity - 0.6).abs() < 0.001);
-        assert!(snap.patterns[0].lanes[3].muted);
-        assert!((snap.patterns[0].swing - 0.3).abs() < 0.001);
+    // ── Timing / swing ───────────────────────────────────────────────────
+
+    #[test]
+    fn step_duration_at_120bpm_44100hz() {
+        let seq = Sequencer::new();
+        let dur = seq.step_duration_with_swing(0, TEMPO, SR, 0.0);
+        assert!((dur - STEP_SAMPLES).abs() < 0.1);
     }
 
     #[test]
-    fn restore_applies_sequencer_snapshot() {
+    fn swing_lengthens_even_steps_shortens_odd() {
+        let seq = Sequencer::new();
+        let swing = 0.5;
+        let offset = swing as f64 * STEP_SAMPLES * 0.5;
+
+        let even = seq.step_duration_with_swing(0, TEMPO, SR, swing);
+        let odd = seq.step_duration_with_swing(1, TEMPO, SR, swing);
+
+        assert!((even - (STEP_SAMPLES + offset)).abs() < 0.1);
+        assert!((odd - (STEP_SAMPLES - offset)).abs() < 0.1);
+    }
+
+    #[test]
+    fn swing_does_not_change_total_pattern_length() {
+        let seq = Sequencer::new();
+        let total: f64 = (0..NUM_STEPS)
+            .map(|s| seq.step_duration_with_swing(s, TEMPO, SR, 0.7))
+            .sum();
+        assert!(
+            (total - SAMPLES_PER_BAR as f64).abs() < 0.1,
+            "swing should preserve total bar length"
+        );
+    }
+
+    #[test]
+    fn beats_to_swung_step_no_swing_is_straight() {
+        for i in 0..NUM_STEPS {
+            let sixteenths = i as f64 + 0.5;
+            let (step, frac) = Sequencer::beats_to_swung_step(sixteenths, 0.0);
+            assert_eq!(step, i, "step at sixteenth {sixteenths}");
+            assert!((frac - 0.5).abs() < 0.001, "frac at sixteenth {sixteenths}");
+        }
+    }
+
+    #[test]
+    fn beats_to_swung_step_shifts_odd_steps() {
+        let swing = 0.5;
+        let even_len = 1.0 + swing * 0.5;
+        let (step, _) = Sequencer::beats_to_swung_step(1.0, swing);
+        assert_eq!(
+            step, 0,
+            "sixteenth 1.0 is still in the even step at swing 0.5"
+        );
+        let (step, frac) = Sequencer::beats_to_swung_step(even_len, swing);
+        assert_eq!(step, 1, "odd step begins at {even_len}");
+        assert!(frac.abs() < 0.001, "frac should be ~0 at the boundary");
+    }
+
+    #[test]
+    fn beats_to_swung_step_pairs_always_span_two_sixteenths() {
+        for swing in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let even_len = 1.0 + swing * 0.5;
+            let odd_len = 2.0 - even_len;
+            assert!(
+                (even_len + odd_len - 2.0_f64).abs() < 1e-10,
+                "pair should span 2 sixteenths at swing {swing}"
+            );
+        }
+    }
+
+    // ── Playback (shipping path) ─────────────────────────────────────────
+
+    #[test]
+    fn process_triggers_enabled_steps_at_correct_positions() {
         let mut seq = Sequencer::new();
-        seq.lanes_mut()[0].steps[0].enabled = true;
-        seq.set_swing(0.5);
+        let mut bank = bank_with(&[(0, 0)]);
+        let kit = test_kit();
+        let mut voices = VoicePool::new(SR);
+        let flags = dummy_flags();
 
-        // Capture, then modify
-        let snap = seq.snapshot();
-        seq.lanes_mut()[0].steps[0].enabled = false;
-        seq.set_swing(0.0);
+        let triggered = seq.process_buffer_with_patterns(
+            &Transport {
+                buffer_len: 512,
+                playing: true,
+                tempo: Some(TEMPO),
+                pos_beats: Some(0.0),
+                sample_rate: SR,
+            },
+            &mut voices,
+            &kit,
+            &mut bank,
+            &flags,
+        );
 
-        // Restore
-        seq.restore(&snap);
-        assert!(seq.lanes()[0].steps[0].enabled);
-        assert!((seq.swing() - 0.5).abs() < 0.001);
+        assert!(triggered > 0, "should have triggered at least one voice");
+        assert!(
+            voices.active_count() > 0,
+            "voice pool should have active voices"
+        );
+    }
+
+    #[test]
+    fn full_pattern_cycles_through_16_steps() {
+        let mut seq = Sequencer::new();
+        let mut bank = bank_with(&[(0, 0), (1, 4), (2, 8)]);
+        let total = run_bars(&mut seq, &mut bank, 1);
+        assert_eq!(total, 3, "expected 3 triggers across one full bar");
+    }
+
+    #[test]
+    fn four_on_the_floor_fires_exactly_four_times_per_bar() {
+        let mut seq = Sequencer::new();
+        let mut bank = bank_with(&[(0, 0), (0, 4), (0, 8), (0, 12)]);
+        let total = run_bars(&mut seq, &mut bank, 1);
+        assert_eq!(total, 4, "4/4 kick should fire exactly 4 times per bar");
+    }
+
+    #[test]
+    fn muted_lane_does_not_trigger() {
+        let mut seq = Sequencer::new();
+        let mut bank = bank_with(&[(0, 0)]);
+        bank.patterns[0].lanes[0].muted = true;
+
+        let kit = test_kit();
+        let mut voices = VoicePool::new(SR);
+        let flags = dummy_flags();
+
+        let triggered = seq.process_buffer_with_patterns(
+            &Transport {
+                buffer_len: 512,
+                playing: true,
+                tempo: Some(TEMPO),
+                pos_beats: Some(0.0),
+                sample_rate: SR,
+            },
+            &mut voices,
+            &kit,
+            &mut bank,
+            &flags,
+        );
+
+        assert_eq!(triggered, 0, "muted lane should not trigger");
+        assert_eq!(voices.active_count(), 0);
+    }
+
+    #[test]
+    fn solo_lane_silences_every_other_lane() {
+        let mut seq = Sequencer::new();
+        // Three lanes all firing on step 0; only lane 1 is soloed.
+        let mut bank = bank_with(&[(0, 0), (1, 0), (2, 0)]);
+        bank.patterns[0].lanes[1].solo = true;
+
+        let kit = test_kit();
+        let mut voices = VoicePool::new(SR);
+        let flags = dummy_flags();
+
+        let triggered = seq.process_buffer_with_patterns(
+            &Transport {
+                buffer_len: 512,
+                playing: true,
+                tempo: Some(TEMPO),
+                pos_beats: Some(0.0),
+                sample_rate: SR,
+            },
+            &mut voices,
+            &kit,
+            &mut bank,
+            &flags,
+        );
+
+        assert_eq!(triggered, 1, "only the soloed lane should fire");
+        assert_eq!(
+            flags[1].load(Ordering::Relaxed),
+            1,
+            "lane 1 should have fired"
+        );
+        assert_eq!(
+            flags[0].load(Ordering::Relaxed),
+            0,
+            "lane 0 should be silenced"
+        );
+        assert_eq!(
+            flags[2].load(Ordering::Relaxed),
+            0,
+            "lane 2 should be silenced"
+        );
+    }
+
+    #[test]
+    fn probability_zero_never_triggers() {
+        let mut seq = Sequencer::new();
+        let mut bank = bank_with(&[(0, 0)]);
+        bank.patterns[0].lanes[0].steps[0].probability = 0.0;
+
+        let kit = test_kit();
+        let mut voices = VoicePool::new(SR);
+        let flags = dummy_flags();
+
+        for beat in 0..10 {
+            let triggered = seq.process_buffer_with_patterns(
+                &Transport {
+                    buffer_len: 512,
+                    playing: true,
+                    tempo: Some(TEMPO),
+                    pos_beats: Some(beat as f64 * 4.0),
+                    sample_rate: SR,
+                },
+                &mut voices,
+                &kit,
+                &mut bank,
+                &flags,
+            );
+            assert_eq!(
+                triggered, 0,
+                "probability 0.0 should never trigger (beat {beat})"
+            );
+        }
+    }
+
+    #[test]
+    fn no_trigger_when_host_stopped() {
+        let mut seq = Sequencer::new();
+        let mut bank = bank_with(&[(0, 0)]);
+        let kit = test_kit();
+        let mut voices = VoicePool::new(SR);
+        let flags = dummy_flags();
+
+        let triggered = seq.process_buffer_with_patterns(
+            &Transport {
+                buffer_len: 512,
+                playing: false,
+                tempo: Some(TEMPO),
+                pos_beats: Some(0.0),
+                sample_rate: SR,
+            },
+            &mut voices,
+            &kit,
+            &mut bank,
+            &flags,
+        );
+        assert_eq!(triggered, 0, "should not trigger when host is stopped");
+        assert!(!seq.is_playing());
     }
 
     #[test]
     fn negative_pos_beats_does_not_trigger() {
         let mut seq = Sequencer::new();
-        seq.lanes_mut()[0].steps[0].enabled = true;
-
+        let mut bank = bank_with(&[(0, 0)]);
         let kit = test_kit();
-        let mut voices = VoicePool::new(44100.0);
+        let mut voices = VoicePool::new(SR);
         let flags = dummy_flags();
 
-        let triggers = seq.process_buffer(
-            512, true, Some(120.0), Some(-1.0), 44100.0,
-            &mut voices, &kit, &flags,
+        let triggered = seq.process_buffer_with_patterns(
+            &Transport {
+                buffer_len: 512,
+                playing: true,
+                tempo: Some(TEMPO),
+                pos_beats: Some(-1.0),
+                sample_rate: SR,
+            },
+            &mut voices,
+            &kit,
+            &mut bank,
+            &flags,
         );
-        assert_eq!(triggers, 0, "negative pos_beats should not trigger");
+        assert_eq!(triggered, 0, "negative pos_beats should not trigger");
+    }
+
+    #[test]
+    fn host_rewind_resyncs_sequencer() {
+        let mut seq = Sequencer::new();
+        let mut bank = bank_with(&[(0, 0), (0, 8)]);
+        let kit = test_kit();
+        let mut voices = VoicePool::new(SR);
+        let flags = dummy_flags();
+
+        let first = seq.process_buffer_with_patterns(
+            &Transport {
+                buffer_len: 512,
+                playing: true,
+                tempo: Some(TEMPO),
+                pos_beats: Some(2.0),
+                sample_rate: SR,
+            },
+            &mut voices,
+            &kit,
+            &mut bank,
+            &flags,
+        );
+        assert!(first > 0, "should fire step 8 at beat 2.0");
+
+        let after_rewind = seq.process_buffer_with_patterns(
+            &Transport {
+                buffer_len: 512,
+                playing: true,
+                tempo: Some(TEMPO),
+                pos_beats: Some(0.0),
+                sample_rate: SR,
+            },
+            &mut voices,
+            &kit,
+            &mut bank,
+            &flags,
+        );
+        assert!(
+            after_rewind > 0,
+            "should fire step 0 after rewind to beat 0.0"
+        );
+    }
+
+    // ── Conditional trigs ────────────────────────────────────────────────
+
+    #[test]
+    fn condition_always_fires() {
+        let seq = Sequencer::new();
+        assert!(seq.evaluate_condition(ConditionTrig::Always));
     }
 
     #[test]
@@ -1133,28 +1201,95 @@ mod tests {
         assert!(!seq.evaluate_condition(ConditionTrig::NotFill));
     }
 
+    /// Regression: `loop_count % 0` panics. `Every(0)` is unreachable through
+    /// the UI but is representable in a hand-edited or corrupt pattern file,
+    /// and `evaluate_condition` runs on the audio thread.
     #[test]
-    fn condition_always_fires() {
-        let seq = Sequencer::new();
-        assert!(seq.evaluate_condition(ConditionTrig::Always));
+    fn condition_every_zero_does_not_divide_by_zero() {
+        let mut seq = Sequencer::new();
+        for loop_count in 0..4 {
+            seq.loop_count = loop_count;
+            let _ = seq.evaluate_condition(ConditionTrig::Every(0));
+            let _ = seq.evaluate_condition(ConditionTrig::NotEvery(0));
+        }
     }
+
+    // ── Pattern switching ────────────────────────────────────────────────
 
     #[test]
     fn pattern_queued_switches_at_bar_boundary() {
+        let mut seq = Sequencer::new();
+        let mut bank = PatternBank::new();
+        // Pattern 0 fires lane 0 on every step; pattern 1 fires lane 1.
+        for s in 0..NUM_STEPS {
+            bank.patterns[0].lanes[0].steps[s].enabled = true;
+            bank.patterns[1].lanes[1].steps[s].enabled = true;
+        }
+        bank.queued = Some(1);
+        assert_eq!(bank.active, 0);
+
+        run_bars(&mut seq, &mut bank, 2);
+
+        assert_eq!(
+            bank.active, 1,
+            "queued pattern should be active after a bar"
+        );
+        assert!(bank.queued.is_none(), "queue should be consumed");
+    }
+
+    #[test]
+    fn lane_mute_persists_across_pattern_switch() {
+        let mut bank = PatternBank::new();
+        bank.patterns[0].lanes[3].muted = true;
+        bank.active = 1;
+        assert!(!bank.active_pattern().lanes[3].muted);
+        bank.active = 0;
+        assert!(bank.active_pattern().lanes[3].muted);
+    }
+
+    #[test]
+    fn lane_fx_send_persists_across_pattern_switch() {
+        let mut bank = PatternBank::new();
+        bank.patterns[0].lanes[2].fx_send_rvb = 0.7;
+        bank.patterns[0].lanes[2].fx_filter = true;
+        bank.active = 1;
+        assert!((bank.active_pattern().lanes[2].fx_send_rvb - 0.0).abs() < 0.001);
+        assert!(!bank.active_pattern().lanes[2].fx_filter);
+        bank.active = 0;
+        assert!((bank.active_pattern().lanes[2].fx_send_rvb - 0.7).abs() < 0.001);
+        assert!(bank.active_pattern().lanes[2].fx_filter);
+    }
+
+    // ── Snapshot / serde ─────────────────────────────────────────────────
+
+    #[test]
+    fn snapshot_captures_pattern_bank_state() {
         let mut bank = PatternBank::new();
         bank.patterns[0].lanes[0].steps[0].enabled = true;
-        bank.patterns[1].lanes[1].steps[0].enabled = true;
-        bank.queued = Some(1);
+        bank.patterns[0].lanes[0].steps[0].velocity = 0.6;
+        bank.patterns[0].lanes[3].muted = true;
+        bank.patterns[0].swing = 0.3;
 
-        assert_eq!(bank.active, 0);
-        assert!(bank.active_pattern().lanes[0].steps[0].enabled);
+        let snap = bank.snapshot();
+        assert!(snap.patterns[0].lanes[0].steps[0].enabled);
+        assert!((snap.patterns[0].lanes[0].steps[0].velocity - 0.6).abs() < 0.001);
+        assert!(snap.patterns[0].lanes[3].muted);
+        assert!((snap.patterns[0].swing - 0.3).abs() < 0.001);
+    }
 
-        // Simulate bar boundary switch
-        if let Some(queued) = bank.queued.take() {
-            bank.active = queued;
-        }
-        assert_eq!(bank.active, 1);
-        assert!(bank.active_pattern().lanes[1].steps[0].enabled);
+    #[test]
+    fn restore_applies_pattern_bank_snapshot() {
+        let mut bank = PatternBank::new();
+        bank.patterns[0].lanes[0].steps[0].enabled = true;
+        bank.patterns[0].swing = 0.5;
+
+        let snap = bank.snapshot();
+        bank.patterns[0].lanes[0].steps[0].enabled = false;
+        bank.patterns[0].swing = 0.0;
+
+        bank.restore(&snap);
+        assert!(bank.patterns[0].lanes[0].steps[0].enabled);
+        assert!((bank.patterns[0].swing - 0.5).abs() < 0.001);
     }
 
     #[test]
@@ -1171,34 +1306,12 @@ mod tests {
 
         assert!(restored.patterns[0].lanes[0].steps[0].enabled);
         assert!((restored.patterns[0].lanes[0].steps[0].velocity - 0.6).abs() < 0.001);
-        assert_eq!(restored.patterns[0].lanes[0].steps[0].condition, ConditionTrig::Fill);
+        assert_eq!(
+            restored.patterns[0].lanes[0].steps[0].condition,
+            ConditionTrig::Fill
+        );
         assert_eq!(restored.patterns[0].lanes[0].steps[3].pan, Some(-0.5));
         assert!((restored.patterns[0].swing - 0.4).abs() < 0.001);
-    }
-
-    #[test]
-    fn lane_mute_persists_across_pattern_switch() {
-        // Regression: verify Lane.muted is per-pattern (round-trip via switch).
-        let mut bank = PatternBank::new();
-        bank.patterns[0].lanes[3].muted = true;
-        bank.active = 1;
-        assert!(!bank.active_pattern().lanes[3].muted);
-        bank.active = 0;
-        assert!(bank.active_pattern().lanes[3].muted);
-    }
-
-    #[test]
-    fn lane_fx_send_persists_across_pattern_switch() {
-        // After Part B: per-lane FX sends live on Lane (per-pattern), not DrumPad.
-        let mut bank = PatternBank::new();
-        bank.patterns[0].lanes[2].fx_send_rvb = 0.7;
-        bank.patterns[0].lanes[2].fx_filter = true;
-        bank.active = 1;
-        assert!((bank.active_pattern().lanes[2].fx_send_rvb - 0.0).abs() < 0.001);
-        assert!(!bank.active_pattern().lanes[2].fx_filter);
-        bank.active = 0;
-        assert!((bank.active_pattern().lanes[2].fx_send_rvb - 0.7).abs() < 0.001);
-        assert!(bank.active_pattern().lanes[2].fx_filter);
     }
 
     #[test]
@@ -1218,76 +1331,143 @@ mod tests {
         assert!(restored.patterns[0].master_fx_base.initialized);
     }
 
+    // ── sanitize(): the audio thread's invariants ────────────────────────
+
     #[test]
-    fn internal_play_fires_all_four_on_the_floor_kicks() {
-        // Simulates internal play: linearly ramping beats, no DAW transport.
-        // Verifies that a 4/4 kick (steps 0,4,8,12) fires exactly 4 times per pattern.
-        let mut seq = Sequencer::new();
-        seq.lanes_mut()[0].steps[0].enabled = true;
-        seq.lanes_mut()[0].steps[4].enabled = true;
-        seq.lanes_mut()[0].steps[8].enabled = true;
-        seq.lanes_mut()[0].steps[12].enabled = true;
-
-        let kit = test_kit();
-        let mut voices = VoicePool::new(44100.0);
-        let flags = dummy_flags();
-
-        let tempo = 120.0_f64;
-        let sr = 44100.0_f32;
-        let block_size = 512_usize;
-        // One full pattern at 120 BPM = 4 beats = 2s = 88200 samples
-        let samples_per_pattern = 88200_usize;
-        let blocks = samples_per_pattern / block_size;
-
-        let mut total_triggers = 0;
-        let mut internal_samples: u64 = 0;
-
-        for _ in 0..blocks {
-            let beats = internal_samples as f64 / sr as f64 * (tempo / 60.0);
-            internal_samples += block_size as u64;
-            let triggers = seq.process_buffer(
-                block_size, true, Some(tempo), Some(beats), sr,
-                &mut voices, &kit, &flags,
-            );
-            total_triggers += triggers;
-        }
-
-        assert_eq!(total_triggers, 4, "4/4 kick should fire exactly 4 times per pattern");
+    fn sanitize_clamps_out_of_range_active_index() {
+        let mut bank = PatternBank::new();
+        bank.active = 999;
+        bank.sanitize();
+        assert_eq!(bank.active, 0);
+        // Would have panicked before sanitize.
+        let _ = bank.active_pattern();
     }
 
     #[test]
-    fn internal_play_with_patterns_fires_all_steps() {
-        // Same test but using process_buffer_with_patterns (the actual code path for GUI).
-        let mut seq = Sequencer::new();
+    fn sanitize_drops_out_of_range_queued_index() {
         let mut bank = PatternBank::new();
-        bank.patterns[0].lanes[0].steps[0].enabled = true;
-        bank.patterns[0].lanes[0].steps[4].enabled = true;
-        bank.patterns[0].lanes[0].steps[8].enabled = true;
-        bank.patterns[0].lanes[0].steps[12].enabled = true;
+        bank.queued = Some(999);
+        bank.sanitize();
+        assert!(bank.queued.is_none());
+    }
+
+    #[test]
+    fn sanitize_restores_the_pattern_count() {
+        let mut bank = PatternBank::new();
+        bank.patterns.truncate(3);
+        bank.sanitize();
+        assert_eq!(bank.patterns.len(), NUM_PATTERNS);
+
+        let mut bank = PatternBank::new();
+        for _ in 0..5 {
+            bank.patterns.push(Pattern::new());
+        }
+        bank.sanitize();
+        assert_eq!(bank.patterns.len(), NUM_PATTERNS);
+    }
+
+    #[test]
+    fn sanitize_restores_the_lane_count_and_reindexes_pads() {
+        let mut bank = PatternBank::new();
+        bank.patterns[0].lanes.truncate(2);
+        bank.patterns[0].lanes[0].pad_index = 99;
+        bank.sanitize();
+
+        assert_eq!(bank.patterns[0].lanes.len(), NUM_PADS);
+        for (i, lane) in bank.patterns[0].lanes.iter().enumerate() {
+            assert_eq!(lane.pad_index, i, "lane {i} should drive pad {i}");
+        }
+    }
+
+    #[test]
+    fn sanitize_strips_zero_divisor_conditions() {
+        let mut bank = PatternBank::new();
+        bank.patterns[0].lanes[0].steps[0].condition = ConditionTrig::Every(0);
+        bank.patterns[0].lanes[0].steps[1].condition = ConditionTrig::NotEvery(0);
+        bank.sanitize();
+        assert_eq!(
+            bank.patterns[0].lanes[0].steps[0].condition,
+            ConditionTrig::Always
+        );
+        assert_eq!(
+            bank.patterns[0].lanes[0].steps[1].condition,
+            ConditionTrig::Always
+        );
+    }
+
+    #[test]
+    fn sanitize_clamps_out_of_range_and_nan_values() {
+        let mut bank = PatternBank::new();
+        {
+            let step = &mut bank.patterns[0].lanes[0].steps[0];
+            step.velocity = f32::NAN;
+            step.probability = 7.5;
+            step.pan = Some(-9.0);
+            step.pitch = Some(f32::INFINITY);
+            step.fx_rvb = Some(3.0);
+        }
+        bank.patterns[0].lanes[0].fx_send_dly = -2.0;
+        bank.patterns[0].swing = f32::NAN;
+        bank.sanitize();
+
+        let step = &bank.patterns[0].lanes[0].steps[0];
+        assert!(
+            (step.velocity - 0.8).abs() < 0.001,
+            "NaN velocity falls back to default"
+        );
+        assert!((step.probability - 1.0).abs() < 0.001);
+        assert_eq!(step.pan, Some(-1.0));
+        assert_eq!(step.pitch, Some(0.0), "non-finite pitch falls back to 0");
+        assert_eq!(step.fx_rvb, Some(1.0));
+        assert!((bank.patterns[0].lanes[0].fx_send_dly - 0.0).abs() < 0.001);
+        assert!((bank.patterns[0].swing - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn sanitize_survives_a_completely_empty_pattern_list() {
+        let mut bank = PatternBank::new();
+        bank.patterns.clear();
+        bank.active = 4;
+        bank.sanitize();
+        // The list is refilled first, so an in-range `active` is kept — it now
+        // points at a valid (empty) pattern rather than being reset to 0.
+        assert_eq!(bank.patterns.len(), NUM_PATTERNS);
+        assert!(bank.active < bank.patterns.len());
+        let _ = bank.active_pattern();
+    }
+
+    /// Regression: a lane whose `pad_index` points past the kit used to index
+    /// `kit.pads` and `trigger_flags` directly and panic on the audio thread.
+    /// `sanitize` normalizes it, but `fire_step_from_bank` guards too.
+    #[test]
+    fn out_of_range_pad_index_is_skipped_not_panicked() {
+        let mut seq = Sequencer::new();
+        let mut bank = bank_with(&[(0, 0), (1, 0)]);
+        // Deliberately NOT sanitized — this exercises the audio-thread guard.
+        bank.patterns[0].lanes[0].pad_index = 250;
 
         let kit = test_kit();
-        let mut voices = VoicePool::new(44100.0);
+        let mut voices = VoicePool::new(SR);
         let flags = dummy_flags();
 
-        let tempo = 120.0_f64;
-        let sr = 44100.0_f32;
-        let block_size = 512_usize;
-        let samples_per_pattern = 88200_usize;
-        let blocks = samples_per_pattern / block_size;
+        let triggered = seq.process_buffer_with_patterns(
+            &Transport {
+                buffer_len: 512,
+                playing: true,
+                tempo: Some(TEMPO),
+                pos_beats: Some(0.0),
+                sample_rate: SR,
+            },
+            &mut voices,
+            &kit,
+            &mut bank,
+            &flags,
+        );
 
-        let mut total_triggers = 0;
-        let mut internal_samples: u64 = 0;
-
-        for _ in 0..blocks {
-            let beats = internal_samples as f64 / sr as f64 * (tempo / 60.0);
-            internal_samples += block_size as u64;
-            let triggers = seq.process_buffer_with_patterns(
-                block_size, true, Some(tempo), Some(beats), sr,
-                &mut voices, &kit, &mut bank, &flags,
-            );
-            total_triggers += triggers;
-        }
-
-        assert_eq!(total_triggers, 4, "4/4 kick should fire exactly 4 times per pattern");
+        assert_eq!(
+            triggered, 1,
+            "the valid lane still fires, the bad one is skipped"
+        );
+        assert_eq!(flags[1].load(Ordering::Relaxed), 1);
     }
 }

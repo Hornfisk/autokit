@@ -1,6 +1,8 @@
 use std::io::Cursor;
 
-use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
+use rubato::{
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::formats::FormatOptions;
@@ -11,7 +13,11 @@ use symphonia::core::probe::Hint;
 /// Decode an in-memory audio blob (e.g. `include_bytes!`) to mono f32.
 /// Used for the bundled default sample kit shipped inside the binary.
 /// Resamples to `target_rate` if the file's native rate differs.
-pub fn load_wav_mono_from_bytes(bytes: &'static [u8], label: &str, target_rate: f32) -> Result<Vec<f32>, String> {
+pub fn load_wav_mono_from_bytes(
+    bytes: &'static [u8],
+    label: &str,
+    target_rate: f32,
+) -> Result<Vec<f32>, String> {
     let mss = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
     let mut hint = Hint::new();
     hint.with_extension("wav");
@@ -35,7 +41,12 @@ pub fn load_wav_mono(path: &str, target_rate: f32) -> Result<Vec<f32>, String> {
 
 fn decode_mono(mss: MediaSourceStream, hint: Hint, path: &str) -> Result<(Vec<f32>, u32), String> {
     let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
         .map_err(|e| format!("probe {path}: {e}"))?;
 
     let mut format = probed.format;
@@ -68,7 +79,9 @@ fn decode_mono(mss: MediaSourceStream, hint: Hint, path: &str) -> Result<(Vec<f3
             continue;
         }
 
-        let decoded = decoder.decode(&packet).map_err(|e| format!("decode: {e}"))?;
+        let decoded = decoder
+            .decode(&packet)
+            .map_err(|e| format!("decode: {e}"))?;
         let spec = *decoded.spec();
         let duration = decoded.capacity();
 
@@ -92,7 +105,12 @@ fn decode_mono(mss: MediaSourceStream, hint: Hint, path: &str) -> Result<(Vec<f3
 
 /// Resample mono f32 audio from `native_rate` to `target_rate` using sinc
 /// interpolation. Returns the input unchanged if rates already match.
-fn resample_if_needed(samples: Vec<f32>, native_rate: u32, target_rate: f32, label: &str) -> Result<Vec<f32>, String> {
+fn resample_if_needed(
+    samples: Vec<f32>,
+    native_rate: u32,
+    target_rate: f32,
+    label: &str,
+) -> Result<Vec<f32>, String> {
     let target = target_rate as u32;
     if native_rate == target || samples.is_empty() {
         return Ok(samples);
@@ -109,12 +127,10 @@ fn resample_if_needed(samples: Vec<f32>, native_rate: u32, target_rate: f32, lab
 
     let chunk_size = 1024;
     let mut resampler = SincFixedIn::<f64>::new(
-        ratio,
-        2.0,  // max relative ratio (fixed ratio, so this is just headroom)
-        params,
-        chunk_size,
-        1, // mono
-    ).map_err(|e| format!("resampler init for {label}: {e}"))?;
+        ratio, 2.0, // max relative ratio (fixed ratio, so this is just headroom)
+        params, chunk_size, 1, // mono
+    )
+    .map_err(|e| format!("resampler init for {label}: {e}"))?;
 
     let mut output = Vec::with_capacity((samples.len() as f64 * ratio * 1.1) as usize);
     let mut pos = 0;
@@ -128,7 +144,8 @@ fn resample_if_needed(samples: Vec<f32>, native_rate: u32, target_rate: f32, lab
             chunk.resize(chunk_size, 0.0);
         }
 
-        let result = resampler.process(&[chunk], None)
+        let result = resampler
+            .process(&[chunk], None)
             .map_err(|e| format!("resample {label}: {e}"))?;
 
         for &s in &result[0] {

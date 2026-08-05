@@ -37,24 +37,48 @@ pub fn load_logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
 }
 
 /// Draw the toolbar from snapshot data (no mutex held).
-pub fn draw_toolbar_snapshot(
-    ui: &mut egui::Ui,
-    scan_status: &ScanStatus,
-    can_undo: bool,
-    can_redo: bool,
-    all_locked: bool,
-    params: &AutokitParams,
-    setter: &ParamSetter,
-    view_mode: ViewMode,
-    shortcut_info: Option<(usize, &str)>,
-    logo_texture: &egui::TextureHandle,
-    scan_processed: u32,
-    scan_total: u32,
-    is_standalone: bool,
-    standalone_tempo: &AtomicU32,
-    tooltips_on: bool,
-    seq_sync: &SequencerSync,
-) -> ToolbarAction {
+/// Everything the toolbar draws from, for one frame.
+///
+/// This replaced a 16-argument positional signature that contained five
+/// consecutive `bool`s and two consecutive `u32`s — transposing any two of
+/// them compiled cleanly and produced a silently wrong toolbar.
+pub struct ToolbarView<'a> {
+    pub scan_status: &'a ScanStatus,
+    pub can_undo: bool,
+    pub can_redo: bool,
+    pub all_locked: bool,
+    pub params: &'a AutokitParams,
+    pub setter: &'a ParamSetter<'a>,
+    pub view_mode: ViewMode,
+    pub shortcut_info: Option<(usize, &'a str)>,
+    pub logo_texture: &'a egui::TextureHandle,
+    pub scan_processed: u32,
+    pub scan_total: u32,
+    pub is_standalone: bool,
+    pub standalone_tempo: &'a AtomicU32,
+    pub tooltips_on: bool,
+    pub seq_sync: &'a SequencerSync,
+}
+
+pub fn draw_toolbar_snapshot(ui: &mut egui::Ui, view: &ToolbarView<'_>) -> ToolbarAction {
+    let &ToolbarView {
+        scan_status,
+        can_undo,
+        can_redo,
+        all_locked,
+        params,
+        setter,
+        view_mode,
+        shortcut_info,
+        logo_texture,
+        scan_processed,
+        scan_total,
+        is_standalone,
+        standalone_tempo,
+        tooltips_on,
+        seq_sync,
+    } = view;
+
     let mut action = ToolbarAction::None;
 
     egui::Frame::NONE
@@ -558,11 +582,7 @@ pub fn draw_toolbar_snapshot(
 /// Stack a knob body and a small white centered label underneath it.
 /// Used to lay out all master-bus/FX knobs with labels below rather than
 /// inline to their left — keeps the toolbar compact and readable.
-fn knob_column(
-    ui: &mut egui::Ui,
-    label: &str,
-    knob_body: impl FnOnce(&mut egui::Ui),
-) {
+fn knob_column(ui: &mut egui::Ui, label: &str, knob_body: impl FnOnce(&mut egui::Ui)) {
     ui.allocate_ui_with_layout(
         egui::vec2(24.0, 36.0),
         egui::Layout::top_down(egui::Align::Center),

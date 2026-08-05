@@ -152,12 +152,16 @@ fn compute_spectral_features(samples: &[f32], sample_rate: f32) -> SpectralFeatu
 
         // Apply Hann window
         for (i, s) in buffer.iter_mut().enumerate() {
-            let hann = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / fft_size as f32).cos());
+            let hann =
+                0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / fft_size as f32).cos());
             *s *= hann;
         }
 
         let mut spectrum = fft.make_output_vec();
-        if fft.process_with_scratch(&mut buffer, &mut spectrum, &mut scratch).is_err() {
+        if fft
+            .process_with_scratch(&mut buffer, &mut spectrum, &mut scratch)
+            .is_err()
+        {
             continue;
         }
 
@@ -207,7 +211,12 @@ fn compute_spectral_features(samples: &[f32], sample_rate: f32) -> SpectralFeatu
     }
 
     if valid_windows == 0 {
-        return SpectralFeatures { centroid: 0.0, flatness: 0.0, sub_energy_ratio: 0.0, high_freq_ratio: 0.0 };
+        return SpectralFeatures {
+            centroid: 0.0,
+            flatness: 0.0,
+            sub_energy_ratio: 0.0,
+            high_freq_ratio: 0.0,
+        };
     }
 
     let n = valid_windows as f32;
@@ -231,8 +240,16 @@ fn compute_spectral_short(samples: &[f32], sample_rate: f32) -> SpectralFeatures
     let mut scratch = fft.make_scratch_vec();
     let mut spectrum = fft.make_output_vec();
 
-    if fft.process_with_scratch(&mut buffer, &mut spectrum, &mut scratch).is_err() {
-        return SpectralFeatures { centroid: 0.0, flatness: 0.0, sub_energy_ratio: 0.0, high_freq_ratio: 0.0 };
+    if fft
+        .process_with_scratch(&mut buffer, &mut spectrum, &mut scratch)
+        .is_err()
+    {
+        return SpectralFeatures {
+            centroid: 0.0,
+            flatness: 0.0,
+            sub_energy_ratio: 0.0,
+            high_freq_ratio: 0.0,
+        };
     }
 
     let freq_resolution = sample_rate / fft_size as f32;
@@ -245,7 +262,12 @@ fn compute_spectral_short(samples: &[f32], sample_rate: f32) -> SpectralFeatures
     let mag_sum: f32 = magnitudes.iter().sum();
 
     if mag_sum < 1e-10 || total_energy < 1e-20 {
-        return SpectralFeatures { centroid: 0.0, flatness: 0.0, sub_energy_ratio: 0.0, high_freq_ratio: 0.0 };
+        return SpectralFeatures {
+            centroid: 0.0,
+            flatness: 0.0,
+            sub_energy_ratio: 0.0,
+            high_freq_ratio: 0.0,
+        };
     }
 
     let centroid: f32 = magnitudes
@@ -305,7 +327,7 @@ fn classify_percussive(f: &AudioFeatures) -> SampleCategory {
     let sub = f.sub_energy_ratio;
     let hf = f.high_freq_ratio;
     let decay = f.decay_time;
-    let attack = f.attack_time;
+    let _attack = f.attack_time;
 
     // ── KICK ──────────────────────────────────────────────────────────────────
     // Dominant sub energy, low centroid.  Very dark kicks (808s) and regular kicks

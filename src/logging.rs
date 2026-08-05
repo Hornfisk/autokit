@@ -61,20 +61,21 @@ pub fn init() {
             }
         };
 
-        let filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| {
-                if cfg!(debug_assertions) {
-                    EnvFilter::new("autokit=debug,autokit_standalone=debug")
-                } else {
-                    EnvFilter::new("autokit=info,autokit_standalone=info")
-                }
-            });
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            if cfg!(debug_assertions) {
+                EnvFilter::new("autokit=debug,autokit_standalone=debug")
+            } else {
+                EnvFilter::new("autokit=info,autokit_standalone=info")
+            }
+        });
 
         let file_layer = fmt::layer()
             .with_writer(move || {
                 LineCountWriter::new(file.try_clone().unwrap_or_else(|_| {
                     // Fallback: open /dev/null to avoid panic if clone fails
-                    fs::OpenOptions::new().write(true).open("/dev/null")
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .open("/dev/null")
                         .expect("/dev/null should always be openable")
                 }))
             })
@@ -83,9 +84,7 @@ pub fn init() {
             .with_thread_ids(true)
             .with_level(true);
 
-        let subscriber = tracing_subscriber::registry()
-            .with(filter)
-            .with(file_layer);
+        let subscriber = tracing_subscriber::registry().with(filter).with(file_layer);
 
         let _ = tracing::subscriber::set_global_default(subscriber);
         tracing::info!("Autokit logger initialized — log file: {:?}", log_path);

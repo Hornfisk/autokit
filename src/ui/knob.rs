@@ -17,6 +17,12 @@ pub struct KnobResponse {
 /// - `format_value`: closure to format the display string
 /// - `ring_color`: color for the knob ring
 /// - `diameter`: knob diameter in pixels
+// Immediate-mode draw function: it takes a flat snapshot of everything it
+// paints for one frame. The 16-argument `draw_toolbar_snapshot` was converted
+// to a view struct because it had five consecutive `bool`s that could be
+// transposed silently; these are shorter and have no same-typed neighbours, so
+// a struct would add indirection without removing a real hazard.
+#[allow(clippy::too_many_arguments)]
 pub fn knob(
     ui: &mut egui::Ui,
     _id: egui::Id,
@@ -48,10 +54,16 @@ pub fn knob(
         // the knob rect manually and track timestamps.
         let dbl_id = response.id.with("last_press");
         let pointer_pressed_on_knob = ui.input(|i| {
-            i.events.iter().any(|e| matches!(
-                e,
-                egui::Event::PointerButton { pressed: true, button: egui::PointerButton::Primary, .. }
-            ))
+            i.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::Event::PointerButton {
+                        pressed: true,
+                        button: egui::PointerButton::Primary,
+                        ..
+                    }
+                )
+            })
         }) && response.contains_pointer();
         let is_double_click = if pointer_pressed_on_knob {
             let now = ui.input(|i| i.time);
@@ -117,6 +129,12 @@ pub fn knob(
 
 /// Draw a compact inline knob — no label below, just the ring + value text.
 /// Designed for use in track row headers where vertical space is tight.
+// Immediate-mode draw function: it takes a flat snapshot of everything it
+// paints for one frame. The 16-argument `draw_toolbar_snapshot` was converted
+// to a view struct because it had five consecutive `bool`s that could be
+// transposed silently; these are shorter and have no same-typed neighbours, so
+// a struct would add indirection without removing a real hazard.
+#[allow(clippy::too_many_arguments)]
 pub fn knob_inline(
     ui: &mut egui::Ui,
     id: egui::Id,
@@ -143,10 +161,16 @@ pub fn knob_inline(
     // Double-click detection (egui-baseview workaround)
     let dbl_id = id.with("last_press_inline");
     let pointer_pressed_on_knob = ui.input(|i| {
-        i.events.iter().any(|e| matches!(
-            e,
-            egui::Event::PointerButton { pressed: true, button: egui::PointerButton::Primary, .. }
-        ))
+        i.events.iter().any(|e| {
+            matches!(
+                e,
+                egui::Event::PointerButton {
+                    pressed: true,
+                    button: egui::PointerButton::Primary,
+                    ..
+                }
+            )
+        })
     }) && response.contains_pointer();
     let is_double_click = if pointer_pressed_on_knob {
         let now = ui.input(|i| i.time);
@@ -165,7 +189,11 @@ pub fn knob_inline(
 
     if response.dragged() && !is_double_click {
         let delta = -response.drag_delta().y;
-        let speed = if ui.input(|i| i.modifiers.shift) { 0.001 } else { 0.005 };
+        let speed = if ui.input(|i| i.modifiers.shift) {
+            0.001
+        } else {
+            0.005
+        };
         *value = (*value + delta * speed * (max - min)).clamp(min, max);
         result.changed = true;
     }

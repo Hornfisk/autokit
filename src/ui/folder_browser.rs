@@ -41,7 +41,7 @@ impl FolderBrowser {
         let start = if start.is_dir() {
             start.to_path_buf()
         } else {
-            crate::util::config::home_dir()
+            crate::util::storage::home_dir()
         };
         FolderBrowser {
             current_path: start,
@@ -67,7 +67,8 @@ impl FolderBrowser {
                 self.entries.push(DirEntry { name, path });
             }
         }
-        self.entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        self.entries
+            .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         self.dirty = false;
     }
 
@@ -97,7 +98,9 @@ impl FolderBrowser {
                 let mut nav_to: Option<PathBuf> = None;
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
-                    let ancestors: Vec<PathBuf> = self.current_path.ancestors()
+                    let ancestors: Vec<PathBuf> = self
+                        .current_path
+                        .ancestors()
                         .map(|a| a.to_path_buf())
                         .collect::<Vec<_>>()
                         .into_iter()
@@ -106,9 +109,13 @@ impl FolderBrowser {
                     for (i, ancestor) in ancestors.iter().enumerate() {
                         let label = if i == 0 {
                             #[cfg(target_os = "windows")]
-                            { ancestor.to_string_lossy().to_string() }
+                            {
+                                ancestor.to_string_lossy().to_string()
+                            }
                             #[cfg(not(target_os = "windows"))]
-                            { "/".to_string() }
+                            {
+                                "/".to_string()
+                            }
                         } else {
                             ancestor
                                 .file_name()
@@ -126,7 +133,11 @@ impl FolderBrowser {
                             );
                         }
                         let is_current = *ancestor == self.current_path;
-                        let color = if is_current { theme::ACCENT } else { theme::TEXT_DIM };
+                        let color = if is_current {
+                            theme::ACCENT
+                        } else {
+                            theme::TEXT_DIM
+                        };
                         if ui
                             .add(
                                 egui::Button::new(
@@ -216,10 +227,7 @@ impl FolderBrowser {
                 ui.separator();
 
                 // Show-hidden toggle (per-session; triggers a refresh on change)
-                if ui
-                    .checkbox(&mut self.show_hidden, "show hidden")
-                    .changed()
-                {
+                if ui.checkbox(&mut self.show_hidden, "show hidden").changed() {
                     self.dirty = true;
                 }
 

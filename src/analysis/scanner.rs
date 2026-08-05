@@ -1,8 +1,8 @@
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use walkdir::WalkDir;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use walkdir::WalkDir;
 
 use crate::analysis::library::ScanProgress;
 use crate::engine::kit::SampleCategory;
@@ -14,15 +14,52 @@ const MAX_DURATION_SECS: f32 = 4.0;
 const FOLDER_HINTS: &[(&[&str], SampleCategory)] = &[
     (&["kick", "kik", "kck", "bd"], SampleCategory::Kick),
     (&["snare", "snr", "sd"], SampleCategory::Snare),
-    (&["hat", "hh", "hihat", "hi-hat", "hi_hat"], SampleCategory::Hihat),
+    (
+        &["hat", "hh", "hihat", "hi-hat", "hi_hat"],
+        SampleCategory::Hihat,
+    ),
     (&["clap", "clp", "cp"], SampleCategory::Clap),
     (&["tom"], SampleCategory::Tom),
-    (&["perc", "percussion", "rimshot", "rim", "clave", "tambourine", "shaker", "conga", "bongo", "woodblock", "triangle", "cowbell"], SampleCategory::Perc),
+    (
+        &[
+            "perc",
+            "percussion",
+            "rimshot",
+            "rim",
+            "clave",
+            "tambourine",
+            "shaker",
+            "conga",
+            "bongo",
+            "woodblock",
+            "triangle",
+            "cowbell",
+        ],
+        SampleCategory::Perc,
+    ),
     (&["cymbal", "crash", "ride"], SampleCategory::Cymbal),
     (&["bass", "808", "sub"], SampleCategory::Bass),
-    (&["synth", "stab", "lead", "pad", "key", "chord", "arp"], SampleCategory::Synth),
-    (&["vox", "vocal", "voice", "choir", "sing"], SampleCategory::Other),
-    (&["fx", "sfx", "effect", "noise", "riser", "sweep", "impact", "transition"], SampleCategory::Other),
+    (
+        &["synth", "stab", "lead", "pad", "key", "chord", "arp"],
+        SampleCategory::Synth,
+    ),
+    (
+        &["vox", "vocal", "voice", "choir", "sing"],
+        SampleCategory::Other,
+    ),
+    (
+        &[
+            "fx",
+            "sfx",
+            "effect",
+            "noise",
+            "riser",
+            "sweep",
+            "impact",
+            "transition",
+        ],
+        SampleCategory::Other,
+    ),
 ];
 
 /// Filename keywords (typically short abbreviations) that hint at a sample category.
@@ -34,11 +71,22 @@ const FILENAME_HINTS: &[(&[&str], SampleCategory)] = &[
     (&["hh", "hihat", "hat", "oh", "ch"], SampleCategory::Hihat),
     (&["cp", "clap", "clp"], SampleCategory::Clap),
     (&["tom", "lt", "mt", "ht"], SampleCategory::Tom),
-    (&["perc", "rim", "rimshot", "rs", "cb", "cowbell", "clv", "clave",
-      "tamb", "shk", "shaker", "conga", "bongo", "triangle", "block"], SampleCategory::Perc),
-    (&["cy", "cymbal", "crash", "cr", "ride", "rd"], SampleCategory::Cymbal),
+    (
+        &[
+            "perc", "rim", "rimshot", "rs", "cb", "cowbell", "clv", "clave", "tamb", "shk",
+            "shaker", "conga", "bongo", "triangle", "block",
+        ],
+        SampleCategory::Perc,
+    ),
+    (
+        &["cy", "cymbal", "crash", "cr", "ride", "rd"],
+        SampleCategory::Cymbal,
+    ),
     (&["bass", "808", "sub"], SampleCategory::Bass),
-    (&["synth", "stab", "lead", "pad", "key"], SampleCategory::Synth),
+    (
+        &["synth", "stab", "lead", "pad", "key"],
+        SampleCategory::Synth,
+    ),
     (&["vox", "vocal"], SampleCategory::Other),
     (&["fx", "sfx"], SampleCategory::Other),
 ];
@@ -137,8 +185,7 @@ pub fn scan_folder_with_progress(
         }
 
         // Extract hint from parent directory names, then fall back to filename
-        let folder_hint = extract_folder_hint(path)
-            .or_else(|| extract_filename_hint(&lower_name));
+        let folder_hint = extract_folder_hint(path).or_else(|| extract_filename_hint(&lower_name));
 
         entries.push(SampleEntry {
             path: path.to_path_buf(),
@@ -204,10 +251,16 @@ pub fn guess_category_from_filename(filename: &str) -> Option<SampleCategory> {
 /// and each token is compared against known abbreviations.
 fn extract_filename_hint(lower_filename: &str) -> Option<SampleCategory> {
     // Strip extension for matching
-    let stem = lower_filename.rsplit_once('.').map(|(s, _)| s).unwrap_or(lower_filename);
+    let stem = lower_filename
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(lower_filename);
 
     // Split into tokens on non-alphanumeric boundaries (e.g., "bd_01" -> ["bd", "01"])
-    let tokens: Vec<&str> = stem.split(|c: char| !c.is_alphanumeric()).filter(|t| !t.is_empty()).collect();
+    let tokens: Vec<&str> = stem
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
 
     for token in &tokens {
         for (keywords, category) in FILENAME_HINTS {
@@ -223,5 +276,7 @@ fn extract_filename_hint(lower_filename: &str) -> Option<SampleCategory> {
 /// Filter entries by maximum duration (in samples at given sample rate).
 pub fn filter_by_duration(entries: &mut Vec<SampleEntry>, sample_rate: f32) {
     let max_samples = (MAX_DURATION_SECS * sample_rate) as u32;
-    entries.retain(|e| e.duration_ms == 0 || e.duration_ms <= (max_samples * 1000 / sample_rate as u32));
+    entries.retain(|e| {
+        e.duration_ms == 0 || e.duration_ms <= (max_samples * 1000 / sample_rate as u32)
+    });
 }

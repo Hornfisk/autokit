@@ -124,7 +124,10 @@ mod tests {
         let mut det = EchoDetector::new(48000.0);
         det.record(36);
         det.tick(det.echo_window as usize + 100);
-        assert!(!det.check(36), "same note outside window should not be echo");
+        assert!(
+            !det.check(36),
+            "same note outside window should not be echo"
+        );
     }
 
     #[test]
@@ -141,7 +144,10 @@ mod tests {
         det.record(36);
         det.tick(100);
         assert!(det.check(36));
-        assert!(!det.check(36), "second check should not match consumed entry");
+        assert!(
+            !det.check(36),
+            "second check should not match consumed entry"
+        );
     }
 
     #[test]
@@ -155,7 +161,11 @@ mod tests {
             det.check(36 + (i as u8 % 4));
         }
 
-        assert!(det.is_suppressing(), "should suppress after {} consecutive echoes", SUPPRESS_THRESHOLD);
+        assert!(
+            det.is_suppressing(),
+            "should suppress after {} consecutive echoes",
+            SUPPRESS_THRESHOLD
+        );
     }
 
     #[test]
@@ -180,7 +190,10 @@ mod tests {
             det.tick(50);
             det.check(36);
         }
-        assert!(!det.is_suppressing(), "should not suppress — count was reset");
+        assert!(
+            !det.is_suppressing(),
+            "should not suppress — count was reset"
+        );
     }
 
     #[test]

@@ -29,6 +29,12 @@ pub struct MasterBus {
     lim_release_coeff: f32,
 }
 
+impl Default for MasterBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MasterBus {
     pub fn new() -> Self {
         Self {

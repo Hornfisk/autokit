@@ -121,7 +121,11 @@ impl Voice {
         // Linear interpolation between adjacent samples
         let frac = (self.position - pos_floor as f64) as f32;
         let s0 = data[pos_floor];
-        let s1 = if pos_floor + 1 < data.len() { data[pos_floor + 1] } else { 0.0 };
+        let s1 = if pos_floor + 1 < data.len() {
+            data[pos_floor + 1]
+        } else {
+            0.0
+        };
         let mut s = (s0 + (s1 - s0) * frac) * self.velocity;
         self.position += self.rate;
 
@@ -141,6 +145,96 @@ impl Voice {
         let left = s * angle.cos();
         let right = s * angle.sin();
         Some((left, right))
+    }
+}
+
+/// Everything needed to start one voice.
+///
+/// Replaces a 12-argument positional `trigger()` whose call sites read
+/// `None, None, None, None, None, 0.0, 0.0, false` — five same-typed
+/// `Option<f32>` p-locks in a row is an argument-order bug waiting to happen.
+///
+/// The `Option` fields are step p-locks: `None` means "inherit", and the
+/// `lane_*` fields supply what to inherit for the three FX routings. Pan and
+/// pitch inherit from the pad instead.
+#[derive(Clone, Copy)]
+pub struct Trigger {
+    pub pad_index: usize,
+    pub velocity: f32,
+    /// Samples to wait before this voice starts, for sample-accurate
+    /// sequencer placement within a buffer.
+    pub start_offset: usize,
+    pub pan: Option<f32>,
+    pub pitch: Option<f32>,
+    pub fx_rvb: Option<f32>,
+    pub fx_dly: Option<f32>,
+    pub fx_filter: Option<bool>,
+    pub lane_rvb: f32,
+    pub lane_dly: f32,
+    pub lane_filter: bool,
+}
+
+impl Trigger {
+    /// A trigger with no p-locks and no lane sends — everything inherits from
+    /// the pad. This is what a MIDI note or a pad click produces.
+    pub fn new(pad_index: usize, velocity: f32) -> Self {
+        Self {
+            pad_index,
+            velocity,
+            start_offset: 0,
+            pan: None,
+            pitch: None,
+            fx_rvb: None,
+            fx_dly: None,
+            fx_filter: None,
+            lane_rvb: 0.0,
+            lane_dly: 0.0,
+            lane_filter: false,
+        }
+    }
+
+    /// Attach the active lane's FX routing defaults.
+    pub fn with_lane_fx(mut self, rvb: f32, dly: f32, filter: bool) -> Self {
+        self.lane_rvb = rvb;
+        self.lane_dly = dly;
+        self.lane_filter = filter;
+        self
+    }
+}
+
+/// The four parallel buses voices render into, borrowed for one buffer.
+///
+/// - `dry_bypass_*` — direct, unfiltered. Voices with `fx_to_filter == false`.
+/// - `dry_filter_*` — direct, routed through the master DJ filter insert.
+///   Voices with `fx_to_filter == true`.
+/// - `send_rvb_*` — reverb send: each voice's output scaled by its resolved
+///   reverb send level and summed.
+/// - `send_dly_*` — delay send, same idea.
+///
+/// Grouping these replaces an eight-`&mut [f32]` positional argument list
+/// where every parameter had the same type.
+pub struct RenderBuses<'a> {
+    pub dry_bypass_l: &'a mut [f32],
+    pub dry_bypass_r: &'a mut [f32],
+    pub dry_filter_l: &'a mut [f32],
+    pub dry_filter_r: &'a mut [f32],
+    pub send_rvb_l: &'a mut [f32],
+    pub send_rvb_r: &'a mut [f32],
+    pub send_dly_l: &'a mut [f32],
+    pub send_dly_r: &'a mut [f32],
+}
+
+impl RenderBuses<'_> {
+    /// Zero every bus. Called once per buffer before rendering.
+    pub fn clear(&mut self) {
+        self.dry_bypass_l.fill(0.0);
+        self.dry_bypass_r.fill(0.0);
+        self.dry_filter_l.fill(0.0);
+        self.dry_filter_r.fill(0.0);
+        self.send_rvb_l.fill(0.0);
+        self.send_rvb_r.fill(0.0);
+        self.send_dly_l.fill(0.0);
+        self.send_dly_r.fill(0.0);
     }
 }
 
@@ -167,22 +261,13 @@ impl VoicePool {
     /// Trigger a pad. Fades out any existing voices on the same pad,
     /// then allocates a new voice.
     /// Called from audio thread — all allocating ops wrapped in permit_alloc.
-    pub fn trigger(
-        &mut self,
-        pad_index: usize,
-        velocity: f32,
-        kit: &DrumKit,
-        start_offset: usize,
-        pan_override: Option<f32>,
-        pitch_override: Option<f32>,
-        rvb_override: Option<f32>,
-        dly_override: Option<f32>,
-        filter_override: Option<bool>,
-        lane_rvb: f32,
-        lane_dly: f32,
-        lane_filter: bool,
-    ) {
-        let pad = &kit.pads[pad_index];
+    pub fn trigger(&mut self, t: &Trigger, kit: &DrumKit) {
+        let pad_index = t.pad_index;
+        // Callers are expected to bounds-check, but this indexes `kit.pads` on
+        // the audio thread, so it verifies rather than trusts.
+        let Some(pad) = kit.pads.get(pad_index) else {
+            return;
+        };
 
         let sample = match &pad.sample {
             Some(s) => s,
@@ -200,7 +285,7 @@ impl VoicePool {
         let slot = self.find_free_or_steal();
 
         self.trigger_counter += 1;
-        let pitch = pitch_override.unwrap_or(pad.pitch);
+        let pitch = t.pitch.unwrap_or(pad.pitch);
         let rate = 2.0_f64.powf(pitch as f64 / 12.0);
         let voice = &mut self.voices[slot];
         voice.pad_index = Some(pad_index);
@@ -217,16 +302,16 @@ impl VoicePool {
 
         voice.position = start_sample as f64;
         voice.rate = rate;
-        voice.velocity = velocity * pad.volume;
+        voice.velocity = t.velocity * pad.volume;
         voice.age = self.trigger_counter;
         voice.fade_remaining = 0;
         voice.fade_length = self.fade_samples;
-        voice.start_offset = start_offset;
+        voice.start_offset = t.start_offset;
         voice.samples_rendered = 0;
-        voice.pan = pan_override.unwrap_or(pad.pan);
-        voice.fx_rvb_send = rvb_override.unwrap_or(lane_rvb).clamp(0.0, 1.0);
-        voice.fx_dly_send = dly_override.unwrap_or(lane_dly).clamp(0.0, 1.0);
-        voice.fx_to_filter = filter_override.unwrap_or(lane_filter);
+        voice.pan = t.pan.unwrap_or(pad.pan);
+        voice.fx_rvb_send = t.fx_rvb.unwrap_or(t.lane_rvb).clamp(0.0, 1.0);
+        voice.fx_dly_send = t.fx_dly.unwrap_or(t.lane_dly).clamp(0.0, 1.0);
+        voice.fx_to_filter = t.fx_filter.unwrap_or(t.lane_filter);
         let full_region = pad.start <= 0.001 && pad.end >= 0.999;
         voice.max_samples = if pad.decay >= 1.0 && full_region {
             // Full sample, full decay: natural end-of-data handles stop
@@ -259,63 +344,14 @@ impl VoicePool {
         oldest_idx
     }
 
-    /// Mix all active voices into the output buffer.
-    /// Pan values are resolved at trigger time — no kit reference needed.
-    pub fn process(&mut self, output_left: &mut [f32], output_right: &mut [f32]) {
-        for voice in self.voices.iter_mut() {
-            if !voice.is_active() {
-                continue;
-            }
-
-            let pan = voice.pan;
-
-            for (i, (l, r)) in output_left.iter_mut().zip(output_right.iter_mut()).enumerate() {
-                if i < voice.start_offset {
-                    continue;
-                }
-                match voice.next_sample(pan) {
-                    Some((vl, vr)) => {
-                        *l += vl;
-                        *r += vr;
-                    }
-                    None => break,
-                }
-            }
-
-            // Reset offset so next buffer plays from sample 0
-            voice.start_offset = 0;
-
-            // Clean up finished voices
-            if !voice.is_active() {
-                voice.deactivate();
-            }
-        }
-    }
-
-    /// Mix voices into four parallel buses:
-    ///   - `dry_bypass_*`: direct (unfiltered) dry — voices with `fx_to_filter == false`.
-    ///   - `dry_filter_*`: direct dry destined for the master DJ filter insert —
-    ///     voices with `fx_to_filter == true`.
-    ///   - `send_rvb_*`: reverb send — each voice's direct output scaled by
-    ///     `voice.fx_rvb_send` and summed.
-    ///   - `send_dly_*`: delay send — same for `voice.fx_dly_send`.
+    /// Mix voices into the four parallel buses of [`RenderBuses`].
     ///
     /// Every voice carries its own resolved sends (pad default, optionally
-    /// overridden by a step plock), so per-hit FX routing works automatically.
+    /// overridden by a step p-lock), so per-hit FX routing works automatically.
     ///
     /// Zero-alloc: the caller pre-allocates all eight buffers.
-    pub fn process_sends(
-        &mut self,
-        dry_bypass_l: &mut [f32],
-        dry_bypass_r: &mut [f32],
-        dry_filter_l: &mut [f32],
-        dry_filter_r: &mut [f32],
-        send_rvb_l: &mut [f32],
-        send_rvb_r: &mut [f32],
-        send_dly_l: &mut [f32],
-        send_dly_r: &mut [f32],
-    ) {
-        let num_samples = dry_bypass_l.len();
+    pub fn process_sends(&mut self, buses: &mut RenderBuses<'_>) {
+        let num_samples = buses.dry_bypass_l.len();
         for voice in self.voices.iter_mut() {
             if !voice.is_active() {
                 continue;
@@ -332,19 +368,19 @@ impl VoicePool {
                 match voice.next_sample(pan) {
                     Some((vl, vr)) => {
                         if to_filter {
-                            dry_filter_l[i] += vl;
-                            dry_filter_r[i] += vr;
+                            buses.dry_filter_l[i] += vl;
+                            buses.dry_filter_r[i] += vr;
                         } else {
-                            dry_bypass_l[i] += vl;
-                            dry_bypass_r[i] += vr;
+                            buses.dry_bypass_l[i] += vl;
+                            buses.dry_bypass_r[i] += vr;
                         }
                         if rvb_g > 0.0 {
-                            send_rvb_l[i] += vl * rvb_g;
-                            send_rvb_r[i] += vr * rvb_g;
+                            buses.send_rvb_l[i] += vl * rvb_g;
+                            buses.send_rvb_r[i] += vr * rvb_g;
                         }
                         if dly_g > 0.0 {
-                            send_dly_l[i] += vl * dly_g;
-                            send_dly_r[i] += vr * dly_g;
+                            buses.send_dly_l[i] += vl * dly_g;
+                            buses.send_dly_r[i] += vr * dly_g;
                         }
                     }
                     None => break,
@@ -369,161 +405,383 @@ mod tests {
     use super::*;
     use crate::engine::kit::{DrumKit, SampleCategory};
 
-    /// Build a minimal kit with one pad loaded with a known sample.
-    fn test_kit() -> DrumKit {
+    /// Constant-power centre pan: cos(PI/4) ≈ 0.7071.
+    const CENTRE_GAIN: f32 = std::f32::consts::FRAC_1_SQRT_2;
+
+    /// Four render buses matching `VoicePool::process_sends`.
+    struct Buses {
+        dry_bypass_l: Vec<f32>,
+        dry_bypass_r: Vec<f32>,
+        dry_filter_l: Vec<f32>,
+        dry_filter_r: Vec<f32>,
+        send_rvb_l: Vec<f32>,
+        send_rvb_r: Vec<f32>,
+        send_dly_l: Vec<f32>,
+        send_dly_r: Vec<f32>,
+    }
+
+    impl Buses {
+        fn new(n: usize) -> Self {
+            Self {
+                dry_bypass_l: vec![0.0; n],
+                dry_bypass_r: vec![0.0; n],
+                dry_filter_l: vec![0.0; n],
+                dry_filter_r: vec![0.0; n],
+                send_rvb_l: vec![0.0; n],
+                send_rvb_r: vec![0.0; n],
+                send_dly_l: vec![0.0; n],
+                send_dly_r: vec![0.0; n],
+            }
+        }
+
+        /// Render one buffer through the shipping path.
+        fn render(&mut self, pool: &mut VoicePool) {
+            pool.process_sends(&mut RenderBuses {
+                dry_bypass_l: &mut self.dry_bypass_l,
+                dry_bypass_r: &mut self.dry_bypass_r,
+                dry_filter_l: &mut self.dry_filter_l,
+                dry_filter_r: &mut self.dry_filter_r,
+                send_rvb_l: &mut self.send_rvb_l,
+                send_rvb_r: &mut self.send_rvb_r,
+                send_dly_l: &mut self.send_dly_l,
+                send_dly_r: &mut self.send_dly_r,
+            });
+        }
+    }
+
+    /// A kit whose pad 0 holds `len` samples of 1.0 — easy to verify.
+    fn test_kit_len(len: usize) -> DrumKit {
         let mut kit = DrumKit::new();
-        // 8 samples of 1.0 — easy to verify in output
-        kit.pads[0].sample = Some(Arc::new(vec![1.0; 8]));
+        kit.pads[0].sample = Some(Arc::new(vec![1.0; len]));
         kit.pads[0].volume = 1.0;
         kit.pads[0].pan = 0.0;
         kit.pads[0].category = SampleCategory::Kick;
         kit
     }
 
+    fn test_kit() -> DrumKit {
+        test_kit_len(8)
+    }
+
+    // ── Basic playback ───────────────────────────────────────────────────
+
     #[test]
     fn trigger_with_zero_offset_plays_from_start() {
         let kit = test_kit();
         let mut pool = VoicePool::new(44100.0);
-        pool.trigger(0, 1.0, &kit, 0, None, None, None, None, None, 0.0, 0.0, false);
+        pool.trigger(&Trigger::new(0, 1.0), &kit);
 
-        let mut left = vec![0.0f32; 8];
-        let mut right = vec![0.0f32; 8];
-        pool.process(&mut left, &mut right);
+        let mut b = Buses::new(8);
+        b.render(&mut pool);
 
-        // Pan center: constant-power pan gives cos(PI/4) ≈ 0.7071
-        let expected = (0.25 * std::f32::consts::PI).cos();
-        assert!((left[0] - expected).abs() < 0.001, "first sample should be non-zero");
-        assert!((left[7] - expected).abs() < 0.001, "last sample should be non-zero");
+        assert!(
+            (b.dry_bypass_l[0] - CENTRE_GAIN).abs() < 0.001,
+            "first sample should be non-zero"
+        );
+        assert!(
+            (b.dry_bypass_l[7] - CENTRE_GAIN).abs() < 0.001,
+            "last sample should be non-zero"
+        );
     }
 
     #[test]
     fn trigger_with_offset_delays_playback() {
         let kit = test_kit();
         let mut pool = VoicePool::new(44100.0);
-        pool.trigger(0, 1.0, &kit, 4, None, None, None, None, None, 0.0, 0.0, false); // start at sample 4
+        let t = Trigger {
+            start_offset: 4,
+            ..Trigger::new(0, 1.0)
+        };
+        pool.trigger(&t, &kit);
 
-        let mut left = vec![0.0f32; 12];
-        let mut right = vec![0.0f32; 12];
-        pool.process(&mut left, &mut right);
+        let mut b = Buses::new(12);
+        b.render(&mut pool);
 
-        // Samples 0..4 should be silent
         for i in 0..4 {
-            assert_eq!(left[i], 0.0, "sample {i} should be silent (before offset)");
+            assert_eq!(
+                b.dry_bypass_l[i], 0.0,
+                "sample {i} should be silent (before offset)"
+            );
         }
-
-        // Samples 4..12 should have audio (8 samples of the pad)
-        let expected = (0.25 * std::f32::consts::PI).cos();
-        assert!((left[4] - expected).abs() < 0.001, "sample 4 should have audio");
+        assert!(
+            (b.dry_bypass_l[4] - CENTRE_GAIN).abs() < 0.001,
+            "sample 4 should have audio"
+        );
     }
 
     #[test]
     fn start_offset_resets_after_first_buffer() {
+        let kit = test_kit_len(100);
         let mut pool = VoicePool::new(44100.0);
-        let mut kit = DrumKit::new();
-        kit.pads[0].sample = Some(Arc::new(vec![1.0; 100]));
-        kit.pads[0].volume = 1.0;
-        kit.pads[0].pan = 0.0;
-        kit.pads[0].category = SampleCategory::Kick;
+        pool.trigger(
+            &Trigger {
+                start_offset: 4,
+                ..Trigger::new(0, 1.0)
+            },
+            &kit,
+        );
 
-        pool.trigger(0, 1.0, &kit, 4, None, None, None, None, None, 0.0, 0.0, false);
+        let mut first = Buses::new(8);
+        first.render(&mut pool);
+        assert_eq!(
+            first.dry_bypass_l[0], 0.0,
+            "first buffer: sample 0 should be silent"
+        );
 
-        // First buffer: 8 samples, offset should apply (0..4 silent)
-        let mut left1 = vec![0.0f32; 8];
-        let mut right1 = vec![0.0f32; 8];
-        pool.process(&mut left1, &mut right1);
-        assert_eq!(left1[0], 0.0, "first buffer: sample 0 should be silent");
-
-        // Second buffer: offset should be reset, audio starts at sample 0
-        let mut left2 = vec![0.0f32; 8];
-        let mut right2 = vec![0.0f32; 8];
-        pool.process(&mut left2, &mut right2);
-        let expected = (0.25 * std::f32::consts::PI).cos();
-        assert!((left2[0] - expected).abs() < 0.001, "second buffer: sample 0 should have audio (offset reset)");
+        let mut second = Buses::new(8);
+        second.render(&mut pool);
+        assert!(
+            (second.dry_bypass_l[0] - CENTRE_GAIN).abs() < 0.001,
+            "second buffer: sample 0 should have audio (offset reset)"
+        );
     }
 
     #[test]
     fn velocity_scales_output_amplitude() {
         let kit = test_kit();
-        let pan_gain = (0.25 * std::f32::consts::PI).cos(); // ~0.7071 for center pan
 
-        // Full velocity
-        let mut pool = VoicePool::new(44100.0);
-        pool.trigger(0, 1.0, &kit, 0, None, None, None, None, None, 0.0, 0.0, false);
-        let mut left_full = vec![0.0f32; 4];
-        let mut right_full = vec![0.0f32; 4];
-        pool.process(&mut left_full, &mut right_full);
+        let render_at = |velocity: f32| {
+            let mut pool = VoicePool::new(44100.0);
+            pool.trigger(&Trigger::new(0, velocity), &kit);
+            let mut b = Buses::new(4);
+            b.render(&mut pool);
+            b.dry_bypass_l[0]
+        };
 
-        // Half velocity
-        let mut pool = VoicePool::new(44100.0);
-        pool.trigger(0, 0.5, &kit, 0, None, None, None, None, None, 0.0, 0.0, false);
-        let mut left_half = vec![0.0f32; 4];
-        let mut right_half = vec![0.0f32; 4];
-        pool.process(&mut left_half, &mut right_half);
-
-        // Zero velocity
-        let mut pool = VoicePool::new(44100.0);
-        pool.trigger(0, 0.0, &kit, 0, None, None, None, None, None, 0.0, 0.0, false);
-        let mut left_zero = vec![0.0f32; 4];
-        let mut right_zero = vec![0.0f32; 4];
-        pool.process(&mut left_zero, &mut right_zero);
-
-        // Full velocity should give pan_gain (sample=1.0 * vel=1.0 * pan)
-        assert!((left_full[0] - pan_gain).abs() < 0.001,
-            "full velocity: expected {pan_gain}, got {}", left_full[0]);
-
-        // Half velocity should give half of full
-        assert!((left_half[0] - pan_gain * 0.5).abs() < 0.001,
-            "half velocity: expected {}, got {}", pan_gain * 0.5, left_half[0]);
-
-        // Zero velocity should be silent
-        assert_eq!(left_zero[0], 0.0, "zero velocity should be silent");
+        assert!(
+            (render_at(1.0) - CENTRE_GAIN).abs() < 0.001,
+            "full velocity"
+        );
+        assert!(
+            (render_at(0.5) - CENTRE_GAIN * 0.5).abs() < 0.001,
+            "half velocity"
+        );
+        assert_eq!(render_at(0.0), 0.0, "zero velocity should be silent");
     }
 
     #[test]
     fn start_point_offsets_playback_into_sample() {
-        // Sample: [0.0, 0.25, 0.5, 0.75, 1.0, 0.75, 0.5, 0.25]
         let mut kit = DrumKit::new();
         kit.pads[0].sample = Some(Arc::new(vec![0.0, 0.25, 0.5, 0.75, 1.0, 0.75, 0.5, 0.25]));
         kit.pads[0].volume = 1.0;
         kit.pads[0].pan = 0.0;
-        kit.pads[0].category = SampleCategory::Kick;
-        kit.pads[0].start = 0.5; // Start halfway = sample index 4
+        kit.pads[0].start = 0.5; // halfway = source index 4
 
         let mut pool = VoicePool::new(44100.0);
-        pool.trigger(0, 1.0, &kit, 0, None, None, None, None, None, 0.0, 0.0, false);
+        pool.trigger(&Trigger::new(0, 1.0), &kit);
 
-        let mut left = vec![0.0f32; 4];
-        let mut right = vec![0.0f32; 4];
-        pool.process(&mut left, &mut right);
+        let mut b = Buses::new(4);
+        b.render(&mut pool);
 
-        let pan_gain = (0.25 * std::f32::consts::PI).cos();
-        // First output sample should come from index 4 (value 1.0)
-        assert!((left[0] - 1.0 * pan_gain).abs() < 0.01,
-            "start=0.5 should play from mid-sample: expected {}, got {}", 1.0 * pan_gain, left[0]);
+        assert!(
+            (b.dry_bypass_l[0] - CENTRE_GAIN).abs() < 0.01,
+            "start=0.5 should play from mid-sample, got {}",
+            b.dry_bypass_l[0]
+        );
     }
 
     #[test]
     fn end_point_stops_playback_early() {
-        // 100 samples of 1.0
-        let mut kit = DrumKit::new();
-        kit.pads[0].sample = Some(Arc::new(vec![1.0; 100]));
-        kit.pads[0].volume = 1.0;
-        kit.pads[0].pan = 0.0;
-        kit.pads[0].category = SampleCategory::Kick;
-        kit.pads[0].end = 0.1; // End at 10% = 10 source samples
+        let mut kit = test_kit_len(100);
+        kit.pads[0].end = 0.1; // 10 source samples
 
         let mut pool = VoicePool::new(44100.0);
-        pool.trigger(0, 1.0, &kit, 0, None, None, None, None, None, 0.0, 0.0, false);
+        pool.trigger(&Trigger::new(0, 1.0), &kit);
 
-        let mut left = vec![0.0f32; 20];
-        let mut right = vec![0.0f32; 20];
-        pool.process(&mut left, &mut right);
+        let mut b = Buses::new(20);
+        b.render(&mut pool);
 
-        let pan_gain = (0.25 * std::f32::consts::PI).cos();
-        // First sample should have audio
-        assert!((left[0] - pan_gain).abs() < 0.01, "should have audio at start");
-        // Well past the end point, should be silent
-        assert!((left[15]).abs() < 0.01,
-            "should be silent past end point, got {}", left[15]);
+        assert!(
+            (b.dry_bypass_l[0] - CENTRE_GAIN).abs() < 0.01,
+            "should have audio at start"
+        );
+        assert!(
+            b.dry_bypass_l[15].abs() < 0.01,
+            "should be silent past end point, got {}",
+            b.dry_bypass_l[15]
+        );
     }
+
+    #[test]
+    fn trigger_on_an_empty_pad_is_a_noop() {
+        let kit = DrumKit::new(); // no samples loaded
+        let mut pool = VoicePool::new(44100.0);
+        pool.trigger(&Trigger::new(0, 1.0), &kit);
+        assert_eq!(pool.active_count(), 0);
+    }
+
+    #[test]
+    fn trigger_with_out_of_range_pad_index_does_not_panic() {
+        let kit = test_kit();
+        let mut pool = VoicePool::new(44100.0);
+        pool.trigger(&Trigger::new(999, 1.0), &kit);
+        assert_eq!(pool.active_count(), 0);
+    }
+
+    // ── FX bus routing (the four-bus path — previously untested) ──────────
+
+    #[test]
+    fn voices_default_to_the_unfiltered_dry_bus() {
+        let kit = test_kit();
+        let mut pool = VoicePool::new(44100.0);
+        pool.trigger(&Trigger::new(0, 1.0), &kit);
+
+        let mut b = Buses::new(8);
+        b.render(&mut pool);
+
+        assert!(
+            b.dry_bypass_l[0].abs() > 0.001,
+            "audio should land on the bypass bus"
+        );
+        assert_eq!(b.dry_filter_l[0], 0.0, "filter bus should be untouched");
+        assert_eq!(b.send_rvb_l[0], 0.0, "reverb send should be silent");
+        assert_eq!(b.send_dly_l[0], 0.0, "delay send should be silent");
+    }
+
+    #[test]
+    fn lane_filter_flag_routes_to_the_filter_bus_instead() {
+        let kit = test_kit();
+        let mut pool = VoicePool::new(44100.0);
+        pool.trigger(&Trigger::new(0, 1.0).with_lane_fx(0.0, 0.0, true), &kit);
+
+        let mut b = Buses::new(8);
+        b.render(&mut pool);
+
+        assert!(
+            b.dry_filter_l[0].abs() > 0.001,
+            "audio should land on the filter bus"
+        );
+        assert_eq!(b.dry_bypass_l[0], 0.0, "bypass bus should be untouched");
+    }
+
+    #[test]
+    fn lane_sends_scale_the_reverb_and_delay_buses() {
+        let kit = test_kit();
+        let mut pool = VoicePool::new(44100.0);
+        pool.trigger(&Trigger::new(0, 1.0).with_lane_fx(0.5, 0.25, false), &kit);
+
+        let mut b = Buses::new(8);
+        b.render(&mut pool);
+
+        let dry = b.dry_bypass_l[0];
+        assert!(
+            (b.send_rvb_l[0] - dry * 0.5).abs() < 0.001,
+            "reverb send should be 50% of dry"
+        );
+        assert!(
+            (b.send_dly_l[0] - dry * 0.25).abs() < 0.001,
+            "delay send should be 25% of dry"
+        );
+        assert!(
+            (dry - CENTRE_GAIN).abs() < 0.001,
+            "sends are taps, so the dry signal is unchanged"
+        );
+    }
+
+    #[test]
+    fn step_plocks_override_the_lane_fx_defaults() {
+        let kit = test_kit();
+        let mut pool = VoicePool::new(44100.0);
+        // Lane says "no reverb, no filter"; the step p-lock says otherwise.
+        let t = Trigger {
+            fx_rvb: Some(1.0),
+            fx_filter: Some(true),
+            ..Trigger::new(0, 1.0).with_lane_fx(0.0, 0.0, false)
+        };
+        pool.trigger(&t, &kit);
+
+        let mut b = Buses::new(8);
+        b.render(&mut pool);
+
+        assert!(
+            b.dry_filter_l[0].abs() > 0.001,
+            "p-lock should route to the filter bus"
+        );
+        assert!(
+            (b.send_rvb_l[0] - b.dry_filter_l[0]).abs() < 0.001,
+            "p-locked reverb send of 1.0 should equal the dry level"
+        );
+    }
+
+    #[test]
+    fn out_of_range_fx_sends_are_clamped() {
+        let kit = test_kit();
+        let mut pool = VoicePool::new(44100.0);
+        let t = Trigger {
+            fx_rvb: Some(9.0),
+            fx_dly: Some(-3.0),
+            ..Trigger::new(0, 1.0)
+        };
+        pool.trigger(&t, &kit);
+
+        let mut b = Buses::new(8);
+        b.render(&mut pool);
+
+        let dry = b.dry_bypass_l[0];
+        assert!(
+            (b.send_rvb_l[0] - dry).abs() < 0.001,
+            "send above 1.0 should clamp to 1.0"
+        );
+        assert_eq!(b.send_dly_l[0], 0.0, "negative send should clamp to 0.0");
+    }
+
+    #[test]
+    fn pan_plock_overrides_the_pad_pan() {
+        let kit = test_kit();
+        let mut pool = VoicePool::new(44100.0);
+        // Hard left.
+        pool.trigger(
+            &Trigger {
+                pan: Some(-1.0),
+                ..Trigger::new(0, 1.0)
+            },
+            &kit,
+        );
+
+        let mut b = Buses::new(8);
+        b.render(&mut pool);
+
+        assert!(
+            (b.dry_bypass_l[0] - 1.0).abs() < 0.001,
+            "hard left should put full level on L"
+        );
+        assert!(
+            b.dry_bypass_r[0].abs() < 0.001,
+            "hard left should leave R silent"
+        );
+    }
+
+    // ── Voice pool management ────────────────────────────────────────────
+
+    #[test]
+    fn retrigger_fades_the_previous_voice_instead_of_cutting_it() {
+        let kit = test_kit_len(44100);
+        let mut pool = VoicePool::new(44100.0);
+        pool.trigger(&Trigger::new(0, 1.0), &kit);
+        pool.trigger(&Trigger::new(0, 1.0), &kit);
+        assert_eq!(
+            pool.active_count(),
+            2,
+            "the fading voice stays active alongside the new one"
+        );
+    }
+
+    #[test]
+    fn pool_never_exceeds_max_voices() {
+        let mut kit = DrumKit::new();
+        for pad in &mut kit.pads {
+            pad.sample = Some(Arc::new(vec![1.0; 44100]));
+            pad.volume = 1.0;
+        }
+        let mut pool = VoicePool::new(44100.0);
+        for i in 0..(MAX_VOICES * 3) {
+            pool.trigger(&Trigger::new(i % NUM_PADS_FOR_TEST, 1.0), &kit);
+        }
+        assert!(
+            pool.active_count() <= MAX_VOICES,
+            "voice count must stay bounded"
+        );
+    }
+
+    const NUM_PADS_FOR_TEST: usize = 8;
 }

@@ -240,6 +240,17 @@ Run `./install.sh` (Linux/macOS) or `install.bat` (Windows) to copy plugins to s
 - No Audio Unit (AU) support (nih-plug limitation).
 - Window is not dynamically resizable (egui-baseview limitation).
 
+## Upgrading to 0.5.5
+
+The CLAP identifier changed from `com.rexist.autokit` to
+`com.hyperfocusdsp.autokit` to match the vendor rename. CLAP hosts key saved
+plugin instances on that string, so **a project that already loaded the CLAP
+build will show Autokit as missing and needs it re-added once.** Pad, pattern
+and FX state is unaffected — reload your preset or the project's saved state
+as usual.
+
+VST3 projects are not affected: the VST3 class ID is unchanged.
+
 ## Dependencies
 
 Built with [nih-plug](https://github.com/robbert-vdh/nih-plug) (plugin framework), [egui](https://github.com/emilk/egui) (GUI), [symphonia](https://github.com/pdeljanov/symphonia) (audio decoding), and [realfft](https://crates.io/crates/realfft) (spectral analysis). See `Cargo.toml` for the full list.

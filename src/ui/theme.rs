@@ -48,7 +48,7 @@ pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x00, 0xd4, 0xaa);
 
 // Per-FX identity colors (master knobs + per-lane send widgets share these)
 pub const FX_REVERB: egui::Color32 = egui::Color32::from_rgb(0xb4, 0x78, 0xff); // purple
-pub const FX_DELAY: egui::Color32 = egui::Color32::from_rgb(0x50, 0xc8, 0xdc);  // cyan
+pub const FX_DELAY: egui::Color32 = egui::Color32::from_rgb(0x50, 0xc8, 0xdc); // cyan
 pub const FX_FILTER: egui::Color32 = egui::Color32::from_rgb(0xff, 0xaa, 0x3c); // amber
 pub const ACCENT_DIM: egui::Color32 =
     egui::Color32::from_rgba_premultiplied(0x00, 0x54, 0x44, 0x44);
@@ -60,19 +60,19 @@ pub const TEXT_DISABLED: egui::Color32 =
     egui::Color32::from_rgba_premultiplied(0x32, 0x37, 0x39, 0x66);
 
 // Sequencer-specific colors
-pub const PLAYHEAD: egui::Color32 = egui::Color32::from_rgb(0, 212, 170);     // same as ACCENT
-pub const STEP_BG: egui::Color32 = egui::Color32::from_rgb(17, 17, 38);       // #111126
-pub const STEP_BG_BEAT: egui::Color32 = egui::Color32::from_rgb(19, 19, 48);  // #131330
-pub const STEP_BORDER: egui::Color32 = egui::Color32::from_rgb(26, 26, 53);   // #1a1a35
-pub const STEP_HOVER: egui::Color32 = egui::Color32::from_rgb(51, 51, 102);   // #333366
-pub const PLOCK_DOT: egui::Color32 = egui::Color32::from_rgb(0, 170, 255);    // #00aaff
-pub const COND_TEXT: egui::Color32 = egui::Color32::from_rgb(255, 204, 0);     // #ffcc00
-pub const MUTE_RED: egui::Color32 = egui::Color32::from_rgb(255, 68, 68);     // #ff4444
+pub const PLAYHEAD: egui::Color32 = egui::Color32::from_rgb(0, 212, 170); // same as ACCENT
+pub const STEP_BG: egui::Color32 = egui::Color32::from_rgb(17, 17, 38); // #111126
+pub const STEP_BG_BEAT: egui::Color32 = egui::Color32::from_rgb(19, 19, 48); // #131330
+pub const STEP_BORDER: egui::Color32 = egui::Color32::from_rgb(26, 26, 53); // #1a1a35
+pub const STEP_HOVER: egui::Color32 = egui::Color32::from_rgb(51, 51, 102); // #333366
+pub const PLOCK_DOT: egui::Color32 = egui::Color32::from_rgb(0, 170, 255); // #00aaff
+pub const COND_TEXT: egui::Color32 = egui::Color32::from_rgb(255, 204, 0); // #ffcc00
+pub const MUTE_RED: egui::Color32 = egui::Color32::from_rgb(255, 68, 68); // #ff4444
 pub const SOLO_YELLOW: egui::Color32 = egui::Color32::from_rgb(0xE8, 0xC5, 0x30); // #e8c530
 pub const LOCK_ORANGE: egui::Color32 = egui::Color32::from_rgb(255, 159, 67); // #ff9f43
 pub const FILL_PURPLE: egui::Color32 = egui::Color32::from_rgb(153, 102, 255); // #9966ff
 pub const PAT_HAS_DATA: egui::Color32 = egui::Color32::from_rgb(136, 136, 136); // #888
-pub const PAT_EMPTY: egui::Color32 = egui::Color32::from_rgb(85, 85, 85);     // #555
+pub const PAT_EMPTY: egui::Color32 = egui::Color32::from_rgb(85, 85, 85); // #555
 
 /// Get display color for a sample category as egui Color32.
 pub fn category_color32(cat: SampleCategory) -> egui::Color32 {

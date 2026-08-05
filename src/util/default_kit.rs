@@ -111,5 +111,9 @@ pub fn apply_to_kit(shared: &mut SharedState, sample_rate: f32) {
         }
     }
 
-    tracing::info!(loaded, total = DEFAULT_PADS.len(), "default sample kit applied");
+    tracing::info!(
+        loaded,
+        total = DEFAULT_PADS.len(),
+        "default sample kit applied"
+    );
 }

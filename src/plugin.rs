@@ -4,14 +4,14 @@ use nih_plug_egui::EguiState;
 use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use crate::engine::kit::NUM_PADS;
 
 use crate::analysis::library::{SampleLibrary, ScanProgress, ScanResult};
 use crate::engine::echo_detect::EchoDetector;
-use crate::engine::sampler::VoicePool;
+use crate::engine::sampler::{RenderBuses, Trigger, VoicePool};
 use crate::engine::sequencer::Sequencer;
 use crate::logging;
 use crate::ui::state::{ScanStatus, SharedState};
@@ -22,6 +22,27 @@ use crate::util::preset;
 
 /// Number of waveform display points per pad.
 const WAVEFORM_POINTS: usize = 200;
+
+/// Velocity used when a pad is played from the GUI (click or computer
+/// keyboard), which carries no velocity of its own.
+const GUI_TRIGGER_VELOCITY: f32 = 0.8;
+
+/// The tempo-sync divisions the delay-time knob quantizes to, as a fraction
+/// of a beat (one beat = one 1/4 note, so 1/8 note = 0.5 beats).
+const DELAY_DIVISIONS: [(f32, &str); 4] =
+    [(0.125, "1/32"), (0.25, "1/16"), (0.5, "1/8"), (1.0, "1/4")];
+
+/// Quantize the normalized 0..1 delay-time knob to a `DELAY_DIVISIONS` index.
+///
+/// The audio thread and the host-facing readout must both go through here.
+/// Until 0.5.5 they disagreed — the readout used `(v * 4.0).round()` while
+/// `process()` used `(v * 3.0).round()`, so at v = 0.75 the display said
+/// "1/4" while the audio played 1/8.
+#[inline]
+fn delay_division_index(v: f32) -> usize {
+    let last = DELAY_DIVISIONS.len() - 1;
+    ((v.clamp(0.0, 1.0) * last as f32).round() as usize).min(last)
+}
 
 #[derive(Params)]
 pub struct AutokitParams {
@@ -87,21 +108,29 @@ impl Default for AutokitParams {
             comp_threshold: FloatParam::new(
                 "Comp Threshold",
                 -12.0,
-                FloatRange::Linear { min: -40.0, max: 0.0 },
+                FloatRange::Linear {
+                    min: -40.0,
+                    max: 0.0,
+                },
             )
             .with_smoother(SmoothingStyle::Linear(20.0))
             .with_unit(" dB")
             .with_value_to_string(Arc::new(|v| format!("{v:.1}")))
-            .with_string_to_value(Arc::new(|s| s.trim().trim_end_matches(" dB").trim().parse().ok())),
-            comp_drive: FloatParam::new(
-                "Drive",
-                0.0,
-                FloatRange::Linear { min: 0.0, max: 1.0 },
-            )
-            .with_smoother(SmoothingStyle::Linear(20.0))
-            .with_unit("%")
-            .with_value_to_string(Arc::new(|v| format!("{:.0}", v * 100.0)))
-            .with_string_to_value(Arc::new(|s| s.trim().trim_end_matches('%').trim().parse::<f32>().ok().map(|v| v / 100.0))),
+            .with_string_to_value(Arc::new(|s| {
+                s.trim().trim_end_matches(" dB").trim().parse().ok()
+            })),
+            comp_drive: FloatParam::new("Drive", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_smoother(SmoothingStyle::Linear(20.0))
+                .with_unit("%")
+                .with_value_to_string(Arc::new(|v| format!("{:.0}", v * 100.0)))
+                .with_string_to_value(Arc::new(|s| {
+                    s.trim()
+                        .trim_end_matches('%')
+                        .trim()
+                        .parse::<f32>()
+                        .ok()
+                        .map(|v| v / 100.0)
+                })),
             limiter_on: BoolParam::new("Limiter", true),
             reverb_mix: FloatParam::new(
                 "Reverb Mix",
@@ -111,16 +140,26 @@ impl Default for AutokitParams {
             .with_smoother(SmoothingStyle::Linear(60.0))
             .with_unit("%")
             .with_value_to_string(Arc::new(|v| format!("{:.0}", v * 100.0)))
-            .with_string_to_value(Arc::new(|s| s.trim().trim_end_matches('%').trim().parse::<f32>().ok().map(|v| v / 100.0))),
-            delay_mix: FloatParam::new(
-                "Delay Mix",
-                0.0,
-                FloatRange::Linear { min: 0.0, max: 1.0 },
-            )
-            .with_smoother(SmoothingStyle::Linear(60.0))
-            .with_unit("%")
-            .with_value_to_string(Arc::new(|v| format!("{:.0}", v * 100.0)))
-            .with_string_to_value(Arc::new(|s| s.trim().trim_end_matches('%').trim().parse::<f32>().ok().map(|v| v / 100.0))),
+            .with_string_to_value(Arc::new(|s| {
+                s.trim()
+                    .trim_end_matches('%')
+                    .trim()
+                    .parse::<f32>()
+                    .ok()
+                    .map(|v| v / 100.0)
+            })),
+            delay_mix: FloatParam::new("Delay Mix", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_smoother(SmoothingStyle::Linear(60.0))
+                .with_unit("%")
+                .with_value_to_string(Arc::new(|v| format!("{:.0}", v * 100.0)))
+                .with_string_to_value(Arc::new(|s| {
+                    s.trim()
+                        .trim_end_matches('%')
+                        .trim()
+                        .parse::<f32>()
+                        .ok()
+                        .map(|v| v / 100.0)
+                })),
             delay_time: FloatParam::new(
                 "Delay Time",
                 0.5, // 1/8 note
@@ -128,18 +167,23 @@ impl Default for AutokitParams {
             )
             .with_smoother(SmoothingStyle::None)
             .with_value_to_string(Arc::new(|v| {
-                let label = match (v * 4.0).round() as i32 {
-                    0 => "1/32",
-                    1 => "1/16",
-                    2 => "1/8",
-                    _ => "1/4",
-                };
-                label.to_string()
+                DELAY_DIVISIONS[delay_division_index(v)].1.to_string()
+            }))
+            .with_string_to_value(Arc::new(|s| {
+                let s = s.trim();
+                let last = DELAY_DIVISIONS.len() - 1;
+                DELAY_DIVISIONS
+                    .iter()
+                    .position(|(_, label)| *label == s)
+                    .map(|i| i as f32 / last as f32)
             })),
             dj_filter: FloatParam::new(
                 "DJ Filter",
                 0.0,
-                FloatRange::Linear { min: -1.0, max: 1.0 },
+                FloatRange::Linear {
+                    min: -1.0,
+                    max: 1.0,
+                },
             )
             .with_smoother(SmoothingStyle::Linear(30.0))
             .with_value_to_string(Arc::new(|v| {
@@ -163,7 +207,10 @@ struct PreviewVoice {
 
 impl PreviewVoice {
     fn new() -> Self {
-        Self { data: None, position: 0 }
+        Self {
+            data: None,
+            position: 0,
+        }
     }
 
     /// Start a new preview. Replaces any currently playing preview.
@@ -223,6 +270,16 @@ pub struct SequencerSync {
     pub is_daw: AtomicBool,
     /// Set by audio thread when state should be persisted; cleared by GUI after serialization.
     pub persist_dirty: AtomicBool,
+    /// Whether the initial scan + state restore has completed. Gates the
+    /// persist timer, so a periodic save can't overwrite the host's saved
+    /// state with defaults before the restore lands.
+    ///
+    /// Atomic rather than a plain field on `Autokit` because either thread can
+    /// install the scan result: normally the audio thread does, but the GUI
+    /// has a fallback path for when `process()` isn't running. When the GUI
+    /// won that race, the audio thread's flag stayed false forever and DAW
+    /// persistence silently never armed.
+    pub state_restored: AtomicBool,
     /// Master FX automation record arm. GUI toggles; audio thread reads.
     pub rec_armed: AtomicBool,
     /// Touched-since-last-capture counters for the three master FX params.
@@ -240,6 +297,12 @@ pub struct SequencerSync {
     pub pattern_fx_apply_pending: AtomicBool,
 }
 
+impl Default for SequencerSync {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SequencerSync {
     pub fn new() -> Self {
         Self {
@@ -250,10 +313,11 @@ impl SequencerSync {
             internal_play: AtomicBool::new(false),
             ext_mode: AtomicBool::new(false),
             host_playing: AtomicBool::new(false),
-            tempo: AtomicU32::new(1200),             // 120.0 BPM
-            standalone_tempo: AtomicU32::new(1200),   // 120.0 BPM
+            tempo: AtomicU32::new(1200),            // 120.0 BPM
+            standalone_tempo: AtomicU32::new(1200), // 120.0 BPM
             is_daw: AtomicBool::new(false),
             persist_dirty: AtomicBool::new(false),
+            state_restored: AtomicBool::new(false),
             rec_armed: AtomicBool::new(false),
             fx_touch_rvb: AtomicU32::new(0),
             fx_touch_dly: AtomicU32::new(0),
@@ -287,8 +351,9 @@ pub struct Autokit {
     seq_internal_beats: f64,
     /// Counter for periodic state persistence (~1s intervals).
     persist_counter: u64,
-    /// Whether initial state restoration is complete — blocks persist until then.
-    state_restored: bool,
+    /// A completed scan we received but couldn't install because the GUI held
+    /// the shared-state lock. Retried on the next buffer rather than dropped.
+    pending_scan_result: Option<ScanResult>,
     /// Whether the host transport has ever reported `playing = false`.
     /// Used to distinguish real DAW transport (which stops/starts) from
     /// standalone backends that always report `playing = true`.
@@ -347,7 +412,7 @@ impl Default for Autokit {
             echo_detector: EchoDetector::new(44100.0),
             seq_internal_beats: 0.0,
             persist_counter: 0,
-            state_restored: false,
+            pending_scan_result: None,
             host_ever_stopped: false,
             seq_internal_play_prev: false,
             master_bus: crate::engine::master_bus::MasterBus::new(),
@@ -384,7 +449,10 @@ impl Default for Autokit {
 /// 3. Fill each pad with a category-matched sample; if that category is empty
 ///    in the library, fall back to any unused sample so pads still play.
 pub fn populate_kit_from_library(shared: &mut SharedState) {
-    let library = shared.library.as_ref().expect("library must be set before populate");
+    let library = shared
+        .library
+        .as_ref()
+        .expect("library must be set before populate");
     if library.total == 0 {
         tracing::info!("library empty — leaving bundled default kit in place");
         return;
@@ -420,7 +488,12 @@ pub fn populate_kit_from_library(shared: &mut SharedState) {
         if shared.kit.pads[pad_idx].locked {
             continue;
         }
-        if let Some(sample) = shared.library.as_ref().unwrap().random_from_excluding(category, &used) {
+        if let Some(sample) = shared
+            .library
+            .as_ref()
+            .unwrap()
+            .random_from_excluding(category, &used)
+        {
             let path = sample.entry.path.to_string_lossy().to_string();
             used.insert(path.clone());
             shared.kit.pads[pad_idx].sample = Some(Arc::clone(&sample.data));
@@ -447,7 +520,11 @@ pub fn populate_kit_from_library(shared: &mut SharedState) {
         }
     }
 
-    tracing::info!(assigned, total_pads = shared.kit.pads.len(), "kit populated from library");
+    tracing::info!(
+        assigned,
+        total_pads = shared.kit.pads.len(),
+        "kit populated from library"
+    );
 
     shared.update_all_waveforms(WAVEFORM_POINTS);
 }
@@ -467,55 +544,78 @@ impl Autokit {
     /// I/O long enough to freeze the host. The fix is to do all I/O upstream,
     /// in `ScanResult::restored`, so this routine is allocation- and I/O-free.
     fn receive_scan_result(&mut self, result: ScanResult) {
-        let ScanResult { library, restored } = result;
-        tracing::info!(
-            total = library.total,
-            restored_present = restored.is_some(),
-            "scan result received — installing"
-        );
-
-        let mut shared = self.shared.lock();
-
-        // Push snapshot before first population for undo support
-        let snapshot = HistorySnapshot {
-            pads: shared.kit.snapshot(),
-            sequencer: self.sequencer.snapshot(),
+        // `try_lock`, never `lock`. Every other audio-thread access in this
+        // file is non-blocking; this one used to block, and the GUI holds the
+        // same mutex on every frame to build its display snapshot. If the lock
+        // is busy we keep the result and retry on the next buffer.
+        let Some(mut shared) = self.shared.try_lock() else {
+            self.pending_scan_result = Some(result);
+            return;
         };
-        shared.history.push(snapshot);
-        shared.library = Some(library);
-
-        if let Some(restored) = restored {
-            tracing::info!(
-                missing = restored.missing_paths.len(),
-                "installing pre-loaded restored kit+patterns"
-            );
-            // Move pre-built kit and pattern bank into shared state. Sample
-            // audio is already loaded; we only need to recompute waveform
-            // summaries from the in-memory data (no I/O).
-            shared.kit = restored.kit;
-            shared.pattern_bank = restored.patterns;
-            shared.update_all_waveforms(WAVEFORM_POINTS);
-            // TODO: surface `restored.missing_paths` in the GUI so the user
-            // knows which samples need to be relocated.
-        } else {
-            // No persisted state — fall back to a fresh kit picked from the
-            // newly built library. If the library is empty, this is a no-op
-            // and the bundled default kit applied during `initialize()` is
-            // left intact so the pads stay playable.
-            populate_kit_from_library(&mut shared);
-        }
-
-        shared.scan_status = ScanStatus::Ready {
-            total: shared.library.as_ref().map(|l| l.total).unwrap_or(0),
-        };
-        self.state_restored = true;
+        install_scan_result(&mut shared, result);
+        permit_alloc(|| drop(shared));
+        self.seq_sync.state_restored.store(true, Ordering::Relaxed);
     }
+}
+
+/// Install a completed scan into shared state.
+///
+/// Called from the audio thread (`Autokit::receive_scan_result`) and from the
+/// GUI thread's fallback path in `ui::editor` when `process()` isn't running.
+/// Both used to carry their own copy of this logic, and they had drifted: the
+/// GUI copy skipped the undo snapshot entirely.
+///
+/// No disk I/O happens here. The scanner thread loads all sample audio into
+/// `ScanResult::restored` precisely so this stays a swap — see
+/// `preset::restore_persisted_off_thread`.
+pub fn install_scan_result(shared: &mut SharedState, result: ScanResult) {
+    let ScanResult { library, restored } = result;
+    tracing::info!(
+        total = library.total,
+        restored_present = restored.is_some(),
+        "scan result received — installing"
+    );
+
+    // Snapshot for undo, taken before anything is replaced.
+    //
+    // This reads `shared.pattern_bank` — the bank the sequencer actually
+    // plays. Until 0.5.5 it read `Sequencer::bank`, a field nothing else ever
+    // wrote, so the snapshot captured an empty pattern set and the first undo
+    // after a scan wiped the user's patterns.
+    let snapshot = HistorySnapshot {
+        pads: shared.kit.snapshot(),
+        sequencer: shared.pattern_bank.snapshot(),
+    };
+    shared.history.push(snapshot);
+    shared.library = Some(library);
+
+    if let Some(restored) = restored {
+        tracing::info!(
+            missing = restored.missing_paths.len(),
+            "installing pre-loaded restored kit+patterns"
+        );
+        shared.kit = restored.kit;
+        shared.pattern_bank = restored.patterns;
+        shared.pattern_bank.sanitize();
+        shared.update_all_waveforms(WAVEFORM_POINTS);
+        shared.missing_sample_paths = restored.missing_paths;
+    } else {
+        // No persisted state — fall back to a fresh kit picked from the
+        // newly built library. If the library is empty, this is a no-op
+        // and the bundled default kit applied during `initialize()` is
+        // left intact so the pads stay playable.
+        populate_kit_from_library(shared);
+    }
+
+    shared.scan_status = ScanStatus::Ready {
+        total: shared.library.as_ref().map(|l| l.total).unwrap_or(0),
+    };
 }
 
 impl Plugin for Autokit {
     const NAME: &'static str = "Autokit";
     const VENDOR: &'static str = "Hyperfocus DSP";
-    const URL: &'static str = "";
+    const URL: &'static str = "https://github.com/Hornfisk/autokit";
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
@@ -550,7 +650,10 @@ impl Plugin for Autokit {
             Arc::clone(&self.gui_triggers),
             Arc::clone(&self.seq_sync),
         );
-        tracing::info!("editor() result: {}", if result.is_some() { "Some" } else { "None" });
+        tracing::info!(
+            "editor() result: {}",
+            if result.is_some() { "Some" } else { "None" }
+        );
         result
     }
 
@@ -627,11 +730,13 @@ impl Plugin for Autokit {
                     .name("autokit-scanner".to_string())
                     .spawn(move || {
                         tracing::info!("background scan starting");
-                        let library = SampleLibrary::build_with_progress(&root, sample_rate, Some(&progress));
+                        let library =
+                            SampleLibrary::build_with_progress(&root, sample_rate, Some(&progress));
                         // After the library is built, do the heavy state
                         // restoration here — never on the audio thread.
                         let persisted = plugin_state.lock().clone();
-                        let restored = preset::restore_persisted_off_thread(&persisted, sample_rate);
+                        let restored =
+                            preset::restore_persisted_off_thread(&persisted, sample_rate);
                         if tx.send(ScanResult { library, restored }).is_err() {
                             tracing::warn!("plugin dropped before scan completed");
                         }
@@ -661,16 +766,43 @@ impl Plugin for Autokit {
         true
     }
 
+    /// Flush every piece of carried-over DSP state.
+    ///
+    /// nih-plug calls this on transport discontinuities (stop, seek, loop
+    /// jump) and when the host wants a clean slate. Without it the compressor
+    /// and limiter envelopes, the RMS window, and the delay and reverb tails
+    /// all survive across a jump — so seeking back to bar 1 replays the tail
+    /// of wherever you just were.
+    ///
+    /// `prepare()` on both buses recomputes coefficients and zeroes state, so
+    /// it is the right hook for this as well as for `initialize()`.
+    fn reset(&mut self) {
+        self.master_bus.prepare(self.sample_rate);
+        self.fx_bus.prepare(self.sample_rate);
+        self.sequencer.reset_position();
+        self.echo_detector = EchoDetector::new(self.sample_rate);
+        self.seq_internal_beats = 0.0;
+        self.last_automation_step = None;
+        self.aut_rvb_active = false;
+        self.aut_dly_active = false;
+        self.aut_flt_active = false;
+        self.preview_voice = PreviewVoice::new();
+    }
+
     fn process(
         &mut self,
         buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        // Check for background thread messages (non-blocking)
+        // Check for background thread messages (non-blocking). A result that
+        // arrived while the GUI held the lock is retried here first, so a
+        // completed scan is never dropped.
         {
-            let result = self.shared.try_lock().and_then(|s| {
-                s.bg_rx.as_ref().and_then(|rx| rx.try_recv().ok())
+            let result = self.pending_scan_result.take().or_else(|| {
+                self.shared
+                    .try_lock()
+                    .and_then(|s| s.bg_rx.as_ref().and_then(|rx| rx.try_recv().ok()))
             });
             if let Some(result) = result {
                 permit_alloc(|| {
@@ -681,7 +813,10 @@ impl Plugin for Autokit {
 
         // Check if GUI requested a (re)scan
         {
-            let scan_path = self.shared.try_lock().and_then(|mut s| s.pending_scan_path.take());
+            let scan_path = self
+                .shared
+                .try_lock()
+                .and_then(|mut s| s.pending_scan_path.take());
             if let Some(root) = scan_path {
                 permit_alloc(|| {
                     let (tx, rx) = crossbeam_channel::bounded::<ScanResult>(1);
@@ -781,10 +916,14 @@ impl Plugin for Autokit {
             if !transport.playing {
                 self.host_ever_stopped = true;
             }
-            self.seq_sync.is_daw.store(self.host_ever_stopped, Ordering::Relaxed);
+            self.seq_sync
+                .is_daw
+                .store(self.host_ever_stopped, Ordering::Relaxed);
             let internal_play = self.seq_sync.internal_play.load(Ordering::Relaxed);
             let host_driving = self.host_ever_stopped && transport.playing && !internal_play;
-            self.seq_sync.host_playing.store(host_driving, Ordering::Relaxed);
+            self.seq_sync
+                .host_playing
+                .store(host_driving, Ordering::Relaxed);
 
             // Edge detection: reset internal counter when internal play is toggled on
             if internal_play && !self.seq_internal_play_prev {
@@ -802,7 +941,8 @@ impl Plugin for Autokit {
                 };
                 // Accumulate beats incrementally so tempo changes don't jump position
                 let beats = self.seq_internal_beats;
-                self.seq_internal_beats += num_samples as f64 / self.sample_rate as f64 * (t / 60.0);
+                self.seq_internal_beats +=
+                    num_samples as f64 / self.sample_rate as f64 * (t / 60.0);
                 (true, Some(t), Some(beats))
             } else if host_driving {
                 self.seq_internal_beats = 0.0;
@@ -814,7 +954,9 @@ impl Plugin for Autokit {
 
             // Store current tempo for GUI display
             let display_tempo = tempo.unwrap_or(120.0);
-            self.seq_sync.tempo.store((display_tempo * 10.0) as u32, Ordering::Relaxed);
+            self.seq_sync
+                .tempo
+                .store((display_tempo * 10.0) as u32, Ordering::Relaxed);
 
             permit_alloc(|| {
                 tracing::debug!(
@@ -831,19 +973,20 @@ impl Plugin for Autokit {
 
             // --- Sequencer fires FIRST so echo detector can record outgoing notes ---
             // Capture trigger counts before sequencer runs
-            let pre_triggers: [u8; NUM_PADS] = core::array::from_fn(|i| {
-                self.trigger_flags[i].load(Ordering::Relaxed)
-            });
+            let pre_triggers: [u8; NUM_PADS] =
+                core::array::from_fn(|i| self.trigger_flags[i].load(Ordering::Relaxed));
 
             // Run sequencer with pattern data from SharedState
             // Split borrow: kit (immutable) and pattern_bank (mutable) are separate fields
             let shared_ref = &mut *shared;
             let triggered = self.sequencer.process_buffer_with_patterns(
-                num_samples,
-                playing,
-                tempo,
-                pos_beats,
-                self.sample_rate,
+                &crate::engine::sequencer::Transport {
+                    buffer_len: num_samples,
+                    playing,
+                    tempo,
+                    pos_beats,
+                    sample_rate: self.sample_rate,
+                },
                 voices,
                 &shared_ref.kit,
                 &mut shared_ref.pattern_bank,
@@ -857,9 +1000,9 @@ impl Plugin for Autokit {
             }
 
             // Send MIDI output and record in echo detector BEFORE processing incoming MIDI
-            for i in 0..NUM_PADS {
+            for (i, &pre) in pre_triggers.iter().enumerate() {
                 let post = self.trigger_flags[i].load(Ordering::Relaxed);
-                if post != pre_triggers[i] {
+                if post != pre {
                     let note = shared.kit.note_for_pad(i);
                     let velocity = {
                         let pattern = shared.pattern_bank.active_pattern();
@@ -867,7 +1010,7 @@ impl Plugin for Autokit {
                             let step_idx = self.sequencer.current_step();
                             pattern.lanes[i].steps[step_idx].velocity
                         } else {
-                            0.8
+                            GUI_TRIGGER_VELOCITY
                         }
                     };
                     self.echo_detector.record(note);
@@ -894,11 +1037,17 @@ impl Plugin for Autokit {
                     NoteEvent::NoteOn { note, velocity, .. } => {
                         if let Some(pad_idx) = shared.kit.pad_for_note(note) {
                             if !self.echo_detector.check(note) {
-                                let (lr, ld, lf) = shared.pattern_bank.active_pattern()
-                                    .lanes.get(pad_idx)
+                                let (lr, ld, lf) = shared
+                                    .pattern_bank
+                                    .active_pattern()
+                                    .lanes
+                                    .get(pad_idx)
                                     .map(|l| (l.fx_send_rvb, l.fx_send_dly, l.fx_filter))
                                     .unwrap_or((0.0, 0.0, false));
-                                voices.trigger(pad_idx, velocity, &shared.kit, 0, None, None, None, None, None, lr, ld, lf);
+                                voices.trigger(
+                                    &Trigger::new(pad_idx, velocity).with_lane_fx(lr, ld, lf),
+                                    &shared.kit,
+                                );
                                 self.trigger_flags[pad_idx].fetch_add(1, Ordering::Relaxed);
                             }
                         }
@@ -911,17 +1060,25 @@ impl Plugin for Autokit {
             // Check GUI trigger requests (keyboard/click-to-play)
             for i in 0..NUM_PADS {
                 if self.gui_triggers[i].swap(0, Ordering::Relaxed) != 0 {
-                    let (lr, ld, lf) = shared.pattern_bank.active_pattern()
-                        .lanes.get(i)
+                    let (lr, ld, lf) = shared
+                        .pattern_bank
+                        .active_pattern()
+                        .lanes
+                        .get(i)
                         .map(|l| (l.fx_send_rvb, l.fx_send_dly, l.fx_filter))
                         .unwrap_or((0.0, 0.0, false));
-                    voices.trigger(i, 0.8, &shared.kit, 0, None, None, None, None, None, lr, ld, lf);
+                    voices.trigger(
+                        &Trigger::new(i, GUI_TRIGGER_VELOCITY).with_lane_fx(lr, ld, lf),
+                        &shared.kit,
+                    );
                     self.trigger_flags[i].fetch_add(1, Ordering::Relaxed);
                 }
             }
 
             // Sync echo suppression state for GUI
-            self.seq_sync.ext_mode.store(self.echo_detector.is_suppressing(), Ordering::Relaxed);
+            self.seq_sync
+                .ext_mode
+                .store(self.echo_detector.is_suppressing(), Ordering::Relaxed);
 
             // ── Master FX automation: record + playback override targets ──
             //
@@ -936,10 +1093,19 @@ impl Plugin for Autokit {
             // step is crossed per buffer, so the ~one-buffer latency is
             // below the audible threshold and is hidden by the smoothers'
             // 1/8-of-a-step ramp.
-            if shared.pattern_bank.patterns.get(shared.pattern_bank.active).is_some() {
+            if shared
+                .pattern_bank
+                .patterns
+                .get(shared.pattern_bank.active)
+                .is_some()
+            {
                 // Handle CLR request from GUI — wipe active pattern's automation.
                 if self.seq_sync.clr_automation.swap(false, Ordering::Relaxed) {
-                    shared.pattern_bank.active_pattern_mut().master_automation.clear();
+                    shared
+                        .pattern_bank
+                        .active_pattern_mut()
+                        .master_automation
+                        .clear();
                     self.aut_rvb_active = false;
                     self.aut_dly_active = false;
                     self.aut_flt_active = false;
@@ -953,7 +1119,8 @@ impl Plugin for Autokit {
                 if seq_playing && step_changed {
                     let tempo_bpm_now = self.seq_sync.tempo.load(Ordering::Relaxed) as f32 / 10.0;
                     let ramp = crate::engine::step_smoother::ramp_samples_for_tempo(
-                        self.sample_rate, tempo_bpm_now,
+                        self.sample_rate,
+                        tempo_bpm_now,
                     );
 
                     // Build the list of crossed step indices (inclusive of current).
@@ -969,7 +1136,9 @@ impl Plugin for Autokit {
                             loop {
                                 crossed[n] = s;
                                 n += 1;
-                                if s == current_step || n == 16 { break; }
+                                if s == current_step || n == 16 {
+                                    break;
+                                }
                                 s = (s + 1) % 16;
                             }
                         }
@@ -979,18 +1148,27 @@ impl Plugin for Autokit {
                     // write the live knob value into every crossed step for
                     // each param that was touched since the last step.
                     if rec_armed {
-                        let touched_rvb = self.seq_sync.fx_touch_rvb.swap(0, Ordering::Relaxed) != 0;
-                        let touched_dly = self.seq_sync.fx_touch_dly.swap(0, Ordering::Relaxed) != 0;
-                        let touched_flt = self.seq_sync.fx_touch_flt.swap(0, Ordering::Relaxed) != 0;
+                        let touched_rvb =
+                            self.seq_sync.fx_touch_rvb.swap(0, Ordering::Relaxed) != 0;
+                        let touched_dly =
+                            self.seq_sync.fx_touch_dly.swap(0, Ordering::Relaxed) != 0;
+                        let touched_flt =
+                            self.seq_sync.fx_touch_flt.swap(0, Ordering::Relaxed) != 0;
                         if touched_rvb || touched_dly || touched_flt {
                             let rvb_v = self.params.reverb_mix.unmodulated_plain_value();
                             let dly_v = self.params.delay_mix.unmodulated_plain_value();
                             let flt_v = self.params.dj_filter.unmodulated_plain_value();
                             let pat = shared.pattern_bank.active_pattern_mut();
                             for &s in &crossed[..n] {
-                                if touched_rvb { pat.master_automation.reverb_mix[s] = Some(rvb_v); }
-                                if touched_dly { pat.master_automation.delay_mix[s] = Some(dly_v); }
-                                if touched_flt { pat.master_automation.dj_filter[s] = Some(flt_v); }
+                                if touched_rvb {
+                                    pat.master_automation.reverb_mix[s] = Some(rvb_v);
+                                }
+                                if touched_dly {
+                                    pat.master_automation.delay_mix[s] = Some(dly_v);
+                                }
+                                if touched_flt {
+                                    pat.master_automation.dj_filter[s] = Some(flt_v);
+                                }
                             }
                         }
                     }
@@ -1004,7 +1182,8 @@ impl Plugin for Autokit {
                     if auto_enabled {
                         if let Some(v) = pat.master_automation.reverb_mix[current_step] {
                             if !self.aut_rvb_active {
-                                self.aut_rvb_smoother.reset(self.params.reverb_mix.unmodulated_plain_value());
+                                self.aut_rvb_smoother
+                                    .reset(self.params.reverb_mix.unmodulated_plain_value());
                             }
                             self.aut_rvb_smoother.set_target_now(v, ramp);
                             self.aut_rvb_active = true;
@@ -1013,7 +1192,8 @@ impl Plugin for Autokit {
                         }
                         if let Some(v) = pat.master_automation.delay_mix[current_step] {
                             if !self.aut_dly_active {
-                                self.aut_dly_smoother.reset(self.params.delay_mix.unmodulated_plain_value());
+                                self.aut_dly_smoother
+                                    .reset(self.params.delay_mix.unmodulated_plain_value());
                             }
                             self.aut_dly_smoother.set_target_now(v, ramp);
                             self.aut_dly_active = true;
@@ -1022,7 +1202,8 @@ impl Plugin for Autokit {
                         }
                         if let Some(v) = pat.master_automation.dj_filter[current_step] {
                             if !self.aut_flt_active {
-                                self.aut_flt_smoother.reset(self.params.dj_filter.unmodulated_plain_value());
+                                self.aut_flt_smoother
+                                    .reset(self.params.dj_filter.unmodulated_plain_value());
                             }
                             self.aut_flt_smoother.set_target_now(v, ramp);
                             self.aut_flt_active = true;
@@ -1051,21 +1232,30 @@ impl Plugin for Autokit {
 
             // Periodic state persistence for DAW save/load (~every 1s)
             // Audio thread sets a dirty flag; GUI thread does the actual serialization.
-            if self.state_restored {
+            if self.seq_sync.state_restored.load(Ordering::Relaxed) {
                 self.persist_counter += num_samples as u64;
-            }
-            if self.state_restored && self.persist_counter >= self.sample_rate as u64 {
-                self.persist_counter = 0;
-                self.seq_sync.persist_dirty.store(true, Ordering::Relaxed);
+                if self.persist_counter >= self.sample_rate as u64 {
+                    self.persist_counter = 0;
+                    self.seq_sync.persist_dirty.store(true, Ordering::Relaxed);
+                }
             }
 
             // Write playback state for GUI
-            self.seq_sync.current_step.store(self.sequencer.current_step(), Ordering::Relaxed);
-            self.seq_sync.playing.store(self.sequencer.is_playing(), Ordering::Relaxed);
+            self.seq_sync
+                .current_step
+                .store(self.sequencer.current_step(), Ordering::Relaxed);
+            self.seq_sync
+                .playing
+                .store(self.sequencer.is_playing(), Ordering::Relaxed);
             let new_active = shared.pattern_bank.active;
-            let prev_active = self.seq_sync.active_pattern.swap(new_active, Ordering::Relaxed);
+            let prev_active = self
+                .seq_sync
+                .active_pattern
+                .swap(new_active, Ordering::Relaxed);
             if prev_active != new_active {
-                self.seq_sync.pattern_fx_apply_pending.store(true, Ordering::Relaxed);
+                self.seq_sync
+                    .pattern_fx_apply_pending
+                    .store(true, Ordering::Relaxed);
             }
 
             // permit_alloc for drop: parking_lot unlock_slow() may allocate.
@@ -1086,32 +1276,34 @@ impl Plugin for Autokit {
             // Voices carry resolved FX sends in their own fields (pad default
             // or step plock override, captured at trigger time), so no
             // per-buffer kit snapshot is needed.
-            let dry_bypass_l = &mut self.dry_bypass_l[..num_samples];
-            let dry_bypass_r = &mut self.dry_bypass_r[..num_samples];
-            let dry_filter_l = &mut self.dry_filter_l[..num_samples];
-            let dry_filter_r = &mut self.dry_filter_r[..num_samples];
-            let send_rvb_l = &mut self.send_rvb_l[..num_samples];
-            let send_rvb_r = &mut self.send_rvb_r[..num_samples];
-            let send_dly_l = &mut self.send_dly_l[..num_samples];
-            let send_dly_r = &mut self.send_dly_r[..num_samples];
-            dry_bypass_l.fill(0.0);
-            dry_bypass_r.fill(0.0);
-            dry_filter_l.fill(0.0);
-            dry_filter_r.fill(0.0);
-            send_rvb_l.fill(0.0);
-            send_rvb_r.fill(0.0);
-            send_dly_l.fill(0.0);
-            send_dly_r.fill(0.0);
+            let mut buses = RenderBuses {
+                dry_bypass_l: &mut self.dry_bypass_l[..num_samples],
+                dry_bypass_r: &mut self.dry_bypass_r[..num_samples],
+                dry_filter_l: &mut self.dry_filter_l[..num_samples],
+                dry_filter_r: &mut self.dry_filter_r[..num_samples],
+                send_rvb_l: &mut self.send_rvb_l[..num_samples],
+                send_rvb_r: &mut self.send_rvb_r[..num_samples],
+                send_dly_l: &mut self.send_dly_l[..num_samples],
+                send_dly_r: &mut self.send_dly_r[..num_samples],
+            };
+            buses.clear();
 
-            voices.process_sends(
-                dry_bypass_l, dry_bypass_r,
-                dry_filter_l, dry_filter_r,
-                send_rvb_l, send_rvb_r,
-                send_dly_l, send_dly_r,
-            );
+            voices.process_sends(&mut buses);
             // Preview voice is always dry-bypass — auditioning samples
             // shouldn't pick up whatever FX the user has loaded.
-            self.preview_voice.process(dry_bypass_l, dry_bypass_r);
+            self.preview_voice
+                .process(buses.dry_bypass_l, buses.dry_bypass_r);
+
+            let RenderBuses {
+                dry_bypass_l,
+                dry_bypass_r,
+                dry_filter_l,
+                dry_filter_r,
+                send_rvb_l,
+                send_rvb_r,
+                send_dly_l,
+                send_dly_r,
+            } = buses;
 
             // Per-sample master loop: sum the four buses through FX + mastering.
             // nih-plug's built-in smoothers ramp params within each buffer,
@@ -1123,12 +1315,7 @@ impl Plugin for Autokit {
             // evaluated once per buffer so the mapping doesn't jitter between
             // divisions while the smoother ramps.
             let delay_time_raw = self.params.delay_time.unmodulated_plain_value();
-            let delay_division = match (delay_time_raw * 3.0).round() as i32 {
-                0 => 0.125, // 1/32
-                1 => 0.25,  // 1/16
-                2 => 0.5,   // 1/8
-                _ => 1.0,   // 1/4
-            };
+            let delay_division = DELAY_DIVISIONS[delay_division_index(delay_time_raw)].0;
             let delay_samples = (60.0 / tempo_bpm.max(1.0)) * sr * delay_division;
             for i in 0..num_samples {
                 let threshold_db = self.params.comp_threshold.smoothed.next();
@@ -1140,22 +1327,30 @@ impl Plugin for Autokit {
                 let dly_return_live = self.params.delay_mix.smoothed.next();
                 let filter_knob_live = self.params.dj_filter.smoothed.next();
                 let rvb_return = if self.aut_rvb_active {
-                    self.aut_rvb_smoother.next()
-                } else { rvb_return_live };
+                    self.aut_rvb_smoother.next_value()
+                } else {
+                    rvb_return_live
+                };
                 let dly_return = if self.aut_dly_active {
-                    self.aut_dly_smoother.next()
-                } else { dly_return_live };
+                    self.aut_dly_smoother.next_value()
+                } else {
+                    dly_return_live
+                };
                 let filter_knob = if self.aut_flt_active {
-                    self.aut_flt_smoother.next()
-                } else { filter_knob_live };
+                    self.aut_flt_smoother.next_value()
+                } else {
+                    filter_knob_live
+                };
 
                 // Reverb + delay returns (pure-wet processors).
-                let (rl_wet, rr_wet) = self.fx_bus.reverb.process_sample(
-                    send_rvb_l[i], send_rvb_r[i],
-                );
-                let (dl_wet, dr_wet) = self.fx_bus.delay.process_sample(
-                    send_dly_l[i], send_dly_r[i], delay_samples,
-                );
+                let (rl_wet, rr_wet) = self
+                    .fx_bus
+                    .reverb
+                    .process_sample(send_rvb_l[i], send_rvb_r[i]);
+                let (dl_wet, dr_wet) =
+                    self.fx_bus
+                        .delay
+                        .process_sample(send_dly_l[i], send_dly_r[i], delay_samples);
 
                 // FX returns feed into the filter bus so the master DJ filter
                 // sweeps the wet tails alongside any lanes that opted in
@@ -1163,17 +1358,18 @@ impl Plugin for Autokit {
                 // routing returns through it is free when unused.
                 let filt_in_l = dry_filter_l[i] + rl_wet * rvb_return + dl_wet * dly_return;
                 let filt_in_r = dry_filter_r[i] + rr_wet * rvb_return + dr_wet * dly_return;
-                let (fl_out, fr_out) = self.fx_bus.dj_filter.process_sample(
-                    filt_in_l, filt_in_r, filter_knob,
-                );
+                let (fl_out, fr_out) =
+                    self.fx_bus
+                        .dj_filter
+                        .process_sample(filt_in_l, filt_in_r, filter_knob);
 
                 // Final mix: direct-bypass path (lanes with F off) + filter output.
                 let mix_l = dry_bypass_l[i] + fl_out;
                 let mix_r = dry_bypass_r[i] + fr_out;
 
-                let (l, r) = self.master_bus.process_sample(
-                    mix_l, mix_r, threshold_db, drive, lim_on,
-                );
+                let (l, r) =
+                    self.master_bus
+                        .process_sample(mix_l, mix_r, threshold_db, drive, lim_on);
                 output_left[i] = l * master_gain;
                 output_right[i] = r * master_gain;
             }
@@ -1184,11 +1380,18 @@ impl Plugin for Autokit {
 }
 
 impl ClapPlugin for Autokit {
-    const CLAP_ID: &'static str = "com.rexist.autokit";
+    /// Changed from `com.rexist.autokit` in 0.5.5 to match the Hyperfocus DSP
+    /// vendor identity. CLAP hosts key saved plugin instances on this string,
+    /// so a project that already loaded the CLAP build needs the plugin
+    /// re-added once. VST3 is unaffected — `VST3_CLASS_ID` is unchanged.
+    const CLAP_ID: &'static str = "com.hyperfocusdsp.autokit";
+    /// Kept in step with `Cargo.toml`'s `description`. The classifier is FFT
+    /// feature extraction plus thresholds, so this doesn't claim to be AI.
     const CLAP_DESCRIPTION: Option<&'static str> =
-        Some("AI-powered drum machine with sample map visualization");
-    const CLAP_MANUAL_URL: Option<&'static str> = None;
-    const CLAP_SUPPORT_URL: Option<&'static str> = None;
+        Some("Sample-based drum machine with spectral analysis and a sample map");
+    const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
+    const CLAP_SUPPORT_URL: Option<&'static str> =
+        Some("https://github.com/Hornfisk/autokit/issues");
     const CLAP_FEATURES: &'static [ClapFeature] = &[
         ClapFeature::Instrument,
         ClapFeature::DrumMachine,
@@ -1211,7 +1414,7 @@ mod tests {
     use crate::analysis::features::AudioFeatures;
     use crate::analysis::library::AnalyzedSample;
     use crate::analysis::scanner::SampleEntry;
-    use crate::engine::kit::{DrumKit, SampleCategory};
+    use crate::engine::kit::SampleCategory;
     use crate::ui::state::SharedState;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -1355,7 +1558,7 @@ mod tests {
         }
 
         // Step 6: Verify all assigned paths are unique (no duplicates)
-        let mut paths: Vec<String> = shared
+        let paths: Vec<String> = shared
             .kit
             .pads
             .iter()
@@ -1372,11 +1575,12 @@ mod tests {
         };
 
         assert_eq!(
-            unique_count, paths.len(),
+            unique_count,
+            paths.len(),
             "all assigned sample paths should be unique (no duplicates)"
         );
         assert!(
-            paths.len() > 0,
+            !paths.is_empty(),
             "at least some pads should be assigned from the library"
         );
     }

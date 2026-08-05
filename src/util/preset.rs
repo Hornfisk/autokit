@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::engine::kit::{DrumKit, SampleCategory};
 use crate::engine::sequencer::PatternBank;
 use crate::util::audio_file;
+use crate::util::storage;
 
 const PRESET_VERSION: u32 = 2;
 
@@ -38,26 +39,17 @@ pub struct PresetPad {
     pub end: f32,
 }
 
-fn default_end() -> f32 { 1.0 }
+fn default_end() -> f32 {
+    1.0
+}
 
-/// Returns `~/.local/share/autokit/presets/`, creating it if missing.
+/// Autokit's per-user preset directory, created if missing.
 pub fn preset_dir() -> PathBuf {
-    let base = dirs_next().join("autokit").join("presets");
+    let base = storage::data_dir("autokit").join("presets");
     if !base.exists() {
         let _ = std::fs::create_dir_all(&base);
     }
     base
-}
-
-/// Platform data dir: `$XDG_DATA_HOME` or `~/.local/share`.
-fn dirs_next() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-        PathBuf::from(xdg)
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".local").join("share")
-    } else {
-        PathBuf::from(".local/share")
-    }
 }
 
 /// Sanitize a preset name for use as a filename.
@@ -80,17 +72,29 @@ pub fn save_preset(preset: &Preset) -> Result<PathBuf, String> {
         return Err("Preset name is empty".to_string());
     }
     let path = dir.join(format!("{filename}.json"));
-    let json = serde_json::to_string_pretty(preset)
-        .map_err(|e| format!("serialize: {e}"))?;
-    std::fs::write(&path, json).map_err(|e| format!("write {}: {e}", path.display()))?;
+    let json = serde_json::to_string_pretty(preset).map_err(|e| format!("serialize: {e}"))?;
+    storage::write_atomic(&path, &json).map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(path)
 }
 
 /// Load a preset from a JSON file.
 pub fn load_preset(path: &Path) -> Result<Preset, String> {
-    let data = std::fs::read_to_string(path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
-    serde_json::from_str(&data).map_err(|e| format!("parse {}: {e}", path.display()))
+    let data =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut preset: Preset =
+        serde_json::from_str(&data).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    if let Some(p) = preset.patterns.as_mut() {
+        sanitize_preset_patterns(p);
+    }
+    Ok(preset)
+}
+
+/// Bring pattern data from an untrusted file back inside the invariants the
+/// audio thread assumes. See [`PatternBank::sanitize`].
+fn sanitize_preset_patterns(p: &mut PresetPatterns) {
+    for pattern in &mut p.patterns {
+        pattern.sanitize();
+    }
 }
 
 /// List all `.json` presets in the preset directory, sorted alphabetically.
@@ -118,9 +122,9 @@ pub fn list_presets() -> Vec<(String, PathBuf)> {
 
 // --- Pattern persistence (individual patterns) ---
 
-/// Returns `~/.local/share/autokit/patterns/`, creating it if missing.
+/// Autokit's per-user single-pattern directory, created if missing.
 pub fn pattern_dir() -> PathBuf {
-    let base = dirs_next().join("autokit").join("patterns");
+    let base = storage::data_dir("autokit").join("patterns");
     if !base.exists() {
         let _ = std::fs::create_dir_all(&base);
     }
@@ -128,24 +132,29 @@ pub fn pattern_dir() -> PathBuf {
 }
 
 /// Save a single pattern to `{pattern_dir}/{name}.json`.
-pub fn save_pattern(name: &str, pattern: &crate::engine::sequencer::Pattern) -> Result<PathBuf, String> {
+pub fn save_pattern(
+    name: &str,
+    pattern: &crate::engine::sequencer::Pattern,
+) -> Result<PathBuf, String> {
     let dir = pattern_dir();
     let filename = sanitize_name(name);
     if filename.is_empty() {
         return Err("Pattern name is empty".to_string());
     }
     let path = dir.join(format!("{filename}.json"));
-    let json = serde_json::to_string_pretty(pattern)
-        .map_err(|e| format!("serialize: {e}"))?;
-    std::fs::write(&path, json).map_err(|e| format!("write {}: {e}", path.display()))?;
+    let json = serde_json::to_string_pretty(pattern).map_err(|e| format!("serialize: {e}"))?;
+    storage::write_atomic(&path, &json).map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(path)
 }
 
 /// Load a single pattern from a JSON file.
 pub fn load_pattern(path: &Path) -> Result<crate::engine::sequencer::Pattern, String> {
-    let data = std::fs::read_to_string(path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
-    serde_json::from_str(&data).map_err(|e| format!("parse {}: {e}", path.display()))
+    let data =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut pattern: crate::engine::sequencer::Pattern =
+        serde_json::from_str(&data).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    pattern.sanitize();
+    Ok(pattern)
 }
 
 /// List all `.json` patterns in the pattern directory, sorted alphabetically.
@@ -176,16 +185,23 @@ pub fn delete_file(path: &Path) -> Result<(), String> {
     std::fs::remove_file(path).map_err(|e| format!("delete {}: {e}", path.display()))
 }
 
-/// Path for standalone session state: `~/.local/share/autokit/standalone_state.json`.
+/// Path for the standalone session's auto-saved state.
 pub fn standalone_state_path() -> PathBuf {
-    dirs_next().join("autokit").join("standalone_state.json")
+    storage::data_dir("autokit").join("standalone_state.json")
 }
 
 /// Save standalone session state to disk.
+///
+/// This runs on a timer, so it is the most likely file to be mid-write when
+/// something goes wrong — hence the atomic write.
 pub fn save_standalone_state(kit: &DrumKit, pattern_bank: &crate::engine::sequencer::PatternBank) {
     let p = from_kit("_standalone", kit, pattern_bank);
     match serde_json::to_string(&p) {
-        Ok(json) => { let _ = std::fs::write(standalone_state_path(), json); }
+        Ok(json) => {
+            if let Err(e) = storage::write_atomic(&standalone_state_path(), &json) {
+                tracing::warn!("standalone state write failed: {e}");
+            }
+        }
         Err(e) => tracing::warn!("standalone state serialize failed: {e}"),
     }
 }
@@ -194,11 +210,19 @@ pub fn save_standalone_state(kit: &DrumKit, pattern_bank: &crate::engine::sequen
 pub fn load_standalone_state() -> Option<Preset> {
     let path = standalone_state_path();
     let data = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&data).ok()
+    let mut preset: Preset = serde_json::from_str(&data).ok()?;
+    if let Some(p) = preset.patterns.as_mut() {
+        sanitize_preset_patterns(p);
+    }
+    Some(preset)
 }
 
 /// Create a `Preset` from the current kit state.
-pub fn from_kit(name: &str, kit: &DrumKit, pattern_bank: &crate::engine::sequencer::PatternBank) -> Preset {
+pub fn from_kit(
+    name: &str,
+    kit: &DrumKit,
+    pattern_bank: &crate::engine::sequencer::PatternBank,
+) -> Preset {
     let pads = kit
         .pads
         .iter()
@@ -227,7 +251,10 @@ pub fn from_kit(name: &str, kit: &DrumKit, pattern_bank: &crate::engine::sequenc
 }
 
 /// Serialize the current kit + pattern state to a JSON string for DAW persistence.
-pub fn serialize_state(kit: &DrumKit, pattern_bank: &crate::engine::sequencer::PatternBank) -> Option<String> {
+pub fn serialize_state(
+    kit: &DrumKit,
+    pattern_bank: &crate::engine::sequencer::PatternBank,
+) -> Option<String> {
     let p = from_kit("_daw_state", kit, pattern_bank);
     serde_json::to_string(&p).ok()
 }
@@ -235,7 +262,12 @@ pub fn serialize_state(kit: &DrumKit, pattern_bank: &crate::engine::sequencer::P
 /// Apply a preset to a kit, loading sample audio from disk.
 /// Pads with missing or unreadable sample files get `None` sample data.
 /// If the preset contains pattern data, it is restored into `pattern_bank`.
-pub fn apply_to_kit(preset: &Preset, kit: &mut DrumKit, pattern_bank: &mut crate::engine::sequencer::PatternBank, sample_rate: f32) {
+pub fn apply_to_kit(
+    preset: &Preset,
+    kit: &mut DrumKit,
+    pattern_bank: &mut crate::engine::sequencer::PatternBank,
+    sample_rate: f32,
+) {
     for (i, pp) in preset.pads.iter().enumerate() {
         if i >= kit.pads.len() {
             break;
@@ -288,8 +320,14 @@ pub fn apply_to_kit(preset: &Preset, kit: &mut DrumKit, pattern_bank: &mut crate
                 pattern_bank.patterns[i] = pat.clone();
             }
         }
-        pattern_bank.active = pat_data.active.min(pattern_bank.patterns.len().saturating_sub(1));
+        pattern_bank.active = pat_data
+            .active
+            .min(pattern_bank.patterns.len().saturating_sub(1));
     }
+
+    // The preset came from disk. Everything the audio thread indexes with
+    // must be back in range before this bank goes anywhere near `process()`.
+    pattern_bank.sanitize();
 }
 
 /// Cheap check: does this sample path's parent directory exist?
@@ -343,7 +381,11 @@ pub fn restore_to_fresh(preset: &Preset, sample_rate: f32) -> RestoredState {
         );
     }
 
-    RestoredState { kit, patterns, missing_paths }
+    RestoredState {
+        kit,
+        patterns,
+        missing_paths,
+    }
 }
 
 /// Restore plugin state from JSON persisted by the host (DAW save/load).

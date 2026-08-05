@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use rand::prelude::IndexedRandom;
 
@@ -61,7 +61,11 @@ impl SampleLibrary {
         Self::build_with_progress(root, sample_rate, None)
     }
 
-    pub fn build_with_progress(root: &Path, sample_rate: f32, progress: Option<&Arc<ScanProgress>>) -> Self {
+    pub fn build_with_progress(
+        root: &Path,
+        sample_rate: f32,
+        progress: Option<&Arc<ScanProgress>>,
+    ) -> Self {
         tracing::info!(root = %root.display(), "starting library scan");
 
         // Load existing cache (if present, valid, and for the same root)
@@ -92,7 +96,9 @@ impl SampleLibrary {
                 Err(e) => {
                     tracing::trace!(path = path_str, error = %e, "skipping unloadable file");
                     skipped += 1;
-                    if let Some(p) = &progress { p.processed.store(loaded + skipped, Ordering::Relaxed); }
+                    if let Some(p) = &progress {
+                        p.processed.store(loaded + skipped, Ordering::Relaxed);
+                    }
                     continue;
                 }
             };
@@ -100,14 +106,18 @@ impl SampleLibrary {
             // Filter by duration
             if data.len() > max_samples {
                 skipped += 1;
-                if let Some(p) = &progress { p.processed.store(loaded + skipped, Ordering::Relaxed); }
+                if let Some(p) = &progress {
+                    p.processed.store(loaded + skipped, Ordering::Relaxed);
+                }
                 continue;
             }
 
             // Filter by oneshot heuristic: must have a clear transient
             if !looks_like_oneshot(&data) {
                 skipped += 1;
-                if let Some(p) = &progress { p.processed.store(loaded + skipped, Ordering::Relaxed); }
+                if let Some(p) = &progress {
+                    p.processed.store(loaded + skipped, Ordering::Relaxed);
+                }
                 continue;
             }
 
@@ -167,7 +177,8 @@ impl SampleLibrary {
 
         // Mark progress complete before post-loop work (cache save)
         if let Some(p) = &progress {
-            p.processed.store(p.total.load(Ordering::Relaxed), Ordering::Relaxed);
+            p.processed
+                .store(p.total.load(Ordering::Relaxed), Ordering::Relaxed);
         }
 
         // Purge stale cache entries for files no longer on disk
@@ -308,6 +319,125 @@ impl SampleLibrary {
     }
 }
 
+/// Minimum length for a usable oneshot — ~46 ms at 44.1 kHz. Single-cycle
+/// wavetables (typically 32–2048 samples) fall below this; the shortest
+/// legitimate drum transients still sit comfortably above.
+const MIN_ONESHOT_SAMPLES: usize = 2048;
+
+/// Heuristic: a oneshot has a relatively high peak near the start
+/// and decays toward silence. Loops have sustained energy throughout.
+///
+/// Tuning notes:
+/// - Single-cycle waves are rejected outright by `MIN_ONESHOT_SAMPLES`.
+/// - `peak_position_ratio <= 0.6` accepts percussion whose transient is
+///   slightly delayed (ambient kicks, rimshot attack build, etc.).
+/// - `energy_ratio < 0.75` accepts drums with longer tails (808s, snares
+///   with reverb) while still rejecting sustained loops.
+/// - Very short tonal files (<150ms, flatness<0.12) are rejected as likely
+///   rendered single-cycle wavetables that slipped past the length check.
+fn looks_like_oneshot(samples: &[f32]) -> bool {
+    if samples.len() < MIN_ONESHOT_SAMPLES {
+        tracing::trace!(len = samples.len(), "reject: below min oneshot length");
+        return false;
+    }
+
+    let peak = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+    if peak < 1e-5 {
+        tracing::trace!("reject: silent file");
+        return false;
+    }
+
+    // `total_cmp`, not `partial_cmp(..).unwrap()`: a file that decodes to NaN
+    // (damaged header, unusual float encoding) would otherwise panic and take
+    // the whole scanner thread with it, leaving the scan permanently stuck at
+    // "Scanning" with no error shown.
+    let peak_idx = samples
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+
+    let peak_position_ratio = peak_idx as f32 / samples.len() as f32;
+    if peak_position_ratio > 0.6 {
+        tracing::trace!(peak_position_ratio, "reject: peak too late");
+        return false;
+    }
+
+    let quarter = samples.len() / 4;
+    let first_energy: f32 = samples[..quarter].iter().map(|s| s * s).sum::<f32>() / quarter as f32;
+    let last_energy: f32 = samples[samples.len() - quarter..]
+        .iter()
+        .map(|s| s * s)
+        .sum::<f32>()
+        / quarter as f32;
+
+    if first_energy < 1e-10 {
+        tracing::trace!("reject: no energy in first quarter");
+        return false;
+    }
+
+    let energy_ratio = last_energy / first_energy;
+    if energy_ratio >= 0.75 {
+        tracing::trace!(energy_ratio, "reject: sustained energy (loop?)");
+        return false;
+    }
+
+    // Reject very short tonal files — likely rendered single-cycle wavetables
+    // that are slightly longer than MIN_ONESHOT_SAMPLES (e.g. multi-cycle or
+    // with a gentle fade-out that sneaks past the energy decay check).
+    //
+    // Crest factor gate: a wavetable / pure tone has crest ≈ √2 (≈1.4); a
+    // percussive knock — even at a low fundamental — has crest ≥ 3 (spike
+    // then decay). Without this gate, short low-pitched knocks (Renoise
+    // slices, 808 sub-kicks, finger-on-shell hits) trip the low-ZCR check
+    // and get silently discarded despite being legitimate one-shots.
+    if samples.len() < 8192 {
+        let zcr = zero_crossing_rate(samples);
+        let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
+        let crest = peak / rms.max(1e-10);
+        // Very low ZCR (<0.05) = a few cycles of a low-freq pure tone.
+        // Combined with short length AND low crest → almost certainly a wavetable.
+        if zcr < 0.05 && crest < 3.0 {
+            tracing::trace!(
+                zcr,
+                crest,
+                len = samples.len(),
+                "reject: short tonal file (wavetable?)"
+            );
+            return false;
+        }
+        // Mid-range ZCR with very uniform energy (checked between halves,
+        // not just quarters) also suggests a looped waveform — again gated
+        // on low crest so percussive content with a pronounced transient
+        // stays accepted.
+        let half = samples.len() / 2;
+        let h1_energy: f32 = samples[..half].iter().map(|s| s * s).sum::<f32>() / half as f32;
+        let h2_energy: f32 = samples[half..].iter().map(|s| s * s).sum::<f32>() / half as f32;
+        if h1_energy > 1e-10 {
+            let half_ratio = h2_energy / h1_energy;
+            if half_ratio > 0.65 && zcr < 0.15 && crest < 3.0 {
+                tracing::trace!(half_ratio, zcr, crest, "reject: sustained tonal short file");
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+/// Fraction of adjacent sample pairs that cross zero. Range 0..0.5.
+/// High values (~0.3+) → noisy/percussive; low values (<0.1) → tonal.
+fn zero_crossing_rate(samples: &[f32]) -> f32 {
+    if samples.len() < 2 {
+        return 0.0;
+    }
+    let crossings = samples
+        .windows(2)
+        .filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0))
+        .count();
+    crossings as f32 / (samples.len() - 1) as f32
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,7 +474,11 @@ mod tests {
             };
             by_category.entry(*cat).or_default().push(sample);
         }
-        SampleLibrary { total: 10, by_category, sample_rate: 44100.0 }
+        SampleLibrary {
+            total: 10,
+            by_category,
+            sample_rate: 44100.0,
+        }
     }
 
     #[test]
@@ -403,6 +537,19 @@ mod tests {
         );
     }
 
+    /// Regression: `partial_cmp(..).unwrap()` panicked on NaN, killing the
+    /// scanner thread and leaving the UI stuck on "Scanning" forever.
+    #[test]
+    fn nan_samples_do_not_panic_the_classifier() {
+        let mut samples = vec![0.0f32; MIN_ONESHOT_SAMPLES * 2];
+        samples[10] = f32::NAN;
+        samples[20] = 1.0;
+        let _ = looks_like_oneshot(&samples);
+
+        let all_nan = vec![f32::NAN; MIN_ONESHOT_SAMPLES * 2];
+        let _ = looks_like_oneshot(&all_nan);
+    }
+
     /// A pure sustained sine at the same length and frequency — i.e. a
     /// wavetable / single-cycle-looped rendering — must still be rejected.
     /// Discriminator is crest factor: pure sine sits at √2 ≈ 1.41.
@@ -419,109 +566,4 @@ mod tests {
             "sustained 80Hz sine (wavetable shape) must be rejected"
         );
     }
-}
-
-/// Minimum length for a usable oneshot — ~46 ms at 44.1 kHz. Single-cycle
-/// wavetables (typically 32–2048 samples) fall below this; the shortest
-/// legitimate drum transients still sit comfortably above.
-const MIN_ONESHOT_SAMPLES: usize = 2048;
-
-/// Heuristic: a oneshot has a relatively high peak near the start
-/// and decays toward silence. Loops have sustained energy throughout.
-///
-/// Tuning notes:
-/// - Single-cycle waves are rejected outright by `MIN_ONESHOT_SAMPLES`.
-/// - `peak_position_ratio <= 0.6` accepts percussion whose transient is
-///   slightly delayed (ambient kicks, rimshot attack build, etc.).
-/// - `energy_ratio < 0.75` accepts drums with longer tails (808s, snares
-///   with reverb) while still rejecting sustained loops.
-/// - Very short tonal files (<150ms, flatness<0.12) are rejected as likely
-///   rendered single-cycle wavetables that slipped past the length check.
-fn looks_like_oneshot(samples: &[f32]) -> bool {
-    if samples.len() < MIN_ONESHOT_SAMPLES {
-        tracing::trace!(len = samples.len(), "reject: below min oneshot length");
-        return false;
-    }
-
-    let peak = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-    if peak < 1e-5 {
-        tracing::trace!("reject: silent file");
-        return false;
-    }
-
-    let peak_idx = samples
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
-        .map(|(i, _)| i)
-        .unwrap_or(0);
-
-    let peak_position_ratio = peak_idx as f32 / samples.len() as f32;
-    if peak_position_ratio > 0.6 {
-        tracing::trace!(peak_position_ratio, "reject: peak too late");
-        return false;
-    }
-
-    let quarter = samples.len() / 4;
-    let first_energy: f32 = samples[..quarter].iter().map(|s| s * s).sum::<f32>() / quarter as f32;
-    let last_energy: f32 = samples[samples.len() - quarter..].iter().map(|s| s * s).sum::<f32>() / quarter as f32;
-
-    if first_energy < 1e-10 {
-        tracing::trace!("reject: no energy in first quarter");
-        return false;
-    }
-
-    let energy_ratio = last_energy / first_energy;
-    if energy_ratio >= 0.75 {
-        tracing::trace!(energy_ratio, "reject: sustained energy (loop?)");
-        return false;
-    }
-
-    // Reject very short tonal files — likely rendered single-cycle wavetables
-    // that are slightly longer than MIN_ONESHOT_SAMPLES (e.g. multi-cycle or
-    // with a gentle fade-out that sneaks past the energy decay check).
-    //
-    // Crest factor gate: a wavetable / pure tone has crest ≈ √2 (≈1.4); a
-    // percussive knock — even at a low fundamental — has crest ≥ 3 (spike
-    // then decay). Without this gate, short low-pitched knocks (Renoise
-    // slices, 808 sub-kicks, finger-on-shell hits) trip the low-ZCR check
-    // and get silently discarded despite being legitimate one-shots.
-    if samples.len() < 8192 {
-        let zcr = zero_crossing_rate(samples);
-        let rms =
-            (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
-        let crest = peak / rms.max(1e-10);
-        // Very low ZCR (<0.05) = a few cycles of a low-freq pure tone.
-        // Combined with short length AND low crest → almost certainly a wavetable.
-        if zcr < 0.05 && crest < 3.0 {
-            tracing::trace!(zcr, crest, len = samples.len(), "reject: short tonal file (wavetable?)");
-            return false;
-        }
-        // Mid-range ZCR with very uniform energy (checked between halves,
-        // not just quarters) also suggests a looped waveform — again gated
-        // on low crest so percussive content with a pronounced transient
-        // stays accepted.
-        let half = samples.len() / 2;
-        let h1_energy: f32 = samples[..half].iter().map(|s| s * s).sum::<f32>() / half as f32;
-        let h2_energy: f32 = samples[half..].iter().map(|s| s * s).sum::<f32>() / half as f32;
-        if h1_energy > 1e-10 {
-            let half_ratio = h2_energy / h1_energy;
-            if half_ratio > 0.65 && zcr < 0.15 && crest < 3.0 {
-                tracing::trace!(half_ratio, zcr, crest, "reject: sustained tonal short file");
-                return false;
-            }
-        }
-    }
-
-    true
-}
-
-/// Fraction of adjacent sample pairs that cross zero. Range 0..0.5.
-/// High values (~0.3+) → noisy/percussive; low values (<0.1) → tonal.
-fn zero_crossing_rate(samples: &[f32]) -> f32 {
-    if samples.len() < 2 { return 0.0; }
-    let crossings = samples.windows(2)
-        .filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0))
-        .count();
-    crossings as f32 / (samples.len() - 1) as f32
 }

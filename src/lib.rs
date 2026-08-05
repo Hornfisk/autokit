@@ -1,9 +1,22 @@
+//! Autokit — a sample-based drum machine plugin with spectral sample analysis.
+//!
+//! This crate builds two ways from one module tree:
+//!
+//! - as a `cdylib`, exporting the VST3 and CLAP entry points at the bottom of
+//!   this file;
+//! - as an `lib` (rlib), which `src/main.rs` links against to produce the
+//!   standalone binary.
+//!
+//! Until 0.5.5 `main.rs` re-declared this entire module tree itself. That
+//! compiled the whole crate twice, reported every warning twice, and meant a
+//! new module had to be added in two places or the two builds would drift.
+
 use nih_plug::prelude::*;
 
-mod plugin;
-mod logging;
+pub mod logging;
+pub mod plugin;
 
-mod engine {
+pub mod engine {
     pub mod echo_detect;
     pub mod fx;
     pub mod kit;
@@ -13,14 +26,14 @@ mod engine {
     pub mod step_smoother;
 }
 
-mod analysis {
+pub mod analysis {
     pub mod cache;
     pub mod features;
     pub mod library;
     pub mod scanner;
 }
 
-mod ui {
+pub mod ui {
     pub mod dialogs;
     pub mod editor;
     pub mod folder_browser;
@@ -34,12 +47,13 @@ mod ui {
     pub mod waveform;
 }
 
-mod util {
+pub mod util {
     pub mod audio_file;
     pub mod config;
     pub mod default_kit;
     pub mod history;
     pub mod preset;
+    pub mod storage;
 }
 
 nih_export_vst3!(plugin::Autokit);

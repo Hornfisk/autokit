@@ -1,0 +1,58 @@
+name: CI
+
+# The release workflow only fires on `v*` tags and only builds. Until this
+# existed, nothing ran the test suite on a push — a commit that broke the
+# build or turned the tests red reached master unnoticed.
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt · clippy · test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target dir
+        uses: Swatinem/rust-cache@v2
+
+      # baseview/egui need X11, ALSA and JACK headers even to type-check.
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libx11-xcb-dev libxcb1-dev libxcb-icccm4-dev libxcb-keysyms1-dev \
+            libxcursor-dev libxkbcommon-dev libgl-dev libasound2-dev libjack-dev
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      # `-D warnings` goes after `--`, so it applies to this crate only.
+      # Putting it in RUSTFLAGS would also fail the build on warnings from
+      # dependencies, which we don't control.
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --all-features
+
+      # Compile-check the opt-in `assert_process_allocs` configuration. The
+      # unit tests don't drive `Plugin::process`, so this proves the feature
+      # still builds rather than proving the audio thread is allocation-free;
+      # that check happens by running the standalone under load.
+      - name: Build with audio-thread allocation assertions
+        run: cargo build --features strict-alloc-asserts
+
+      - name: Build release
+        run: cargo build --release

@@ -2,6 +2,115 @@
 
 All notable changes to Autokit are documented here.
 
+## [0.5.5] — unreleased
+
+A correctness and robustness pass over the whole codebase. No new features.
+
+### Fixed — crashes
+
+- **Corrupt or hand-edited pattern data could panic the audio thread.** A
+  `PatternBank` deserialized from the DAW's saved state, a preset file, or a
+  pattern file was installed without validation, and the audio thread then
+  indexed `patterns[active]`, `kit.pads[lane.pad_index]` and
+  `trigger_flags[lane.pad_index]` directly. Any out-of-range value panicked;
+  on the JACK backend that kills the process callback and leaves PipeWire
+  holding a dead client. `PatternBank::sanitize()` now runs at every
+  deserialization point and restores the pattern count, lane count, lane
+  indices, and every numeric range (including NaN), and the audio path carries
+  its own bounds guard as a backstop.
+- **`Every(0)` / `NotEvery(0)` conditional trigs divided by zero.** Not
+  reachable through the UI, which offers only N ∈ {2,4,8}, but representable
+  in JSON. Sanitized to `Always` on load, and `evaluate_condition` guards too.
+- **The reverb could panic at low sample rates.** `Comb`/`Allpass` indexed
+  their delay buffers unconditionally while `Delay` guarded, so a rate low
+  enough to truncate a tuning to zero samples panicked.
+- **The DJ filter blew up at or below 36 kHz.** Its 18 kHz maximum cutoff was
+  not clamped below Nyquist before prewarping, so `tan(π·f/sr)` went negative
+  and the state-variable filter diverged. Affected 32 kHz and 22.05 kHz hosts
+  and offline bounces.
+- **A sample decoding to NaN killed the scanner thread**, leaving the UI stuck
+  on "Scanning" with no error. The classifier now orders by `total_cmp`.
+
+### Fixed — behaviour
+
+- **The delay-time readout disagreed with the delay you heard.** The host
+  display quantized the knob with `(v·4).round()` while the audio thread used
+  `(v·3).round()`. At knob = 0.75 the readout said "1/4" while 1/8 played.
+  Both now go through one function; the knob also accepts typed values.
+- **The first undo after a library scan wiped your patterns.** The undo
+  snapshot taken when a scan completed read `Sequencer::bank`, a field nothing
+  in the audio or UI path ever wrote, so it captured an empty pattern set
+  instead of the live one. It now snapshots `SharedState::pattern_bank`.
+- **DAW state was silently never saved when the GUI won a startup race.** Both
+  threads poll for the completed scan; the flag that arms the persist timer
+  lived on the audio thread only, so if the GUI installed the scan first the
+  timer never armed. The flag is now shared.
+- **Presets, patterns and config could be destroyed by a crash mid-save.**
+  Every save used `fs::write`, which truncates before writing.
+  Standalone session state saves on a timer, so this was not a rare path.
+  All saves now write to a temporary file, fsync, and rename.
+- **Presets were written to the wrong place on macOS and Windows.** The preset
+  path helper only understood `XDG_DATA_HOME`/`HOME` and fell through to the
+  *relative* path `.local/share`, which on Windows resolved against whatever
+  directory the DAW was launched from. Platform paths now live in one module
+  shared with the config loader.
+- **The audio thread took a blocking lock when a scan completed.** Every other
+  audio-thread access uses `try_lock`; this one blocked, and the GUI holds the
+  same mutex every frame. It now retries on the next buffer instead.
+- **Compressor, limiter, delay and reverb state survived transport jumps.**
+  `Plugin::reset()` was not implemented, so seeking back to bar 1 replayed the
+  tail of wherever you just were.
+
+### Changed
+
+- **CLAP ID is now `com.hyperfocusdsp.autokit`** (was `com.rexist.autokit`),
+  matching the vendor rename. **CLAP users:** a project that already loaded
+  Autokit needs the plugin re-added once. VST3 projects are unaffected — the
+  VST3 class ID is unchanged.
+- Plugin metadata now advertises a homepage and support URL, and the CLAP
+  description no longer claims the sample classifier is "AI-powered" — it is
+  FFT feature extraction plus thresholds, which is what `Cargo.toml` always
+  said.
+- Missing sample paths from a restored preset are recorded in shared state
+  instead of being dropped with a `TODO`.
+
+### Internal
+
+- **Removed two parallel implementations of the audio path.** `VoicePool` and
+  `Sequencer` each had a shipping version and a near-copy, and the test suite
+  exercised the copies — so the four-bus FX routing introduced in 0.5.0 had no
+  test coverage at all, and the dead sequencer path had a `pad_index` bounds
+  check the live one lacked. Tests now run against the shipping code.
+- Test count 104 → 136, all against paths that actually ship.
+- `VoicePool::trigger` took 12 positional arguments including five consecutive
+  `Option<f32>`s; `process_sends` took eight `&mut [f32]`s;
+  `draw_toolbar_snapshot` took 16 arguments including five consecutive
+  `bool`s. These are now `Trigger`, `RenderBuses` and `ToolbarView`.
+- `main.rs` no longer re-declares the entire module tree — it links the
+  library. The crate was previously compiled twice.
+- Zero clippy warnings, `cargo fmt` clean, and a CI workflow that runs fmt,
+  clippy, and tests on every push. Previously nothing ran the tests outside a
+  release tag.
+
+## [0.5.4] — 2026-07-22
+
+### Changed
+
+- **Vendor renamed to Hyperfocus DSP.** `Plugin::VENDOR` and the README now
+  read "Hyperfocus DSP" instead of the previous artist alias. Hosts re-file
+  the plugin under the new vendor after a rescan.
+
+## [0.5.3] — 2026-04-20
+
+### Fixed
+
+- **Low-frequency percussive one-shots were being discarded during scans.**
+  The one-shot heuristic rejected short, low-ZCR files as likely wavetables,
+  which also caught legitimate content: Renoise-sliced knocks, 808 sub-kicks,
+  finger-on-shell hits. A crest-factor gate now distinguishes them — a pure
+  tone sits near √2 while a percussive hit spikes above 3 — so those samples
+  are accepted while rendered single-cycle waveforms are still rejected.
+
 ## [0.5.2] — 2026-04-20
 
 ### Changed

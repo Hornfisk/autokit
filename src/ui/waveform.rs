@@ -36,10 +36,7 @@ pub fn paint_waveform(
                 })
                 .collect();
 
-            painter.add(egui::Shape::line(
-                points,
-                egui::Stroke::new(1.2, color),
-            ));
+            painter.add(egui::Shape::line(points, egui::Stroke::new(1.2, color)));
         }
         _ => {
             // No sample loaded — draw a dim center line
